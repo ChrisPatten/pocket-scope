@@ -1,0 +1,28 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "pocketscope"
+version = "0.1.0"
+description = "Modular sensor ingest, processing, and visualization."
+authors = [
+    { name = "Chris Patten" }
+]
+readme = "README.md"
+requires-python = ">=3.8"
+dependencies = [
+    "pydantic",
+    "numpy",
+    "msgpack",
+]
+
+[project.optional-dependencies]
+test = ["pytest"]
+dev = ["black", "ruff", "isort", "mypy", "pre-commit"]
+
+[project.scripts]
+pocketscope = "pocketscope.__main__:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
