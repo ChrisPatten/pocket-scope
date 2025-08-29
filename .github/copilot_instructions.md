@@ -45,8 +45,7 @@ def some_function() -> None:  # Has return type
     if subscription is not None:  # Check for None first
         async for item in subscription:
             pass
-```ketScope
-
+```
 
 ## Project overview
 PocketScope is a handheld, Pi‑powered “ATC‑style” scope that decodes **1090 MHz ADS‑B** and renders a **north‑up polar (PPI)** display on a small TFT. It uses **GPS** for position/time and a **9‑axis IMU** for heading. The stack is **Python‑first** with clean architecture and ports/adapters.
@@ -89,6 +88,7 @@ PocketScope is a handheld, Pi‑powered “ATC‑style” scope that decodes **1
 - Use **pytest**; create **unit tests** for parsers/geo/fusion and **golden‑frame** tests for rendering.
 - Provide **mocks/fakes** for ADS‑B, GPS, IMU; add deterministic **playback** fixtures.
 - Favor **property‑based tests** (Hypothesis) for geometry/declutter.
+- Always run tests with timeout 10s to identify hangs.
 
 ## Performance & constraints
 - UI ≥ **5 FPS** with 20 aircraft; RF‑to‑screen median ≤ **500 ms**.

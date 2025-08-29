@@ -10,7 +10,7 @@ PocketScope is a handheld Pi-powered ATC-style scope for decoding and displaying
 - **Modular Design**: Clean separation between ingestion, processing, and visualization
 
 ### Data Sources
-- **ADS-B**: Aircraft transponder data decoding (SBS, Beast, JSON formats)
+- **ADS-B**: Aircraft transponder data decoding and file-based playback with deterministic timing
 - **GPS**: Position and navigation data (NMEA serial)
 - **IMU**: Inertial measurement unit integration (9-axis sensors)
 
@@ -136,6 +136,110 @@ next_time = replayer.next_due_monotonic()
 sim_ts.set_time(next_time)
 ```
 
+#### ADS-B File Playback (`src/pocketscope/ingest/adsb/playback_source.py`)
+Deterministic ADS-B message replay from JSONL trace files with precise timing control:
+
+**Key Features**:
+- Deterministic timing with SimTimeSource integration
+- Real-time playback with RealTimeSource
+- Speed multiplier support (e.g., 2x for faster replay)
+- Loop mode for continuous testing
+- Graceful start/stop control
+- Next event timing queries for precise simulation
+
+**File Format** (JSONL, one object per line):
+```json
+{
+  "t_mono": 0.00,
+  "msg": {
+    "icao24": "abc123",
+    "callsign": "TEST1", 
+    "lat": 40.0,
+    "lon": -74.0,
+    "baro_alt": 32000,
+    "ground_speed": 450,
+    "track_deg": 270,
+    "src": "PLAYBACK"
+  }
+}
+```
+
+**Basic Usage**:
+```python
+from pocketscope.core.events import EventBus
+from pocketscope.core.time import SimTimeSource
+from pocketscope.ingest.adsb.playback_source import FilePlaybackSource
+
+bus = EventBus()
+ts = SimTimeSource()
+source = FilePlaybackSource("trace.jsonl", ts=ts, bus=bus, speed=2.0)
+
+# Start playback in background
+task = asyncio.create_task(source.run())
+
+# For deterministic testing - advance to next event
+next_time = source.next_due_monotonic()
+if next_time:
+    ts.set_time(next_time)
+
+# Stop playback
+await source.stop()
+await task
+```
+
+**Deterministic Testing Pattern**:
+```python
+@pytest.mark.asyncio
+async def test_adsb_processing():
+    bus = EventBus()
+    ts = SimTimeSource(start=0.0)
+    source = FilePlaybackSource("test_data.jsonl", ts=ts, bus=bus)
+    
+    # Subscribe to ADS-B messages
+    sub = bus.subscribe("adsb.msg")
+    received = []
+    
+    async def collector():
+        async for env in sub:
+            msg_dict = unpack(env.payload)
+            received.append((ts.monotonic(), msg_dict["icao24"]))
+    
+    collector_task = asyncio.create_task(collector())
+    playback_task = asyncio.create_task(source.run())
+    
+    # Deterministic event processing
+    while True:
+        next_due = source.next_due_monotonic()
+        if next_due is None:
+            break
+        ts.set_time(next_due)
+        await asyncio.sleep(0)  # Process events
+    
+    await playback_task
+    await sub.close()
+    collector_task.cancel()
+    
+    # Verify deterministic timing
+    assert received[0] == (0.0, "abc123")
+    assert received[1] == (0.4, "def456")
+```
+
+**Real-time Playback**:
+```python
+from pocketscope.core.time import RealTimeSource
+
+ts = RealTimeSource()
+source = FilePlaybackSource(
+    "flight_trace.jsonl", 
+    ts=ts, 
+    bus=bus, 
+    speed=1.0,  # Real-time speed
+    loop=True   # Continuous playback
+)
+
+await source.run()  # Runs until stopped
+```
+
 ### Project Structure
 
 ```
@@ -150,6 +254,7 @@ src/pocketscope/
 │   └── domain/             # Domain logic (planned)
 ├── ingest/                 # Data ingestion modules
 │   ├── adsb/               # ADS-B transponder data
+│   │   └── playback_source.py  # File-based ADS-B replay
 │   ├── gps/                # GPS/GNSS data
 │   └── imu/                # Inertial measurement data
 ├── platform/               # Hardware abstraction
@@ -304,6 +409,46 @@ Key configuration sections:
 
 ## Usage Examples
 
+### ADS-B File Playback
+```python
+import asyncio
+from pocketscope.core.events import EventBus, unpack
+from pocketscope.core.time import SimTimeSource
+from pocketscope.ingest.adsb.playback_source import FilePlaybackSource
+
+async def main():
+    bus = EventBus()
+    ts = SimTimeSource(start=0.0)
+    
+    # Subscribe to ADS-B messages
+    adsb_sub = bus.subscribe("adsb.msg")
+    
+    async def process_aircraft():
+        async for envelope in adsb_sub:
+            aircraft = unpack(envelope.payload)
+            print(f"Aircraft {aircraft['icao24']} at ({aircraft['lat']}, {aircraft['lon']})")
+    
+    # Start ADS-B playback from file
+    source = FilePlaybackSource("aircraft_trace.jsonl", ts=ts, bus=bus, speed=2.0)
+    processor = asyncio.create_task(process_aircraft())
+    playback = asyncio.create_task(source.run())
+    
+    # Advance simulation time to process events
+    while True:
+        next_due = source.next_due_monotonic()
+        if next_due is None:
+            break
+        ts.set_time(next_due)
+        await asyncio.sleep(0)  # Process events
+    
+    await playback
+    await bus.close()
+    await processor
+
+if __name__ == "__main__":
+    asyncio.run(main())
+```
+
 ### Basic Event Processing
 ```python
 import asyncio
@@ -378,6 +523,34 @@ async def test_timed_processing():
 
 ## File Formats
 
+### ADS-B Trace Format (JSONL)
+ADS-B trace files use JSONL format (one JSON object per line) with the following schema:
+```json
+{
+  "t_mono": 12.345,
+  "msg": {
+    "icao24": "abc123",
+    "callsign": "UAL123",
+    "lat": 40.7128,
+    "lon": -74.0060,
+    "baro_alt": 35000,
+    "ground_speed": 450,
+    "track_deg": 270,
+    "src": "PLAYBACK"
+  }
+}
+```
+
+- `t_mono`: Monotonic timestamp in seconds (relative to trace start)
+- `msg`: ADS-B message object with aircraft data
+  - `icao24`: 24-bit ICAO aircraft identifier (required)
+  - `callsign`: Aircraft callsign (optional)
+  - `lat`/`lon`: Latitude/longitude in decimal degrees (optional)
+  - `baro_alt`: Barometric altitude in feet (optional)
+  - `ground_speed`: Ground speed in knots (optional)
+  - `track_deg`: Track angle in degrees (optional)
+  - `src`: Data source identifier (optional)
+
 ### JSONL Event Format
 Events are recorded in JSONL format with the following schema:
 ```json
@@ -429,15 +602,16 @@ MIT License - see LICENSE file for details.
 
 ## Project Status
 
-**Current State**: Core infrastructure complete
+**Current State**: Core infrastructure and ADS-B ingestion complete
 - ✅ Event bus with backpressure handling
 - ✅ Time abstraction for deterministic testing
 - ✅ Record/replay system with JSONL format
+- ✅ ADS-B file playback with deterministic timing
 - ✅ Comprehensive test suite
 - ✅ Development tooling and quality checks
 
 **Next Steps**:
-- ADS-B decoder implementation
+- Live ADS-B decoder implementation (SBS, Beast formats)
 - GPS/IMU integration
 - Display rendering pipeline
 - Hardware platform drivers
