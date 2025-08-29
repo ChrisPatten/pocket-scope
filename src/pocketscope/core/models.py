@@ -1,10 +1,9 @@
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Literal, Optional, Tuple, List, Dict
+from typing import Dict, List, Literal, Optional, Tuple
 
 from pydantic import BaseModel, Field, field_validator
-
 
 AdsbSrc = Literal["SBS", "BEAST", "JSON", "PLAYBACK"]
 
@@ -114,7 +113,8 @@ class AircraftTrack(BaseModel):
     last_ts: datetime
     history: List[HistoryPoint] = Field(default_factory=list)
     state: Dict[str, object] = Field(
-        default_factory=dict, description="Arbitrary derived state (heading, gs, vs, flags)"
+        default_factory=dict,
+        description="Arbitrary derived state (heading, gs, vs, flags)",
     )
 
     @field_validator("icao24")

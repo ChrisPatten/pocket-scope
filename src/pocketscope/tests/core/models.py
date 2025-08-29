@@ -1,19 +1,15 @@
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timedelta, timezone
 
 import pytest
-from pocketscope.core.models import (
-    AdsbMessage,
-    GpsFix,
-    ImuSample,
-    AircraftTrack,
-)
+
+from pocketscope.core.models import AdsbMessage, AircraftTrack, GpsFix, ImuSample
 
 
 def _ts(n: int = 0) -> datetime:
     return datetime.now(timezone.utc) + timedelta(seconds=n)
 
 
-def test_adsb_message_valid():
+def test_adsb_message_valid() -> None:
     m = AdsbMessage(
         ts=_ts(),
         icao24="a1b2c3",
@@ -34,7 +30,7 @@ def test_adsb_message_valid():
     assert m2.src == "SBS"
 
 
-def test_adsb_message_bad_icao():
+def test_adsb_message_bad_icao() -> None:
     with pytest.raises(ValueError):
         AdsbMessage(
             ts=_ts(),
@@ -51,7 +47,7 @@ def test_adsb_message_bad_icao():
         )
 
 
-def test_gpsfix_roundtrip():
+def test_gpsfix_roundtrip() -> None:
     g = GpsFix(ts=_ts(), lat=51.5, lon=-0.12, alt_m=35.0, speed_mps=3.1)
     js = g.model_dump_json()
     g2 = GpsFix.model_validate_json(js)
@@ -59,7 +55,7 @@ def test_gpsfix_roundtrip():
     assert g2.speed_mps == pytest.approx(3.1)
 
 
-def test_imu_sample_create():
+def test_imu_sample_create() -> None:
     s = ImuSample(
         ts=_ts(),
         ax=0.0,
@@ -75,7 +71,7 @@ def test_imu_sample_create():
     assert s.az == pytest.approx(9.81)
 
 
-def test_aircraft_track_history_and_state():
+def test_aircraft_track_history_and_state() -> None:
     t = AircraftTrack(icao24="abc123", last_ts=_ts())
     p1 = (_ts(1), 40.0, -74.0, 32000.0)
     p2 = (_ts(2), 40.1, -74.1, 32100.0)
