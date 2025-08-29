@@ -113,6 +113,9 @@ async def test_concurrent_publishers() -> None:
     async def producer(n: int, count: int) -> None:
         for i in range(count):
             await bus.publish("x", pack((n, i)))
+            # Yield control periodically to allow consumer to run
+            if i % 5 == 0:
+                await asyncio.sleep(0)
 
     outputs: list[tuple[int, int]] = []
 
@@ -122,10 +125,20 @@ async def test_concurrent_publishers() -> None:
 
     pcount = 5
     per = 50
-    tasks = [asyncio.create_task(producer(n, per)) for n in range(pcount)]
+
+    # Start consumer task first to ensure it gets scheduled
     ct = asyncio.create_task(consumer())
 
+    # Give consumer a chance to start
+    await asyncio.sleep(0)
+
+    # Create and run producer tasks
+    tasks = [asyncio.create_task(producer(n, per)) for n in range(pcount)]
+
+    # Wait for all producers to finish
     await asyncio.gather(*tasks)
+
+    # Close bus and wait for consumer to finish
     await bus.close()
     await ct
 

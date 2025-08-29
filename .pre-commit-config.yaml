@@ -28,3 +28,13 @@ repos:
           - pytest>=7.0
           - msgpack-types>=0.2
         args: ["--strict"]
+
+  - repo: local
+    hooks:
+      - id: pytest
+        name: Run tests
+        entry: pytest
+        language: system
+        pass_filenames: false
+        always_run: true
+        args: ["-ra", "-q", "src/pocketscope/tests"]

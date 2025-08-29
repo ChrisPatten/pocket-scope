@@ -116,14 +116,22 @@ class EventBus:
                 queue = asyncio.Queue(maxsize=state.maxsize)
                 state.subscribers.append(queue)
 
-        # Register synchronously by running the coroutine in the current loop.
-        # This function isn't async by design; use run_until_complete-like approach.
-        # If no running loop, create a temporary one.
+        # Register synchronously by running the coroutine.
+        # If we're in an async context, we can't use the normal sync-over-async patterns
+        # that would cause deadlocks. Instead, we'll make this work synchronously.
         try:
-            loop = asyncio.get_running_loop()
-            # Schedule and wait synchronously using a Future barrier.
-            fut = asyncio.run_coroutine_threadsafe(_register(), loop)
-            fut.result()
+            asyncio.get_running_loop()
+            # We're in an async context - we can't use typical sync-over-async patterns
+            # Instead, create the subscription directly without async operations
+
+            # This is a simplified synchronous version of _register()
+            state = self._topics.get(topic)
+            if state is None:
+                state = _TopicState(self._default_maxsize)
+                self._topics[topic] = state
+            queue = asyncio.Queue(maxsize=state.maxsize)
+            state.subscribers.append(queue)
+
         except RuntimeError:
             # No running loop; create a new loop just to register.
             asyncio.run(_register())
@@ -181,21 +189,33 @@ class EventBus:
         async with self._lock:
             for state in self._topics.values():
                 for q in list(state.subscribers):
-                    # Ensure we can insert sentinel even if full.
-                    if q.full():
+                    # Use a more careful approach to avoid dropping user messages
+                    # when inserting the sentinel
+                    sentinel_added = False
+
+                    # Try to add sentinel without dropping messages
+                    if not q.full():
                         try:
-                            _ = q.get_nowait()
-                        except asyncio.QueueEmpty:
-                            pass
-                    try:
-                        q.put_nowait(_Sentinel)
-                    except asyncio.QueueFull:
-                        # Try one more time after drop
-                        try:
-                            _ = q.get_nowait()
                             q.put_nowait(_Sentinel)
-                        except Exception:
+                            sentinel_added = True
+                        except asyncio.QueueFull:
                             pass
+
+                    # If queue is full, we need to ensure the sentinel gets in
+                    # We'll temporarily bypass the limit by manipulating the
+                    # internal deque
+                    if not sentinel_added:
+                        try:
+                            # Access the internal deque to add sentinel without
+                            # size check. This is safer than modifying _maxsize
+                            q._queue.append(_Sentinel)  # type: ignore
+                        except Exception:
+                            # Fallback: drop one message as last resort
+                            try:
+                                _ = q.get_nowait()
+                                q.put_nowait(_Sentinel)
+                            except Exception:
+                                pass
 
     def metrics(self) -> BusMetrics:
         """Return per-topic metrics snapshot."""
@@ -290,12 +310,20 @@ class Subscription:
         self._closed = True
         # Signal iterator to stop if it's awaiting
         try:
-            if self._queue.full():
+            if not self._queue.full():
+                self._queue.put_nowait(_Sentinel)
+            else:
+                # Queue is full - add sentinel without dropping user messages
                 try:
-                    _ = self._queue.get_nowait()
-                except asyncio.QueueEmpty:
-                    pass
-            self._queue.put_nowait(_Sentinel)
+                    # Access the internal deque to add sentinel without size check
+                    self._queue._queue.append(_Sentinel)  # type: ignore
+                except Exception:
+                    # Fallback: drop one message as last resort
+                    try:
+                        _ = self._queue.get_nowait()
+                        self._queue.put_nowait(_Sentinel)
+                    except Exception:
+                        pass
         except asyncio.QueueFull:
             # Last resort: ignore
             pass
