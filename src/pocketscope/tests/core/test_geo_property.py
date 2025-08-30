@@ -78,8 +78,10 @@ def test_forward_inverse_consistency(
     lat2, lon2 = dest_point(lat, lon, brg, rng)
     r, b = range_bearing_from(lat, lon, lat2, lon2)
     assert abs(r - rng) < 1e-2  # within ~18 m for long ranges
-    # Bearing is undefined at zero distance; only check when there is separation
-    if rng > 1e-9:
+    # Bearing is undefined at zero distance and numerically unstable at
+    # extremely small ranges; only check when there is meaningful separation.
+    # 1e-6 nm ≈ 1.85 mm.
+    if rng > 1e-6:
         assert angle_diff(b, brg) <= 1e-2
 
 

@@ -28,17 +28,20 @@ from __future__ import annotations
 import argparse
 import asyncio
 from collections.abc import Iterable
-from typing import Optional, Sequence
+from pathlib import Path
+from typing import Protocol
 
 from pocketscope.core.events import EventBus
 from pocketscope.core.geo import ecef_to_enu, geodetic_to_ecef
 from pocketscope.core.models import AircraftTrack
 from pocketscope.core.time import RealTimeSource
 from pocketscope.core.tracks import TrackService
-from pocketscope.data.airports import Airport, load_airports_json, nearest_airports
+from pocketscope.data.airports import load_airports_json
 from pocketscope.ingest.adsb.json_source import Dump1090JsonSource
+from pocketscope.ingest.adsb.playback_source import FilePlaybackSource
 from pocketscope.platform.display.pygame_backend import PygameDisplayBackend
 from pocketscope.render.view_ppi import PpiView, TrackSnapshot
+from pocketscope.ui.controllers import UiConfig, UiController
 
 
 def _make_snapshots(
@@ -96,49 +99,28 @@ def _make_snapshots(
     return out
 
 
-async def render_loop(
-    display: PygameDisplayBackend,
-    view: PpiView,
-    tracks_service: TrackService,
-    *,
-    center_lat: float,
-    center_lon: float,
-    range_nm: float,
-    airports_all: Optional[Sequence[Airport]] = None,
-) -> None:
-    # Fixed 30 FPS
-    dt = 1.0 / 30.0
-    while True:
-        canvas = display.begin_frame()
-        # Snapshot tracks and draw
-        active = tracks_service.list_active()
-        snapshots = _make_snapshots(active, center_lat, center_lon)
-        view.range_nm = range_nm
-        # Determine nearby airports (optional)
-        airports_arg = None
-        if view.show_airports and airports_all:
-            nearby = nearest_airports(
-                center_lat, center_lon, airports_all, max_nm=range_nm, k=50
-            )
-            airports_arg = [(ap.lat, ap.lon, ap.ident) for ap in nearby]
-
-        view.draw(
-            canvas,
-            size_px=display.size(),
-            center_lat=center_lat,
-            center_lon=center_lon,
-            tracks=snapshots,
-            airports=airports_arg,
-        )
-        display.end_frame()
-        await asyncio.sleep(dt)
+def _print_help() -> None:
+    print("Keys: [ / - = zoom out, ] / = zoom in, o overlay, q/ESC quit")
 
 
 async def main_async(args: argparse.Namespace) -> None:
     ts = RealTimeSource()
     bus = EventBus()
     tracks = TrackService(bus, ts)
-    src = Dump1090JsonSource(args.url, bus=bus, poll_hz=5.0)
+
+    # Source selection
+    class _Source(Protocol):
+        async def run(self) -> None:
+            ...
+
+        async def stop(self) -> None:
+            ...
+
+    src: _Source
+    if args.playback:
+        src = FilePlaybackSource(args.playback, ts=ts, bus=bus, speed=1.0, loop=True)
+    else:
+        src = Dump1090JsonSource(args.url, bus=bus, poll_hz=5.0)
 
     # Open a window (portrait)
     display = PygameDisplayBackend(size=(480, 800), create_window=True)
@@ -146,38 +128,72 @@ async def main_async(args: argparse.Namespace) -> None:
         show_data_blocks=not bool(args.simple),
         label_font_px=args.block_font_px,
         label_line_gap_px=args.block_line_gap_px,
-        show_airports=args.show_airports,
     )
 
-    # Load airports if requested
-    airports_all: Optional[list[Airport]] = None
-    if args.show_airports:
-        if args.airports_json:
-            try:
-                airports_all = load_airports_json(args.airports_json)
-            except Exception as e:
-                print(f"[live_view] Failed to load airports: {e}")
-        else:
-            print(
-                (
-                    "[live_view] --show-airports is set but no --airports-json "
-                    "provided; overlay disabled"
-                )
-            )
+    airports = None
+    airports_path: str | None = None
+    if args.airports:
+        airports_path = args.airports
+    else:
+        # Try workspace sample_data/airports.json automatically
+        try_default1 = (
+            Path(__file__).resolve().parents[3] / "sample_data" / "airports.json"
+        )
+        try_default2 = Path.cwd() / "sample_data" / "airports.json"
+        if try_default1.exists():
+            airports_path = str(try_default1)
+        elif try_default2.exists():
+            airports_path = str(try_default2)
 
-    await asyncio.gather(
-        src.run(),
-        tracks.run(),
-        render_loop(
-            display,
-            view,
-            tracks,
-            center_lat=args.center[0],
-            center_lon=args.center[1],
-            range_nm=args.range,
-            airports_all=airports_all,
-        ),
+    if airports_path:
+        try:
+            aps = load_airports_json(airports_path)
+            airports = [(ap.lat, ap.lon, ap.ident) for ap in aps]
+        except Exception as e:
+            print(f"[live_view] Failed to load airports: {e}")
+
+    ui = UiController(
+        display=display,
+        view=view,
+        bus=bus,
+        ts=ts,
+        tracks=tracks,
+        cfg=UiConfig(range_nm=float(args.range), overlay=True, target_fps=30.0),
+        center_lat=float(args.center[0]),
+        center_lon=float(args.center[1]),
+        airports=airports,
     )
+
+    _print_help()
+    # Start track maintenance (spawns internal tasks and returns immediately).
+    await tracks.run()
+
+    # Run UI and source concurrently; stop others when one exits.
+    src_task = asyncio.create_task(src.run(), name="adsb_source")
+    ui_task = asyncio.create_task(ui.run(), name="ui")
+    try:
+        done, pending = await asyncio.wait(
+            {src_task, ui_task}, return_when=asyncio.FIRST_COMPLETED
+        )
+
+        # If UI finished (user quit), stop source and tracks.
+        if ui_task in done:
+            await src.stop()
+            await tracks.stop()
+        # If source finished first (error or end), stop UI as well.
+        if src_task in done:
+            await ui.stop()
+
+        # Await remaining tasks and swallow exceptions to ensure cleanup.
+        await asyncio.gather(*pending, return_exceptions=True)
+    finally:
+        # Best-effort final cleanup.
+        await tracks.stop()
+        await src.stop()
+        for t in (src_task, ui_task):
+            if not t.done():
+                t.cancel()
+        await asyncio.gather(src_task, ui_task, return_exceptions=True)
 
 
 def parse_args() -> argparse.Namespace:
@@ -186,6 +202,12 @@ def parse_args() -> argparse.Namespace:
         "--url",
         default="https://adsb.chrispatten.dev/data/aircraft.json",
         help="dump1090 aircraft.json URL",
+    )
+    p.add_argument(
+        "--playback",
+        type=str,
+        default=None,
+        help="Path to JSONL ADS-B trace for local playback (overrides --url)",
     )
     p.add_argument(
         "--center",
@@ -212,22 +234,19 @@ def parse_args() -> argparse.Namespace:
         help="Data block font size in px (default: 12)",
     )
     p.add_argument(
-        "--show-airports",
-        action="store_true",
-        help="Overlay nearby airport markers and idents",
-    )
-    p.add_argument(
-        "--airports-json",
-        dest="airports_json",
-        default="None",
-        help="Path to airports JSON file (array of {identifier, lat, lon})",
-    )
-    p.add_argument(
         "--block-line-gap-px",
         dest="block_line_gap_px",
         type=int,
         default=-5,
         help="Additional gap between data block lines in px (default: -5)",
+    )
+    p.add_argument(
+        "--airports",
+        type=str,
+        default=None,
+        help=(
+            "Path to airports.json; defaults to sample_data/airports.json if present"
+        ),
     )
     return p.parse_args()
 

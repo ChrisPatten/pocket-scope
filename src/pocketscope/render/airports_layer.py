@@ -52,6 +52,7 @@ class AirportsLayer:
         range_nm: float,
         airports: Sequence[Airport],
         screen_size: tuple[int, int],
+        rotation_deg: float = 0.0,
     ) -> None:
         """Render airport markers and labels.
 
@@ -73,7 +74,18 @@ class AirportsLayer:
         def to_screen(lat: float, lon: float) -> tuple[int, int]:
             tx, ty, tz = geodetic_to_ecef(lat, lon, 0.0)
             e, n, _ = ecef_to_enu(tx, ty, tz, center_lat, center_lon, 0.0)
-            x, y = enu_to_screen(e, n, m_per_px)
+            if (rotation_deg % 360.0) == 0.0:
+                x, y = enu_to_screen(e, n, m_per_px)
+            else:
+                from math import cos as _cos
+                from math import radians as _radians
+                from math import sin as _sin
+
+                phi = -_radians(rotation_deg)
+                ce, se = _cos(phi), _sin(phi)
+                er = e * ce - n * se
+                nr = e * se + n * ce
+                x, y = enu_to_screen(er, nr, m_per_px)
             return int(round(cx + x)), int(round(cy + y))
 
         # Simple fixed-size square via polyline (pygame backend supports this well)

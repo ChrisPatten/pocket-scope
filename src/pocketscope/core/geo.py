@@ -47,8 +47,9 @@ def _normalize_lon(lon_deg: float) -> float:
     lon = (lon_deg + 180.0) % 360.0 - 180.0
     # Handle the case where lon == -180.0; keep in range [-180,180)
     if lon == -180.0:
-        return 180.0 - 360.0  # -180.0 remains -180.0
-    return lon
+        lon = -180.0
+    # Round to reduce downstream floating noise and improve wrap invariance
+    return round(lon, 12)
 
 
 def _normalize_bearing(brg_deg: float) -> float:
@@ -99,7 +100,10 @@ def initial_bearing_deg(lat1: float, lon1: float, lat2: float, lon2: float) -> f
 
     phi1 = radians(lat1)
     phi2 = radians(lat2)
-    dlambda = radians(_normalize_lon(lon2) - _normalize_lon(lon1))
+    # Compute longitudes in radians separately to reduce cancellation error
+    lam1 = radians(_normalize_lon(lon1))
+    lam2 = radians(_normalize_lon(lon2))
+    dlambda = lam2 - lam1
 
     x = sin(dlambda) * cos(phi2)
     y = cos(phi1) * sin(phi2) - sin(phi1) * cos(phi2) * cos(dlambda)

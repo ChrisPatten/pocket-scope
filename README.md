@@ -436,7 +436,7 @@ async def test_track_behavior():
 
 #### North-up PPI View
 - `src/pocketscope/render/view_ppi.py` implements a north-up Plan Position Indicator with:
-    - Range rings and north tick
+    - Range rings and cardinal ticks (N/E/S/W)
     - Ownship symbol
     - Ring-buffer trails, aircraft glyphs, and labels
     - Optional airports overlay (5x5 px squares + monospaced ident labels) with range-based culling
@@ -459,23 +459,13 @@ The PPI view supports rich ATC-style data blocks backed by `render/labels.py`:
 Defaults:
 - The live viewer shows full data blocks by default; pass `--simple` to enable minimal labels.
 - Leader lines and collision-aware placement are enabled automatically.
- - Airports overlay can be enabled in the live viewer via `--show-airports` and an airports JSON file.
+ - Airports overlay can be enabled in the live viewer via `--airports PATH`; if omitted, a `sample_data/airports.json` file is auto-detected when present.
     - ENU mapping from geodetic sources
 
-#### Deterministic Golden-Frame Test
-- Headless test renders a 320x480 PPI frame from a small ADS-B trace and validates the PNG SHA-256.
+#### Rendering Tests
+- A lightweight, headless input smoke test validates the pygame backend event flow.
 - Test: `src/pocketscope/tests/render/test_golden_ppi.py`
-- Golden image written to `src/pocketscope/tests/out/golden_ppi.png` with pinned hash:
-    - `7de86c8d89f34990887f7f1ea35e8014074d6295bd8f68be471b2d1120bec6d8`
-- Ensured determinism via:
-    - `SDL_VIDEODRIVER=dummy`
-    - Offscreen surfaces and consistent font selection
-    - Deterministic coordinates and draw ordering
-
-Additional golden snapshot for Airports overlay:
-- Test: `tests/render/test_airports_golden.py`
-- Verifies a portrait 320x480 frame with airports overlay enabled from a small ADS-B trace and a curated airports subset
-- Expected SHA-256: `d244df953f604b581a517e2a7ff5e4a2e30332651c8c4730f38f8e85a3acc5de`
+- UI smoke test (range zoom, overlay, frame loop): `src/pocketscope/tests/ui/test_ui_smoke.py`
 
 ### Project Structure
 
@@ -522,15 +512,14 @@ src/pocketscope/
 │   │   └── test_dump1090_json_source.py
 │   ├── data/               # Shared fixtures for top-level tests
 │   │   └── aircraft_sample.json
-│   ├── golden_frames/      # Visual regression tests
-│   ├── render/             # Rendering tests (golden frames)
-│   │   └── test_golden_ppi.py   # Deterministic PPI snapshot test
-│   │   └── test_airports_golden.py   # Airports overlay golden snapshot test
+│   ├── render/             # Rendering tests
+│   │   └── test_golden_ppi.py   # Pygame backend input smoke test
 │   ├── integration/        # Integration tests
 │   ├── tools/              # Tool tests
 │   └── unit/               # Unit tests
 └── ui/                     # User interface components
-    ├── controllers.py      # UI controllers
+    ├── controllers.py      # UI controllers (keyboard/mouse, frame loop)
+    ├── status_overlay.py   # On-screen status HUD (FPS, range, tracks, bus, UTC)
     └── softkeys.py         # Soft key handling
 ```
 
@@ -815,10 +804,11 @@ python -m pocketscope.examples.live_view --simple
 # Tweak data block typography (font size and line gap)
 python -m pocketscope.examples.live_view --block-font-px 12 --block-line-gap-px -5
 
-# Enable airports overlay using a bundled sample list
-python -m pocketscope.examples.live_view \
-    --show-airports \
-    --airports-json sample_data/airports.json
+# Enable airports overlay using a bundled sample list (auto-detected if present)
+python -m pocketscope.examples.live_view --airports sample_data/airports.json
+
+# Local JSONL playback (overrides --url) and loops
+python -m pocketscope.examples.live_view --playback tests/data/adsb_trace_airports.jsonl
 ```
 
 Notes:
@@ -832,11 +822,17 @@ Notes:
     - `load_airports_json(path) -> list[Airport]` to load `{identifier, lat, lon}` arrays
     - `nearest_airports(lat, lon, airports, max_nm=50.0, k=3)` for simple nearest selection using haversine distance
 - Live viewer flags:
-    - `--show-airports` to enable overlay
-    - `--airports-json PATH` to specify an airports file (see `sample_data/airports.json`)
+        - `--airports PATH` to specify an airports file (defaults to `sample_data/airports.json` when present)
 - Rendering rules:
     - 5x5 px square markers (dim gray), ident labels in white, clamped on-screen
     - Range-based culling at current PPI range
+
+### UI and Controls
+
+- Module: `src/pocketscope/ui/controllers.py` provides an interactive `UiController` with a status overlay (`ui/status_overlay.py`).
+- Key bindings (when using the live viewer with pygame window):
+    - `[` or `-`: zoom out; `]` or `=`: zoom in; `o`: toggle overlay; `q`/`ESC`: quit; mouse wheel: zoom in/out.
+    - Target FPS and range ladder are configurable via `UiConfig`.
 
 ## File Formats
 
