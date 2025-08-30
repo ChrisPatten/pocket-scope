@@ -8,7 +8,7 @@ PocketScope is a handheld Pi-powered ATC-style scope for decoding and displaying
 - **Event-Driven System**: Async EventBus with bounded queues and backpressure handling
 - **Time Abstraction**: Deterministic testing support with SimTimeSource and RealTimeSource
 - **Modular Design**: Clean separation between ingestion, processing, and visualization
- - **Rendering/UI**: Framework-agnostic Canvas API, Pygame display/input backends, and deterministic golden-frame tests
+ - **Rendering/UI**: Framework-agnostic Canvas API, Pygame display/input backends, ATC-style data blocks, and deterministic golden-frame tests
 
 ### Data Sources
 - **ADS-B**: File-based playback with deterministic timing and live polling of dump1090 `aircraft.json`
@@ -437,7 +437,26 @@ async def test_track_behavior():
 - `src/pocketscope/render/view_ppi.py` implements a north-up Plan Position Indicator with:
     - Range rings and north tick
     - Ownship symbol
-    - Ring-buffer trails, aircraft glyphs, and labels
+        - Ring-buffer trails, aircraft glyphs, and labels
+        - ATC-style three-line data blocks with leader lines (default)
+
+##### ATC-style Data Blocks
+The PPI view supports rich ATC-style data blocks backed by `render/labels.py`:
+
+- Formatting (`DataBlockFormatter`):
+    - Three fixed lines in the standard mode (default):
+        1) CALLSIGN or ICAO24 (uppercased)
+        2) Altitude in hundreds of feet, zero-padded to 3 digits, using geometric altitude if present else barometric; suffix “+” if climb rate > +500 fpm, “-” if < -500 fpm
+        3) Bearing from ownship (0..359, 3 digits) and speed in tens of knots (2 digits)
+- Layout (`DataBlockLayout`):
+    - Places blocks near aircraft with leader lines to the nearest block edge
+    - Collision avoidance by nudging outward in a small spiral while clamping on screen
+- Typography controls: font size and inter-line gap are configurable
+- Simple label mode: fall back to a minimal one-line label near the glyph
+
+Defaults:
+- The live viewer shows full data blocks by default; pass `--simple` to enable minimal labels.
+- Leader lines and collision-aware placement are enabled automatically.
     - ENU mapping from geodetic sources
 
 #### Deterministic Golden-Frame Test
@@ -766,11 +785,17 @@ Module: `src/pocketscope/examples/live_view.py`
 Usage:
 
 ```bash
-# Basic: connect to local dump1090 and show a 60 NM PPI centered at 42.0, -71.0
+# Basic: connect to local dump1090 and show a 60 NM PPI centered at 42.0,-71.0
 python -m pocketscope.examples.live_view \
     --url http://127.0.0.1:8080/data/aircraft.json \
-    --center 42.0 -71.0 \
+    --center 42.0,-71.0 \
     --range 60
+
+# Show minimal one-line labels instead of full data blocks
+python -m pocketscope.examples.live_view --simple
+
+# Tweak data block typography (font size and line gap)
+python -m pocketscope.examples.live_view --block-font-px 12 --block-line-gap-px -5
 ```
 
 Notes:
@@ -784,16 +809,16 @@ ADS-B trace files use JSONL format (one JSON object per line) with the following
 ```json
 {
   "t_mono": 12.345,
-  "msg": {
-    "icao24": "abc123",
-    "callsign": "UAL123",
-    "lat": 40.7128,
-    "lon": -74.0060,
-    "baro_alt": 35000,
-    "ground_speed": 450,
-    "track_deg": 270,
-    "src": "PLAYBACK"
-  }
+    "msg": {
+        "icao24": "abc123",
+        "callsign": "UAL123",
+        "lat": 40.7128,
+        "lon": -74.0060,
+        "baro_alt": 35000,
+        "ground_speed": 450,
+        "track_deg": 270,
+        "src": "PLAYBACK"
+    }
 }
 ```
 
