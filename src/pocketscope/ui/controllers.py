@@ -92,6 +92,11 @@ class UiController:
         # FPS tracking (EMA)
         self._prev_frame_t: Optional[float] = None
         self._fps_avg: float = cfg.target_fps
+        # View orientation (degrees, 0 = North-up, clockwise positive)
+        try:
+            self._rotation_deg: float = float(getattr(self._view, "rotation_deg", 0.0))
+        except Exception:
+            self._rotation_deg = 0.0
 
     async def run(self) -> None:
         self._running = True
@@ -114,6 +119,9 @@ class UiController:
                 # Render frame
                 canvas = self._display.begin_frame()
                 self._view.range_nm = float(self._cfg.range_nm)
+                # Apply rotation to view each frame
+                if hasattr(self._view, "rotation_deg"):
+                    self._view.rotation_deg = float(self._rotation_deg) % 360.0
                 self._view.draw(
                     canvas,
                     size_px=self._display.size(),
@@ -166,6 +174,14 @@ class UiController:
     def toggle_overlay(self) -> None:
         self._cfg.overlay = not self._cfg.overlay
 
+    def rotate_left(self, step_deg: float = 5.0) -> None:
+        """Rotate view counter-clockwise (left arrow)."""
+        self._rotation_deg = (self._rotation_deg - float(step_deg)) % 360.0
+
+    def rotate_right(self, step_deg: float = 5.0) -> None:
+        """Rotate view clockwise (right arrow)."""
+        self._rotation_deg = (self._rotation_deg + float(step_deg)) % 360.0
+
     # Internals ----------------------------------------------------------
     def _process_input(self) -> None:
         if pg is None:
@@ -179,6 +195,10 @@ class UiController:
                     self.zoom_out()
                 elif key in (pg.K_RIGHTBRACKET, pg.K_EQUALS):
                     self.zoom_in()
+                elif key == pg.K_LEFT:
+                    self.rotate_left()
+                elif key == pg.K_RIGHT:
+                    self.rotate_right()
                 elif key == pg.K_o:
                     self.toggle_overlay()
                 elif key in (pg.K_q, pg.K_ESCAPE):

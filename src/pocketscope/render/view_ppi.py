@@ -73,6 +73,7 @@ class PpiView:
         self,
         *,
         range_nm: float = 10.0,
+        rotation_deg: float = 0.0,
         show_data_blocks: bool = False,
         show_simple_labels: bool = True,
         show_text_annotations: bool = True,
@@ -82,6 +83,8 @@ class PpiView:
         label_block_pad_px: int = 2,
     ) -> None:
         self.range_nm = float(range_nm)
+        # Optional view rotation used only for the north tick; 0 keeps legacy behavior
+        self.rotation_deg = float(rotation_deg) % 360.0
         self.show_data_blocks = bool(show_data_blocks)
         self.show_simple_labels = bool(show_simple_labels)
         self.show_text_annotations = bool(show_text_annotations)
@@ -102,7 +105,6 @@ class PpiView:
         airports: Optional[Sequence[Tuple[float, float, str]]] = None,
     ) -> None:
         """Draw the PPI view contents.
-
         - Deterministic: draws tracks sorted by (callsign, icao), optional text
           annotations and simple labels can be disabled for golden tests.
         """
@@ -113,7 +115,6 @@ class PpiView:
         radius_px = int(min(w, h) // 2) - 6
         if radius_px < 10:
             radius_px = 10
-
         # Compute meters per pixel from range_nm
         meters_per_nm = 1852.0
         range_m = self.range_nm * meters_per_nm
@@ -137,11 +138,37 @@ class PpiView:
                     color=ColorLabels,
                 )
 
-        # North tick
-        top_y = cy - radius_px
-        canvas.line((cx, top_y), (cx, top_y + 12), width=2, color=ColorRings)
-        if self.show_text_annotations:
-            canvas.text((cx + 4, top_y + 2), "N", size_px=12, color=ColorLabels)
+        # Cardinal ticks and labels: draw short pips at N/E/S/W bearings
+        # and place labels adjacent along the tangential direction.
+        # Text remains upright.
+        from math import cos as _cos
+        from math import radians as _radians
+        from math import sin as _sin
+
+        def _draw_cardinal(delta_deg: float, label: str) -> None:
+            theta = _radians((self.rotation_deg + delta_deg) % 360.0)
+            dir_x = _sin(theta)
+            dir_y = -_cos(theta)
+            outer = (
+                cx + int(round(dir_x * radius_px)),
+                cy + int(round(dir_y * radius_px)),
+            )
+            inner = (
+                outer[0] - int(round(dir_x * 12)),
+                outer[1] - int(round(dir_y * 12)),
+            )
+            canvas.line(inner, outer, width=2, color=ColorRings)
+            if self.show_text_annotations:
+                tan_x = -dir_y
+                tan_y = dir_x
+                lx = outer[0] - int(round(dir_x * 8)) + int(round(tan_x * 6))
+                ly = outer[1] - int(round(dir_y * 8)) + int(round(tan_y * 6))
+                canvas.text((lx, ly), label, size_px=12, color=ColorLabels)
+
+        _draw_cardinal(0.0, "N")
+        _draw_cardinal(90.0, "E")
+        _draw_cardinal(180.0, "S")
+        _draw_cardinal(270.0, "W")
 
         # Ownship
         canvas.filled_circle((cx, cy), 4, color=ColorOwnship)
@@ -149,10 +176,23 @@ class PpiView:
         # Origin for ENU conversion
         _ox, _oy, _oz = geodetic_to_ecef(center_lat, center_lon, 0.0)
 
+        def _enu_to_screen_rot(e: float, n: float) -> Tuple[float, float]:
+            """Rotate ENU by rotation_deg (clockwise positive) and map to screen.
+
+            When rotation is 0, this is identical to enu_to_screen for golden stability.
+            """
+            if (self.rotation_deg % 360.0) == 0.0:
+                return enu_to_screen(e, n, m_per_px)
+            phi = -radians(self.rotation_deg)
+            ce, se = cos(phi), sin(phi)
+            xr = e * ce - n * se
+            yr = e * se + n * ce
+            return enu_to_screen(xr, yr, m_per_px)
+
         def to_screen(lat: float, lon: float) -> Tuple[int, int]:
             tx, ty, tz = geodetic_to_ecef(lat, lon, 0.0)
             e, n, _ = ecef_to_enu(tx, ty, tz, center_lat, center_lon, 0.0)
-            x, y = enu_to_screen(e, n, m_per_px)
+            x, y = _enu_to_screen_rot(e, n)
             return int(round(cx + x)), int(round(cy + y))
 
         # Optional data-block label machinery
@@ -168,6 +208,30 @@ class PpiView:
                 block_pad_px=self.label_block_pad_px,
             )
 
+        # Airports layer first (so tracks render on top as before)
+        if self.show_airports and airports:
+            try:
+                from pocketscope.data.airports import Airport
+
+                aps: list[Airport] = []
+                for lat, lon, ident in airports:
+                    aps.append(
+                        Airport(
+                            ident=str(ident).upper(), lat=float(lat), lon=float(lon)
+                        )
+                    )
+                AirportsLayer(font_px=12).draw(
+                    canvas,
+                    center_lat=center_lat,
+                    center_lon=center_lon,
+                    range_nm=self.range_nm,
+                    airports=aps,
+                    screen_size=(w, h),
+                    rotation_deg=self.rotation_deg,
+                )
+            except Exception:
+                pass
+
         # Draw tracks deterministically
         _tracks = list(tracks)
         _tracks.sort(key=lambda t: ((t.callsign or ""), t.icao))
@@ -178,14 +242,17 @@ class PpiView:
             if t.trail_enu:
                 pts: List[Tuple[int, int]] = []
                 for e, n in t.trail_enu:
-                    x, y = enu_to_screen(e, n, m_per_px)
+                    x, y = _enu_to_screen_rot(e, n)
                     pts.append((int(round(cx + x)), int(round(cy + y))))
                 if len(pts) >= 2:
                     canvas.polyline(pts, width=2, color=ColorTrails)
 
             # Glyph
             if t.course_deg is not None:
-                rad = radians(t.course_deg)
+                if (self.rotation_deg % 360.0) == 0.0:
+                    rad = radians(t.course_deg)
+                else:
+                    rad = radians((t.course_deg + self.rotation_deg) % 360.0)
                 dx = sin(rad)
                 dy = -cos(rad)
                 size = 8
@@ -229,29 +296,6 @@ class PpiView:
                     canvas.text(
                         (gx + 6, gy - 12), label_text, size_px=12, color=ColorLabels
                     )
-
-        # Airports layer
-        if self.show_airports and airports:
-            try:
-                from pocketscope.data.airports import Airport
-
-                aps: list[Airport] = []
-                for lat, lon, ident in airports:
-                    aps.append(
-                        Airport(
-                            ident=str(ident).upper(), lat=float(lat), lon=float(lon)
-                        )
-                    )
-                AirportsLayer(font_px=12).draw(
-                    canvas,
-                    center_lat=center_lat,
-                    center_lon=center_lon,
-                    range_nm=self.range_nm,
-                    airports=aps,
-                    screen_size=(w, h),
-                )
-            except Exception:
-                pass
 
         # Draw data blocks last
         if self.show_data_blocks and label_layout is not None:
