@@ -28,12 +28,14 @@ from __future__ import annotations
 import argparse
 import asyncio
 from collections.abc import Iterable
+from typing import Optional, Sequence
 
 from pocketscope.core.events import EventBus
 from pocketscope.core.geo import ecef_to_enu, geodetic_to_ecef
 from pocketscope.core.models import AircraftTrack
 from pocketscope.core.time import RealTimeSource
 from pocketscope.core.tracks import TrackService
+from pocketscope.data.airports import Airport, load_airports_json, nearest_airports
 from pocketscope.ingest.adsb.json_source import Dump1090JsonSource
 from pocketscope.platform.display.pygame_backend import PygameDisplayBackend
 from pocketscope.render.view_ppi import PpiView, TrackSnapshot
@@ -102,6 +104,7 @@ async def render_loop(
     center_lat: float,
     center_lon: float,
     range_nm: float,
+    airports_all: Optional[Sequence[Airport]] = None,
 ) -> None:
     # Fixed 30 FPS
     dt = 1.0 / 30.0
@@ -111,12 +114,21 @@ async def render_loop(
         active = tracks_service.list_active()
         snapshots = _make_snapshots(active, center_lat, center_lon)
         view.range_nm = range_nm
+        # Determine nearby airports (optional)
+        airports_arg = None
+        if view.show_airports and airports_all:
+            nearby = nearest_airports(
+                center_lat, center_lon, airports_all, max_nm=range_nm, k=50
+            )
+            airports_arg = [(ap.lat, ap.lon, ap.ident) for ap in nearby]
+
         view.draw(
             canvas,
             size_px=display.size(),
             center_lat=center_lat,
             center_lon=center_lon,
             tracks=snapshots,
+            airports=airports_arg,
         )
         display.end_frame()
         await asyncio.sleep(dt)
@@ -134,7 +146,24 @@ async def main_async(args: argparse.Namespace) -> None:
         show_data_blocks=not bool(args.simple),
         label_font_px=args.block_font_px,
         label_line_gap_px=args.block_line_gap_px,
+        show_airports=args.show_airports,
     )
+
+    # Load airports if requested
+    airports_all: Optional[list[Airport]] = None
+    if args.show_airports:
+        if args.airports_json:
+            try:
+                airports_all = load_airports_json(args.airports_json)
+            except Exception as e:
+                print(f"[live_view] Failed to load airports: {e}")
+        else:
+            print(
+                (
+                    "[live_view] --show-airports is set but no --airports-json "
+                    "provided; overlay disabled"
+                )
+            )
 
     await asyncio.gather(
         src.run(),
@@ -146,6 +175,7 @@ async def main_async(args: argparse.Namespace) -> None:
             center_lat=args.center[0],
             center_lon=args.center[1],
             range_nm=args.range,
+            airports_all=airports_all,
         ),
     )
 
@@ -180,6 +210,17 @@ def parse_args() -> argparse.Namespace:
         type=int,
         default=12,
         help="Data block font size in px (default: 12)",
+    )
+    p.add_argument(
+        "--show-airports",
+        action="store_true",
+        help="Overlay nearby airport markers and idents",
+    )
+    p.add_argument(
+        "--airports-json",
+        dest="airports_json",
+        default="None",
+        help="Path to airports JSON file (array of {identifier, lat, lon})",
     )
     p.add_argument(
         "--block-line-gap-px",
