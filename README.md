@@ -8,6 +8,7 @@ PocketScope is a handheld Pi-powered ATC-style scope for decoding and displaying
 - **Event-Driven System**: Async EventBus with bounded queues and backpressure handling
 - **Time Abstraction**: Deterministic testing support with SimTimeSource and RealTimeSource
 - **Modular Design**: Clean separation between ingestion, processing, and visualization
+ - **Rendering/UI**: Framework-agnostic Canvas API, Pygame display/input backends, and deterministic golden-frame tests
 
 ### Data Sources
 - **ADS-B**: Aircraft transponder data decoding and file-based playback with deterministic timing
@@ -18,7 +19,7 @@ PocketScope is a handheld Pi-powered ATC-style scope for decoding and displaying
 ### Infrastructure
 - **Record/Replay System**: JSONL-based event recording and deterministic replay
 - **Platform Abstraction**: Display, input, and I/O abstraction layers
-- **Layered Rendering**: Composable visualization pipeline
+- **Layered Rendering**: Composable visualization pipeline built on a minimal Canvas API
 - **Comprehensive Testing**: Full test suite with async event testing
 
 ### Navigation & Geodesy
@@ -377,6 +378,37 @@ async def test_track_behavior():
     await service.stop()
 ```
 
+### Rendering and UI
+
+#### Canvas/Display/Input Abstractions
+- `Canvas` and `DisplayBackend` protocols provide a minimal, framework-agnostic rendering contract in `src/pocketscope/render/canvas.py`.
+- Pygame-based backends implement this contract and support both on-screen and fully headless operation via SDL's dummy video driver.
+
+#### Pygame Backends
+- Display backend: `src/pocketscope/platform/display/pygame_backend.py`
+    - Offscreen Surface with per-pixel alpha
+    - Headless-friendly (`SDL_VIDEODRIVER=dummy`)
+    - PNG snapshot export for tests (`save_png`)
+- Input backend: `src/pocketscope/platform/input/pygame_input.py`
+    - Maps mouse interactions to tap-style input events
+
+#### North-up PPI View
+- `src/pocketscope/render/view_ppi.py` implements a north-up Plan Position Indicator with:
+    - Range rings and north tick
+    - Ownship symbol
+    - Ring-buffer trails, aircraft glyphs, and labels
+    - ENU mapping from geodetic sources
+
+#### Deterministic Golden-Frame Test
+- Headless test renders a 320x480 PPI frame from a small ADS-B trace and validates the PNG SHA-256.
+- Test: `src/pocketscope/tests/render/test_golden_ppi.py`
+- Golden image written to `src/pocketscope/tests/out/golden_ppi.png` with pinned hash:
+    - `7de86c8d89f34990887f7f1ea35e8014074d6295bd8f68be471b2d1120bec6d8`
+- Ensured determinism via:
+    - `SDL_VIDEODRIVER=dummy`
+    - Offscreen surfaces and consistent font selection
+    - Deterministic coordinates and draw ordering
+
 ### Project Structure
 
 ```
@@ -398,18 +430,23 @@ src/pocketscope/
 │   └── imu/                # Inertial measurement data
 ├── platform/               # Hardware abstraction
 │   ├── display/            # Display drivers
+│   │   └── pygame_backend.py   # Pygame display backend (headless-friendly)
 │   ├── input/              # Input handling
+│   │   └── pygame_input.py     # Pygame input backend (mouse→tap)
 │   └── io/                 # I/O interfaces
 ├── render/                 # Visualization pipeline
-│   ├── canvas.py           # Drawing primitives
-│   ├── view_ppi.py         # Plan Position Indicator view
+│   ├── canvas.py           # Canvas/DisplayBackend protocols and drawing primitives
+│   ├── view_ppi.py         # Plan Position Indicator view (north-up)
 │   └── layers/             # Composable render layers
 ├── tools/                  # Development and debugging tools
 │   └── record_replay.py    # Event recording/replay
 ├── tests/                  # Comprehensive test suite
 │   ├── core/               # Core system tests
 │   ├── data/               # Test data files
+│   │   └── adsb_trace_ppi.jsonl # Golden PPI test trace (auto-created if absent)
 │   ├── golden_frames/      # Visual regression tests
+│   ├── render/             # Rendering tests (golden frames)
+│   │   └── test_golden_ppi.py   # Deterministic PPI snapshot test
 │   ├── integration/        # Integration tests
 │   ├── tools/              # Tool tests
 │   └── unit/               # Unit tests
@@ -430,6 +467,7 @@ Core runtime dependencies:
 - **pydantic>=2.0**: Data validation and serialization
 - **numpy>=1.24**: Numerical operations and geometry
 - **msgpack>=1.0**: Efficient binary serialization
+ - **pygame-ce>=2.5.5** on Python ≥3.13, else **pygame>=2.3.0**: Display/input backend (module import remains `pygame`)
 
 ### Installation
 
@@ -483,6 +521,7 @@ The project includes comprehensive development tooling configured in `pyproject.
 Additional tools:
 - **pytest-asyncio**: Enhanced async test support
 - **pre-commit**: Git hook management
+ - Optional graphics: `pygame`/`pygame-ce` is used by rendering tests and the Pygame backend
 
 ### Running Tests
 
@@ -506,6 +545,7 @@ pytest -k "test_record" -v
 pytest src/pocketscope/tests/unit/        # Unit tests
 pytest src/pocketscope/tests/integration/ # Integration tests
 pytest src/pocketscope/tests/core/        # Core system tests
+pytest src/pocketscope/tests/render/      # Rendering (golden frame) tests
 ```
 
 ### Test Structure
@@ -514,7 +554,7 @@ pytest src/pocketscope/tests/core/        # Core system tests
 - **Integration Tests** (`tests/integration/`): Multi-component interactions
 - **Core Tests** (`tests/core/`): Event system and time abstraction
 - **Tool Tests** (`tests/tools/`): Record/replay and utilities  
-- **Golden Frame Tests** (`tests/golden_frames/`): Visual regression testing (planned)
+- **Rendering/Golden Frame Tests** (`tests/render/`, `tests/golden_frames/`): Deterministic visual regression tests (headless)
 - **Test Data** (`tests/data/`): Sample data files for testing
 
 ### Code Quality
@@ -749,6 +789,9 @@ MIT License - see LICENSE file for details.
 - ✅ Record/replay system with JSONL format
 - ✅ ADS-B file playback with deterministic timing
 - ✅ WGS‑84 geodesy helpers with deterministic unit and property tests
+- ✅ Rendering/UI foundation: Canvas API, Pygame display/input backends
+- ✅ PPI view with rings, ownship, trails, and labels
+- ✅ Deterministic golden-frame rendering test (headless, pinned SHA-256)
 - ✅ Comprehensive test suite
 - ✅ Development tooling and quality checks
 
@@ -758,3 +801,9 @@ MIT License - see LICENSE file for details.
 - Display rendering pipeline
 - Hardware platform drivers
 - User interface components
+
+## Notes on Environment and Determinism
+
+- For Python 3.13+, install `pygame-ce` (imported as `pygame`); for older versions, install `pygame`.
+- Headless tests use `SDL_VIDEODRIVER=dummy` set before importing the Pygame backend.
+- Type checking: MyPy is in strict mode; missing `pygame.*` stubs are ignored via a project override to keep CI green.
