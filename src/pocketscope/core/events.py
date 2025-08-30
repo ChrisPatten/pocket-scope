@@ -335,7 +335,9 @@ class Subscription:
 
 def pack(obj: Any) -> bytes:
     """Serialize an object to bytes using msgpack."""
-    return msgpack.packb(obj, use_bin_type=True)
+    data = msgpack.packb(obj, use_bin_type=True)
+    assert isinstance(data, (bytes, bytearray))
+    return bytes(data)
 
 
 def unpack(b: bytes) -> Any:

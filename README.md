@@ -21,6 +21,11 @@ PocketScope is a handheld Pi-powered ATC-style scope for decoding and displaying
 - **Layered Rendering**: Composable visualization pipeline
 - **Comprehensive Testing**: Full test suite with async event testing
 
+### Navigation & Geodesy
+- **WGS‑84 Helpers**: Great‑circle distance (NM), initial bearing, destination point
+- **Frames**: Geodetic⇄ECEF conversion and ECEF→ENU local tangent plane
+- **Mapping**: ENU→screen north‑up mapping and range/bearing convenience APIs
+
 ## Architecture Overview
 
 ### Core Components
@@ -301,6 +306,37 @@ print(f"Tracking {len(active_tracks)} aircraft")
 await service.stop()
 ```
 
+#### Geodesy (`src/pocketscope/core/geo.py`)
+Numerically stable WGS‑84 utilities for navigation and rendering:
+- Spherical helpers: `haversine_nm`, `initial_bearing_deg`, `dest_point`
+- Frames: `geodetic_to_ecef`, `ecef_to_enu`
+- Convenience: `range_bearing_from`, `enu_to_screen`
+
+```python
+from pocketscope.core.geo import (
+    haversine_nm,
+    initial_bearing_deg,
+    dest_point,
+    range_bearing_from,
+    geodetic_to_ecef,
+    ecef_to_enu,
+)
+
+# Distance and bearing
+nm = haversine_nm(37.6188, -122.375, 34.0522, -118.2437)  # SFO→LAX in NM
+bearing = initial_bearing_deg(37.6188, -122.375, 34.0522, -118.2437)
+
+# Forward destination
+lat2, lon2 = dest_point(37.6188, -122.375, bearing_deg=135.0, range_nm=10.0)
+
+# Local ENU frame at an origin
+xe, ye, ze = geodetic_to_ecef(37.6188, -122.375, alt_m=0.0)
+e, n, u = ecef_to_enu(xe, ye, ze, lat0=37.6188, lon0=-122.375, alt0_m=0.0)
+
+# Range/Bearing convenience
+rng_nm, brg_deg = range_bearing_from(37.6188, -122.375, lat2, lon2)
+```
+
 **Trail Management**:
 - **Ring Buffer**: Automatically trims old position points based on time windows
 - **1Hz Sampling**: Limits position updates to minimum 0.9 second intervals
@@ -350,6 +386,7 @@ src/pocketscope/
 │   └── default.toml        # Default configuration
 ├── core/                   # Core event and time systems
 │   ├── events.py           # EventBus implementation
+│   ├── geo.py              # WGS‑84 geodesy helpers (distance, bearings, ECEF/ENU)
 │   ├── time.py             # Time abstraction (Real/Sim)
 │   ├── models.py           # Pydantic data models
 │   ├── tracks.py           # Track Service for aircraft state management
@@ -440,7 +477,7 @@ The project includes comprehensive development tooling configured in `pyproject.
 - **Code Formatting**: Black (88 char line length), isort (Black profile)
 - **Linting**: Ruff with auto-fix capabilities
 - **Type Checking**: MyPy with strict mode enabled
-- **Testing**: pytest with asyncio support
+- **Testing**: pytest with asyncio and Hypothesis (property-based tests)
 - **Pre-commit Hooks**: Automated quality checks on every commit
 
 Additional tools:
@@ -455,6 +492,8 @@ pytest
 
 # Run specific test modules
 pytest src/pocketscope/tests/core/test_events.py
+pytest src/pocketscope/tests/core/test_geo_unit.py
+pytest src/pocketscope/tests/core/test_geo_property.py
 pytest src/pocketscope/tests/tools/test_record_replay.py
 
 # Run with coverage
@@ -709,6 +748,7 @@ MIT License - see LICENSE file for details.
 - ✅ Time abstraction for deterministic testing
 - ✅ Record/replay system with JSONL format
 - ✅ ADS-B file playback with deterministic timing
+- ✅ WGS‑84 geodesy helpers with deterministic unit and property tests
 - ✅ Comprehensive test suite
 - ✅ Development tooling and quality checks
 
