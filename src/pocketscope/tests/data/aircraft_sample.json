@@ -1,0 +1,50 @@
+{
+  "now": 1725019200,
+  "aircraft": [
+    {
+      "hex": "a1b2c3",
+      "flight": "JBU123 ",
+      "lat": 42.01,
+      "lon": -71.20,
+      "alt_baro": 35000,
+      "alt_geom": 35200,
+      "gs": 420.5,
+      "track": 270.0,
+      "baro_rate": -512,
+      "squawk": "1234",
+      "nic": 8,
+      "nac_p": 9,
+      "seen": 1.2,
+      "seen_pos": 0.4
+    },
+    {
+      "hex": "d4e5f6",
+      "flight": "DAL456",
+      "alt_baro": 28000,
+      "gs": 380.0,
+      "track": 90.0,
+      "baro_rate": 256,
+      "squawk": "7700",
+      "nic": 7,
+      "nac_p": 8,
+      "seen": 0.5,
+      "seen_pos": 0.5
+    },
+    {
+      "hex": "zzzzzz",
+      "flight": "BADHEX",
+      "lat": 0,
+      "lon": 0,
+      "seen": 0.1,
+      "seen_pos": 0.1
+    },
+    {
+      "hex": "abc123",
+      "flight": "STALE1",
+      "lat": 42.05,
+      "lon": -71.25,
+      "seen": 120.0,
+      "seen_pos": 120.0
+    }
+  ]
+}
