@@ -11,6 +11,7 @@ PocketScope is a handheld Pi-powered ATC-style scope for decoding and displaying
 
 ### Data Sources
 - **ADS-B**: Aircraft transponder data decoding and file-based playback with deterministic timing
+- **Aircraft Tracking**: Real-time track maintenance with ring-buffer trails, state aggregation, and expiry management
 - **GPS**: Position and navigation data (NMEA serial)
 - **IMU**: Inertial measurement unit integration (9-axis sensors)
 
@@ -240,6 +241,106 @@ source = FilePlaybackSource(
 await source.run()  # Runs until stopped
 ```
 
+#### Track Service (`src/pocketscope/core/tracks.py`)
+Domain service for maintaining aircraft tracks from incoming ADS-B messages with ring-buffer trails, quality tracking, and expiry management:
+
+**Key Features**:
+- Ring-buffer trail management with configurable time windows
+- 1Hz position sampling to prevent data flooding
+- Track state aggregation (callsign, altitude, speed, etc.)
+- Pinning functionality for extended trail retention
+- Automatic expiry of stale tracks
+- Deterministic behavior with SimTimeSource
+
+**Basic Usage**:
+```python
+from pocketscope.core.events import EventBus, pack
+from pocketscope.core.time import SimTimeSource
+from pocketscope.core.tracks import TrackService
+from pocketscope.core.models import AdsbMessage
+
+# Setup
+bus = EventBus()
+ts = SimTimeSource(start=0.0)
+service = TrackService(
+    bus, 
+    ts,
+    trail_len_default_s=60.0,    # Default 60s trail
+    trail_len_pinned_s=180.0,    # Pinned tracks: 180s trail
+    expiry_s=12.0                # Expire after 12s without updates
+)
+
+# Start the service
+await service.run()
+
+# Publish ADS-B messages - service automatically maintains tracks
+msg = AdsbMessage(
+    ts=datetime.utcnow(),
+    icao24="abc123", 
+    lat=40.0,
+    lon=-74.0,
+    callsign="UAL123",
+    baro_alt=35000
+)
+await bus.publish("adsb.msg", pack(msg.model_dump()))
+
+# Query tracks
+track = service.get("abc123")
+if track:
+    print(f"Track {track.callsign}: {len(track.history)} trail points")
+    print(f"Last position: {track.history[-1][1:]}")  # lat, lon, alt
+
+# Pin important tracks for longer retention
+service.pin("abc123", True)
+
+# List all active tracks
+active_tracks = service.list_active()
+print(f"Tracking {len(active_tracks)} aircraft")
+
+# Stop the service
+await service.stop()
+```
+
+**Trail Management**:
+- **Ring Buffer**: Automatically trims old position points based on time windows
+- **1Hz Sampling**: Limits position updates to minimum 0.9 second intervals
+- **Time-Based Trimming**: Keeps recent points within configured time window
+- **Pinned Tracks**: Extended retention for tracks of interest
+
+**State Tracking**:
+- **Position History**: Time-stamped trail of (timestamp, lat, lon, altitude)
+- **Dynamic State**: Speed, heading, vertical rate, transponder codes
+- **Metadata**: Callsign, ICAO24, last update time, data quality indicators
+
+**Deterministic Testing**:
+```python
+@pytest.mark.asyncio
+async def test_track_behavior():
+    ts = SimTimeSource(start=0.0)
+    bus = EventBus()
+    service = TrackService(bus, ts, trail_len_default_s=10.0)
+    
+    await service.run()
+    
+    # Create predictable message sequence
+    for t in [0.0, 1.0, 2.0, 3.0]:
+        msg = AdsbMessage(
+            ts=datetime.fromtimestamp(t, tz=timezone.utc),
+            icao24="test123",
+            lat=40.0 + t * 0.01,
+            lon=-74.0
+        )
+        ts.set_time(t)
+        await bus.publish("adsb.msg", pack(msg.model_dump()))
+        await asyncio.sleep(0)  # Process events
+    
+    # Verify trail points
+    track = service.get("test123")
+    assert len(track.history) == 4
+    
+    await service.stop()
+```
+
 ### Project Structure
 
 ```
@@ -251,6 +352,7 @@ src/pocketscope/
 │   ├── events.py           # EventBus implementation
 │   ├── time.py             # Time abstraction (Real/Sim)
 │   ├── models.py           # Pydantic data models
+│   ├── tracks.py           # Track Service for aircraft state management
 │   └── domain/             # Domain logic (planned)
 ├── ingest/                 # Data ingestion modules
 │   ├── adsb/               # ADS-B transponder data
