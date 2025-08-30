@@ -1,0 +1,3 @@
+{"t_mono": 0.0, "msg": {"icao24": "abc123", "callsign": "ALPHA1", "lat": 42.0, "lon": -71.0, "baro_alt": 30000, "ground_speed": 400, "track_deg": 45.0, "src": "PLAYBACK"}}
+{"t_mono": 0.4, "msg": {"icao24": "def456", "callsign": "BRAVO2", "lat": 42.02, "lon": -71.03, "baro_alt": 25000, "ground_speed": 350, "track_deg": 120.0, "src": "PLAYBACK"}}
+{"t_mono": 1.0, "msg": {"icao24": "abc123", "lat": 42.03, "lon": -71.04, "baro_alt": 30100, "ground_speed": 405, "track_deg": 47.0, "src": "PLAYBACK"}}

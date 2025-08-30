@@ -16,7 +16,10 @@ authors = [
 dependencies = [
   "pydantic>=2.0",
   "numpy>=1.24",
-  "msgpack>=1.0"
+  "msgpack>=1.0",
+  # Use pygame-ce on Python 3.13+; fall back to pygame on older versions
+  "pygame-ce>=2.5.5; python_version >= '3.13'",
+  "pygame>=2.3.0; python_version < '3.13'",
 ]
 
 [project.optional-dependencies]
@@ -56,6 +59,7 @@ disallow_untyped_defs = true
 overrides = [
   { module = "hypothesis.*", ignore_missing_imports = true },
   { module = "msgpack", ignore_missing_imports = true },
+  { module = "pygame.*", ignore_missing_imports = true },
   { module = "pocketscope.tests.*", disallow_untyped_decorators = false },
 ]
 
