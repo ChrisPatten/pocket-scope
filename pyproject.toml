@@ -69,4 +69,5 @@ overrides = [
 addopts = "-ra -q"
 testpaths = [
   "src/pocketscope/tests",
+  "tests",
 ]

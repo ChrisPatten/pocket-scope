@@ -1,8 +1,15 @@
 """
 PPI (Plan Position Indicator) view rendering.
 
-This module provides a simple north-up PPI view that renders range rings,
-ownship, aircraft glyphs with optional course triangles, trails, and labels.
+This module provides a north-up PPI view that renders range rings, ownship,
+aircraft glyphs with optional course triangles, trails, and labels. Labels
+support two modes:
+
+- Data blocks: ATC-style three-line labels with leader lines, formatted and
+    laid out by ``pocketscope.render.labels``. This is the default in the live
+    viewer and recommended for rich display.
+- Simple labels: one-line callsign/ICAO text near the glyph (legacy mode used
+    by golden tests for determinism).
 
 Coordinates and units
 ---------------------
@@ -20,6 +27,10 @@ from typing import Iterable, List, Optional, Sequence, Tuple
 
 from pocketscope.core.geo import ecef_to_enu, enu_to_screen, geodetic_to_ecef
 from pocketscope.render.canvas import Canvas, Color
+from pocketscope.render.labels import DataBlockFormatter as LabelFormatter
+from pocketscope.render.labels import DataBlockLayout as LabelLayout
+from pocketscope.render.labels import OwnshipRef
+from pocketscope.render.labels import TrackSnapshot as LabelTrack
 
 ColorBG: Color = (0, 0, 0, 255)
 ColorRings: Color = (80, 80, 80, 255)
@@ -27,6 +38,7 @@ ColorOwnship: Color = (255, 255, 255, 255)
 ColorTrails: Color = (0, 180, 255, 180)
 ColorAircraft: Color = (255, 255, 0, 255)
 ColorLabels: Color = (255, 255, 255, 255)
+ColorDataBlock: Color = (0, 255, 0, 255)
 
 
 @dataclass(slots=True)
@@ -48,11 +60,29 @@ class TrackSnapshot:
     callsign: Optional[str] = None
     course_deg: Optional[float] = None
     trail_enu: Optional[Sequence[Tuple[float, float]]] = None
+    # Optional kinematics for labels (pass-through to DataBlockFormatter)
+    geo_alt_ft: Optional[float] = None
+    baro_alt_ft: Optional[float] = None
+    ground_speed_kt: Optional[float] = None
+    vertical_rate_fpm: Optional[float] = None
 
 
 class PpiView:
-    def __init__(self, *, range_nm: float = 10.0) -> None:
+    def __init__(
+        self,
+        *,
+        range_nm: float = 10.0,
+        show_data_blocks: bool = False,
+        label_font_px: int = 12,
+        label_line_gap_px: int = 2,
+        label_block_pad_px: int = 2,
+    ) -> None:
         self.range_nm = float(range_nm)
+        self.show_data_blocks = bool(show_data_blocks)
+        # Data-block typography
+        self.label_font_px = int(label_font_px)
+        self.label_line_gap_px = int(label_line_gap_px)
+        self.label_block_pad_px = int(label_block_pad_px)
 
     def draw(
         self,
@@ -73,6 +103,13 @@ class PpiView:
         tracks: Iterable of TrackSnapshot with positions in lat/lon and optional
             trail in ENU
         airports: Optional list of (lat, lon, ident)
+
+                Notes
+                -----
+                - When ``show_data_blocks`` is True, labels are formatted with
+                    ``DataBlockFormatter.format_standard`` and positioned via
+                    ``DataBlockLayout`` with leader lines. Otherwise, a simple one-line
+                    text label is drawn near the glyph.
         """
 
         # Use provided size for deterministic layout
@@ -125,6 +162,19 @@ class PpiView:
             x, y = enu_to_screen(e, n, m_per_px)
             return int(round(cx + x)), int(round(cy + y))
 
+        # Prepare label formatter/layout
+        label_items: list[tuple[Tuple[int, int], Tuple[str, str, str], bool]] = []
+        label_formatter: LabelFormatter | None = None
+        label_layout: LabelLayout | None = None
+        if self.show_data_blocks:
+            label_formatter = LabelFormatter(OwnshipRef(center_lat, center_lon))
+            label_layout = LabelLayout(
+                (w, h),
+                font_px=self.label_font_px,
+                line_gap_px=self.label_line_gap_px,
+                block_pad_px=self.label_block_pad_px,
+            )
+
         # Draw tracks
         for t in tracks:
             # Glyph position
@@ -175,6 +225,57 @@ class PpiView:
                 # Simple dot if no course
                 canvas.filled_circle((gx, gy), 3, color=ColorAircraft)
 
-            # Label (callsign or ICAO)
-            label_text = t.callsign or t.icao
-            canvas.text((gx + 6, gy - 12), label_text, size_px=12, color=ColorLabels)
+            if self.show_data_blocks and label_formatter is not None:
+                # Build label snapshot
+                ls = LabelTrack(
+                    icao24=t.icao,
+                    callsign=t.callsign,
+                    lat=t.lat,
+                    lon=t.lon,
+                    geo_alt_ft=t.geo_alt_ft,
+                    baro_alt_ft=t.baro_alt_ft,
+                    ground_speed_kt=t.ground_speed_kt,
+                    vertical_rate_fpm=t.vertical_rate_fpm,
+                    emitter_type=None,
+                    pinned=False,
+                    focused=False,
+                )
+                expanded = False
+                lines = label_formatter.format_standard(ls)
+                label_items.append(((gx, gy), lines, expanded))
+            else:
+                # Legacy simple label near glyph (keeps golden test stable)
+                label_text = t.callsign or t.icao
+                canvas.text(
+                    (gx + 6, gy - 12), label_text, size_px=12, color=ColorLabels
+                )
+
+        if self.show_data_blocks and label_layout is not None:
+            placements = label_layout.place_blocks(label_items)
+            # Draw leader lines and text
+            for p in placements:
+                ax, ay = p.anchor_px
+                # Leader line to nearest edge center
+                w_b, h_b = label_layout.measure(p.lines)
+                candidates = [
+                    (p.x, p.y + h_b // 2),  # left
+                    (p.x + w_b, p.y + h_b // 2),  # right
+                    (p.x + w_b // 2, p.y),  # top
+                    (p.x + w_b // 2, p.y + h_b),  # bottom
+                ]
+                cx2, cy2 = min(
+                    candidates,
+                    key=lambda q: (q[0] - ax) * (q[0] - ax) + (q[1] - ay) * (q[1] - ay),
+                )
+                canvas.line(
+                    (ax, ay), (int(cx2), int(cy2)), width=1, color=ColorDataBlock
+                )
+                # Text lines
+                for i, s in enumerate(p.lines):
+                    y = p.y + i * (self.label_font_px + self.label_line_gap_px)
+                    canvas.text(
+                        (p.x + 2, y),
+                        s,
+                        size_px=self.label_font_px,
+                        color=ColorDataBlock,
+                    )
