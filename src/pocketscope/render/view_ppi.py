@@ -74,6 +74,8 @@ class PpiView:
         *,
         range_nm: float = 10.0,
         show_data_blocks: bool = False,
+        show_simple_labels: bool = True,
+        show_text_annotations: bool = True,
         show_airports: bool = True,
         label_font_px: int = 12,
         label_line_gap_px: int = 2,
@@ -81,6 +83,8 @@ class PpiView:
     ) -> None:
         self.range_nm = float(range_nm)
         self.show_data_blocks = bool(show_data_blocks)
+        self.show_simple_labels = bool(show_simple_labels)
+        self.show_text_annotations = bool(show_text_annotations)
         self.show_airports = bool(show_airports)
         # Data-block typography
         self.label_font_px = int(label_font_px)
@@ -99,27 +103,14 @@ class PpiView:
     ) -> None:
         """Draw the PPI view contents.
 
-        Parameters
-        ----------
-        canvas: Target canvas
-        center_lat, center_lon: Scene center in degrees
-        tracks: Iterable of TrackSnapshot with positions in lat/lon and optional
-            trail in ENU
-        airports: Optional list of (lat, lon, ident)
-
-        Notes
-        -----
-        - When ``show_data_blocks`` is True, labels are formatted with
-          ``DataBlockFormatter.format_standard`` and positioned via
-          ``DataBlockLayout`` with leader lines. Otherwise, a simple one-line
-          text label is drawn near the glyph.
+        - Deterministic: draws tracks sorted by (callsign, icao), optional text
+          annotations and simple labels can be disabled for golden tests.
         """
 
         # Use provided size for deterministic layout
         w, h = int(size_px[0]), int(size_px[1])
-
         cx, cy = int(w // 2), int(h // 2)
-        radius_px = int(min(w, h) // 2) - 6  # small margin
+        radius_px = int(min(w, h) // 2) - 6
         if radius_px < 10:
             radius_px = 10
 
@@ -131,26 +122,31 @@ class PpiView:
         # Clear background
         canvas.clear(ColorBG)
 
-        # Range rings (2, 5, 10 nm or up to range)
+        # Range rings
         ring_ticks = [2.0, 5.0, 10.0]
         for nm in ring_ticks:
             if nm > self.range_nm:
                 continue
             r_px = int((nm * meters_per_nm) / m_per_px)
             canvas.circle((cx, cy), r_px, width=1, color=ColorRings)
-            # Label to the right of center line
-            label = f"{int(nm)} nm"
-            canvas.text((cx + r_px + 4, cy - 8), label, size_px=12, color=ColorLabels)
+            if self.show_text_annotations:
+                canvas.text(
+                    (cx + r_px + 4, cy - 8),
+                    f"{int(nm)} nm",
+                    size_px=12,
+                    color=ColorLabels,
+                )
 
-        # North tick at top
+        # North tick
         top_y = cy - radius_px
         canvas.line((cx, top_y), (cx, top_y + 12), width=2, color=ColorRings)
-        canvas.text((cx + 4, top_y + 2), "N", size_px=12, color=ColorLabels)
+        if self.show_text_annotations:
+            canvas.text((cx + 4, top_y + 2), "N", size_px=12, color=ColorLabels)
 
-        # Ownship symbol at center
+        # Ownship
         canvas.filled_circle((cx, cy), 4, color=ColorOwnship)
 
-        # Precompute origin ECEF for ENU conversion
+        # Origin for ENU conversion
         _ox, _oy, _oz = geodetic_to_ecef(center_lat, center_lon, 0.0)
 
         def to_screen(lat: float, lon: float) -> Tuple[int, int]:
@@ -159,7 +155,7 @@ class PpiView:
             x, y = enu_to_screen(e, n, m_per_px)
             return int(round(cx + x)), int(round(cy + y))
 
-        # Prepare label formatter/layout
+        # Optional data-block label machinery
         label_items: list[tuple[Tuple[int, int], Tuple[str, str, str], bool]] = []
         label_formatter: LabelFormatter | None = None
         label_layout: LabelLayout | None = None
@@ -172,12 +168,13 @@ class PpiView:
                 block_pad_px=self.label_block_pad_px,
             )
 
-        # Draw tracks
-        for t in tracks:
-            # Glyph position
+        # Draw tracks deterministically
+        _tracks = list(tracks)
+        _tracks.sort(key=lambda t: ((t.callsign or ""), t.icao))
+        for t in _tracks:
             gx, gy = to_screen(t.lat, t.lon)
 
-            # Trail first (under glyph)
+            # Trail under glyph
             if t.trail_enu:
                 pts: List[Tuple[int, int]] = []
                 for e, n in t.trail_enu:
@@ -186,23 +183,16 @@ class PpiView:
                 if len(pts) >= 2:
                     canvas.polyline(pts, width=2, color=ColorTrails)
 
-            # Aircraft glyph
+            # Glyph
             if t.course_deg is not None:
-                # Triangle pointing to course
                 rad = radians(t.course_deg)
-                # Heading unit vector in screen coords (y down)
                 dx = sin(rad)
                 dy = -cos(rad)
                 size = 8
-                # Tip point
                 tip = (gx + int(round(dx * size)), gy + int(round(dy * size)))
-
-                # Construct base relative to center with some width
                 base_len = 6
                 base_w = 5
-                # Vector backwards along heading
                 bx, by = -dx * base_len, -dy * base_len
-                # Perp vectors
                 px, py = -dy, dx
                 p1 = (
                     gx + int(round(bx + px * base_w)),
@@ -214,11 +204,10 @@ class PpiView:
                 )
                 canvas.polyline([p1, tip, p2], width=1, color=ColorAircraft)
             else:
-                # Simple dot if no course
                 canvas.filled_circle((gx, gy), 3, color=ColorAircraft)
 
+            # Labels
             if self.show_data_blocks and label_formatter is not None:
-                # Build label snapshot
                 ls = LabelTrack(
                     icao24=t.icao,
                     callsign=t.callsign,
@@ -232,19 +221,17 @@ class PpiView:
                     pinned=False,
                     focused=False,
                 )
-                expanded = False
                 lines = label_formatter.format_standard(ls)
-                label_items.append(((gx, gy), lines, expanded))
+                label_items.append(((gx, gy), lines, False))
             else:
-                # Legacy simple label near glyph (keeps golden test stable)
-                label_text = t.callsign or t.icao
-                canvas.text(
-                    (gx + 6, gy - 12), label_text, size_px=12, color=ColorLabels
-                )
+                if self.show_simple_labels:
+                    label_text = t.callsign or t.icao
+                    canvas.text(
+                        (gx + 6, gy - 12), label_text, size_px=12, color=ColorLabels
+                    )
 
-        # Airports overlay (after trails/glyphs, before data blocks)
+        # Airports layer
         if self.show_airports and airports:
-            # Adapt tuple input to Airport dataclass if needed
             try:
                 from pocketscope.data.airports import Airport
 
@@ -264,21 +251,19 @@ class PpiView:
                     screen_size=(w, h),
                 )
             except Exception:
-                # Be defensive if types don't match; ignore overlay rather than fail
                 pass
 
+        # Draw data blocks last
         if self.show_data_blocks and label_layout is not None:
             placements = label_layout.place_blocks(label_items)
-            # Draw leader lines and text
             for p in placements:
                 ax, ay = p.anchor_px
-                # Leader line to nearest edge center
                 w_b, h_b = label_layout.measure(p.lines)
                 candidates = [
-                    (p.x, p.y + h_b // 2),  # left
-                    (p.x + w_b, p.y + h_b // 2),  # right
-                    (p.x + w_b // 2, p.y),  # top
-                    (p.x + w_b // 2, p.y + h_b),  # bottom
+                    (p.x, p.y + h_b // 2),
+                    (p.x + w_b, p.y + h_b // 2),
+                    (p.x + w_b // 2, p.y),
+                    (p.x + w_b // 2, p.y + h_b),
                 ]
                 cx2, cy2 = min(
                     candidates,
@@ -287,7 +272,6 @@ class PpiView:
                 canvas.line(
                     (ax, ay), (int(cx2), int(cy2)), width=1, color=ColorDataBlock
                 )
-                # Text lines
                 for i, s in enumerate(p.lines):
                     y = p.y + i * (self.label_font_px + self.label_line_gap_px)
                     canvas.text(

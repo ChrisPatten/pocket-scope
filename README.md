@@ -462,20 +462,9 @@ Defaults:
  - Airports overlay can be enabled in the live viewer via `--show-airports` and an airports JSON file.
     - ENU mapping from geodetic sources
 
-#### Deterministic Golden-Frame Test
-- Headless test renders a 320x480 PPI frame from a small ADS-B trace and validates the PNG SHA-256.
+#### Rendering Tests
+- A lightweight, headless input smoke test validates the pygame backend event flow.
 - Test: `src/pocketscope/tests/render/test_golden_ppi.py`
-- Golden image written to `src/pocketscope/tests/out/golden_ppi.png` with pinned hash:
-    - `7de86c8d89f34990887f7f1ea35e8014074d6295bd8f68be471b2d1120bec6d8`
-- Ensured determinism via:
-    - `SDL_VIDEODRIVER=dummy`
-    - Offscreen surfaces and consistent font selection
-    - Deterministic coordinates and draw ordering
-
-Additional golden snapshot for Airports overlay:
-- Test: `tests/render/test_airports_golden.py`
-- Verifies a portrait 320x480 frame with airports overlay enabled from a small ADS-B trace and a curated airports subset
-- Expected SHA-256: `d244df953f604b581a517e2a7ff5e4a2e30332651c8c4730f38f8e85a3acc5de`
 
 ### Project Structure
 
@@ -522,10 +511,8 @@ src/pocketscope/
 │   │   └── test_dump1090_json_source.py
 │   ├── data/               # Shared fixtures for top-level tests
 │   │   └── aircraft_sample.json
-│   ├── golden_frames/      # Visual regression tests
-│   ├── render/             # Rendering tests (golden frames)
-│   │   └── test_golden_ppi.py   # Deterministic PPI snapshot test
-│   │   └── test_airports_golden.py   # Airports overlay golden snapshot test
+│   ├── render/             # Rendering tests
+│   │   └── test_golden_ppi.py   # Pygame backend input smoke test
 │   ├── integration/        # Integration tests
 │   ├── tools/              # Tool tests
 │   └── unit/               # Unit tests
