@@ -1,0 +1,9 @@
+{
+  "python.analysis.extraPaths": [
+    "src"
+  ],
+  "python.testing.pytestArgs": [
+    "src/pocketscope/tests",
+    "tests"
+  ]
+}

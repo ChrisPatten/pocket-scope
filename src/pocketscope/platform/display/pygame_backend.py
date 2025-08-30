@@ -126,7 +126,9 @@ class PygameDisplayBackend(DisplayBackend):
     regular window may be created depending on the platform.
     """
 
-    def __init__(self, size: Tuple[int, int] = (320, 480)) -> None:
+    def __init__(
+        self, size: Tuple[int, int] = (320, 480), *, create_window: bool = False
+    ) -> None:
         local_pg = pg
         if local_pg is None:
             raise RuntimeError(
@@ -145,6 +147,20 @@ class PygameDisplayBackend(DisplayBackend):
             local_pg.font.init()
 
         self._width, self._height = int(size[0]), int(size[1])
+        self._window_surface = None
+        if create_window and os.environ.get("SDL_VIDEODRIVER") != "dummy":
+            try:
+                self._window_surface = local_pg.display.set_mode(
+                    (self._width, self._height)
+                )
+            except Exception:
+                # Fallback to offscreen and provide a hint for diagnostics
+                print(
+                    "[PygameDisplayBackend] Window creation failed; "
+                    "falling back to offscreen. Check SDL_VIDEODRIVER and "
+                    "display permissions."
+                )
+                self._window_surface = None
 
         # Create offscreen surface; use SRCALPHA for per-pixel alpha
         # We avoid creating a display window to be headless/deterministic
@@ -161,7 +177,11 @@ class PygameDisplayBackend(DisplayBackend):
         return _PygameCanvas(self._surface, self._font_cache)
 
     def end_frame(self) -> None:
-        # No-op for offscreen rendering; if a window existed, we would flip buffers
+        # If we have a window, blit the offscreen buffer and flip
+        local_pg = pg
+        if self._window_surface is not None and local_pg is not None:
+            self._window_surface.blit(self._surface, (0, 0))
+            local_pg.display.flip()
         return None
 
     def save_png(self, path: str) -> None:

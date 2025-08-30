@@ -11,7 +11,7 @@ PocketScope is a handheld Pi-powered ATC-style scope for decoding and displaying
  - **Rendering/UI**: Framework-agnostic Canvas API, Pygame display/input backends, and deterministic golden-frame tests
 
 ### Data Sources
-- **ADS-B**: Aircraft transponder data decoding and file-based playback with deterministic timing
+- **ADS-B**: File-based playback with deterministic timing and live polling of dump1090 `aircraft.json`
 - **Aircraft Tracking**: Real-time track maintenance with ring-buffer trails, state aggregation, and expiry management
 - **GPS**: Position and navigation data (NMEA serial)
 - **IMU**: Inertial measurement unit integration (9-axis sensors)
@@ -247,6 +247,47 @@ source = FilePlaybackSource(
 await source.run()  # Runs until stopped
 ```
 
+#### Live ADS-B via dump1090 JSON (`src/pocketscope/ingest/adsb/json_source.py`)
+Polls a dump1090 server's `aircraft.json` over HTTP and publishes normalized `AdsbMessage` events to `adsb.msg`.
+
+Key features:
+- Efficient polling with `aiohttp` and timeouts
+- Conditional requests (ETag/If-Modified-Since) to avoid re-downloading unchanged data
+- Exponential backoff on errors with automatic recovery
+- Stale filtering using `seen/seen_pos` thresholds
+- Strict field normalization (lowercased 6-hex ICAO, trimmed callsigns, numeric conversions)
+
+Basic usage:
+```python
+import asyncio
+from pocketscope.core.events import EventBus, unpack
+from pocketscope.ingest.adsb.json_source import Dump1090JsonSource
+
+async def main():
+    bus = EventBus()
+    sub = bus.subscribe("adsb.msg")
+
+    # Point to your dump1090 instance (usually http://<host>:8080/data/aircraft.json)
+    src = Dump1090JsonSource(
+        url="http://127.0.0.1:8080/data/aircraft.json",
+        bus=bus,
+        poll_hz=5.0,
+    )
+
+    task = asyncio.create_task(src.run())
+    try:
+        for _ in range(5):
+            env = await sub.__anext__()
+            print(unpack(env.payload))
+    finally:
+        await src.stop()
+        task.cancel()
+        await bus.close()
+
+if __name__ == "__main__":
+    asyncio.run(main())
+```
+
 #### Track Service (`src/pocketscope/core/tracks.py`)
 Domain service for maintaining aircraft tracks from incoming ADS-B messages with ring-buffer trails, quality tracking, and expiry management:
 
@@ -425,7 +466,8 @@ src/pocketscope/
 │   └── domain/             # Domain logic (planned)
 ├── ingest/                 # Data ingestion modules
 │   ├── adsb/               # ADS-B transponder data
-│   │   └── playback_source.py  # File-based ADS-B replay
+│   │   ├── playback_source.py  # File-based ADS-B replay
+│   │   └── json_source.py      # Live dump1090 aircraft.json polling
 │   ├── gps/                # GPS/GNSS data
 │   └── imu/                # Inertial measurement data
 ├── platform/               # Hardware abstraction
@@ -440,10 +482,16 @@ src/pocketscope/
 │   └── layers/             # Composable render layers
 ├── tools/                  # Development and debugging tools
 │   └── record_replay.py    # Event recording/replay
+├── examples/               # Small runnable examples
+│   └── live_view.py        # Minimal on-screen PPI viewer for live ADS-B
 ├── tests/                  # Comprehensive test suite
 │   ├── core/               # Core system tests
 │   ├── data/               # Test data files
 │   │   └── adsb_trace_ppi.jsonl # Golden PPI test trace (auto-created if absent)
+│   ├── ingest/             # Live ingestion tests
+│   │   └── test_dump1090_json_source.py
+│   ├── data/               # Shared fixtures for top-level tests
+│   │   └── aircraft_sample.json
 │   ├── golden_frames/      # Visual regression tests
 │   ├── render/             # Rendering tests (golden frames)
 │   │   └── test_golden_ppi.py   # Deterministic PPI snapshot test
@@ -467,6 +515,7 @@ Core runtime dependencies:
 - **pydantic>=2.0**: Data validation and serialization
 - **numpy>=1.24**: Numerical operations and geometry
 - **msgpack>=1.0**: Efficient binary serialization
+ - **aiohttp>=3.9**: HTTP client for live dump1090 polling
  - **pygame-ce>=2.5.5** on Python ≥3.13, else **pygame>=2.3.0**: Display/input backend (module import remains `pygame`)
 
 ### Installation
@@ -546,6 +595,13 @@ pytest src/pocketscope/tests/unit/        # Unit tests
 pytest src/pocketscope/tests/integration/ # Integration tests
 pytest src/pocketscope/tests/core/        # Core system tests
 pytest src/pocketscope/tests/render/      # Rendering (golden frame) tests
+```
+
+New tests for the dump1090 JSON source live ingestion are under `tests/ingest/`:
+
+```bash
+# Run the dump1090 JSON source tests
+pytest tests/ingest/test_dump1090_json_source.py -q
 ```
 
 ### Test Structure
@@ -702,6 +758,25 @@ async def test_timed_processing():
     assert received_times == [1.0, 2.5]
 ```
 
+### Live Desktop Viewer (PPI)
+Minimal on-screen viewer that wires the live dump1090 JSON source into the PPI renderer.
+
+Module: `src/pocketscope/examples/live_view.py`
+
+Usage:
+
+```bash
+# Basic: connect to local dump1090 and show a 60 NM PPI centered at 42.0, -71.0
+python -m pocketscope.examples.live_view \
+    --url http://127.0.0.1:8080/data/aircraft.json \
+    --center 42.0 -71.0 \
+    --range 60
+```
+
+Notes:
+- Requires a GUI-capable environment; if the window doesn't appear, check `SDL_VIDEODRIVER` and system display settings.
+- Rendering remains deterministic in headless tests; the viewer explicitly requests a visible window.
+
 ## File Formats
 
 ### ADS-B Trace Format (JSONL)
@@ -788,15 +863,17 @@ MIT License - see LICENSE file for details.
 - ✅ Time abstraction for deterministic testing
 - ✅ Record/replay system with JSONL format
 - ✅ ADS-B file playback with deterministic timing
+- ✅ Live ADS-B source polling dump1090 `aircraft.json` with backoff and conditional requests
 - ✅ WGS‑84 geodesy helpers with deterministic unit and property tests
 - ✅ Rendering/UI foundation: Canvas API, Pygame display/input backends
 - ✅ PPI view with rings, ownship, trails, and labels
 - ✅ Deterministic golden-frame rendering test (headless, pinned SHA-256)
 - ✅ Comprehensive test suite
 - ✅ Development tooling and quality checks
+- ✅ Minimal live desktop viewer to visualize real traffic
 
 **Next Steps**:
-- Live ADS-B decoder implementation (SBS, Beast formats)
+- Additional live ADS-B formats (SBS, Beast)
 - GPS/IMU integration
 - Display rendering pipeline
 - Hardware platform drivers
