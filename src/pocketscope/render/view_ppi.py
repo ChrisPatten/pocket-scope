@@ -26,6 +26,7 @@ from math import cos, radians, sin
 from typing import Iterable, List, Optional, Sequence, Tuple
 
 from pocketscope.core.geo import ecef_to_enu, enu_to_screen, geodetic_to_ecef
+from pocketscope.render.airports_layer import AirportsLayer
 from pocketscope.render.canvas import Canvas, Color
 from pocketscope.render.labels import DataBlockFormatter as LabelFormatter
 from pocketscope.render.labels import DataBlockLayout as LabelLayout
@@ -73,12 +74,14 @@ class PpiView:
         *,
         range_nm: float = 10.0,
         show_data_blocks: bool = False,
+        show_airports: bool = True,
         label_font_px: int = 12,
         label_line_gap_px: int = 2,
         label_block_pad_px: int = 2,
     ) -> None:
         self.range_nm = float(range_nm)
         self.show_data_blocks = bool(show_data_blocks)
+        self.show_airports = bool(show_airports)
         # Data-block typography
         self.label_font_px = int(label_font_px)
         self.label_line_gap_px = int(label_line_gap_px)
@@ -104,12 +107,12 @@ class PpiView:
             trail in ENU
         airports: Optional list of (lat, lon, ident)
 
-                Notes
-                -----
-                - When ``show_data_blocks`` is True, labels are formatted with
-                    ``DataBlockFormatter.format_standard`` and positioned via
-                    ``DataBlockLayout`` with leader lines. Otherwise, a simple one-line
-                    text label is drawn near the glyph.
+        Notes
+        -----
+        - When ``show_data_blocks`` is True, labels are formatted with
+          ``DataBlockFormatter.format_standard`` and positioned via
+          ``DataBlockLayout`` with leader lines. Otherwise, a simple one-line
+          text label is drawn near the glyph.
         """
 
         # Use provided size for deterministic layout
@@ -137,12 +140,7 @@ class PpiView:
             canvas.circle((cx, cy), r_px, width=1, color=ColorRings)
             # Label to the right of center line
             label = f"{int(nm)} nm"
-            canvas.text(
-                (cx + r_px + 4, cy - 8),
-                label,
-                size_px=12,
-                color=ColorLabels,
-            )
+            canvas.text((cx + r_px + 4, cy - 8), label, size_px=12, color=ColorLabels)
 
         # North tick at top
         top_y = cy - radius_px
@@ -153,8 +151,7 @@ class PpiView:
         canvas.filled_circle((cx, cy), 4, color=ColorOwnship)
 
         # Precompute origin ECEF for ENU conversion
-        # We'll use ENU via ecef transforms for each track lat/lon
-        ox, oy, oz = geodetic_to_ecef(center_lat, center_lon, 0.0)
+        _ox, _oy, _oz = geodetic_to_ecef(center_lat, center_lon, 0.0)
 
         def to_screen(lat: float, lon: float) -> Tuple[int, int]:
             tx, ty, tz = geodetic_to_ecef(lat, lon, 0.0)
@@ -200,11 +197,6 @@ class PpiView:
                 # Tip point
                 tip = (gx + int(round(dx * size)), gy + int(round(dy * size)))
 
-                # Base points rotated by +/- 130 degrees around tip direction
-                def rot(x: float, y: float, ang: float) -> Tuple[float, float]:
-                    ca, sa = cos(ang), sin(ang)
-                    return (x * ca - y * sa, x * sa + y * ca)
-
                 # Construct base relative to center with some width
                 base_len = 6
                 base_w = 5
@@ -249,6 +241,31 @@ class PpiView:
                 canvas.text(
                     (gx + 6, gy - 12), label_text, size_px=12, color=ColorLabels
                 )
+
+        # Airports overlay (after trails/glyphs, before data blocks)
+        if self.show_airports and airports:
+            # Adapt tuple input to Airport dataclass if needed
+            try:
+                from pocketscope.data.airports import Airport
+
+                aps: list[Airport] = []
+                for lat, lon, ident in airports:
+                    aps.append(
+                        Airport(
+                            ident=str(ident).upper(), lat=float(lat), lon=float(lon)
+                        )
+                    )
+                AirportsLayer(font_px=12).draw(
+                    canvas,
+                    center_lat=center_lat,
+                    center_lon=center_lon,
+                    range_nm=self.range_nm,
+                    airports=aps,
+                    screen_size=(w, h),
+                )
+            except Exception:
+                # Be defensive if types don't match; ignore overlay rather than fail
+                pass
 
         if self.show_data_blocks and label_layout is not None:
             placements = label_layout.place_blocks(label_items)

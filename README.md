@@ -424,6 +424,7 @@ async def test_track_behavior():
 #### Canvas/Display/Input Abstractions
 - `Canvas` and `DisplayBackend` protocols provide a minimal, framework-agnostic rendering contract in `src/pocketscope/render/canvas.py`.
 - Pygame-based backends implement this contract and support both on-screen and fully headless operation via SDL's dummy video driver.
+- Airports overlay: lightweight markers + ident labels rendered via a dedicated layer (`render/airports_layer.py`) with range culling and on-screen clamping.
 
 #### Pygame Backends
 - Display backend: `src/pocketscope/platform/display/pygame_backend.py`
@@ -437,7 +438,8 @@ async def test_track_behavior():
 - `src/pocketscope/render/view_ppi.py` implements a north-up Plan Position Indicator with:
     - Range rings and north tick
     - Ownship symbol
-        - Ring-buffer trails, aircraft glyphs, and labels
+    - Ring-buffer trails, aircraft glyphs, and labels
+    - Optional airports overlay (5x5 px squares + monospaced ident labels) with range-based culling
         - ATC-style three-line data blocks with leader lines (default)
 
 ##### ATC-style Data Blocks
@@ -457,6 +459,7 @@ The PPI view supports rich ATC-style data blocks backed by `render/labels.py`:
 Defaults:
 - The live viewer shows full data blocks by default; pass `--simple` to enable minimal labels.
 - Leader lines and collision-aware placement are enabled automatically.
+ - Airports overlay can be enabled in the live viewer via `--show-airports` and an airports JSON file.
     - ENU mapping from geodetic sources
 
 #### Deterministic Golden-Frame Test
@@ -468,6 +471,11 @@ Defaults:
     - `SDL_VIDEODRIVER=dummy`
     - Offscreen surfaces and consistent font selection
     - Deterministic coordinates and draw ordering
+
+Additional golden snapshot for Airports overlay:
+- Test: `tests/render/test_airports_golden.py`
+- Verifies a portrait 320x480 frame with airports overlay enabled from a small ADS-B trace and a curated airports subset
+- Expected SHA-256: `d244df953f604b581a517e2a7ff5e4a2e30332651c8c4730f38f8e85a3acc5de`
 
 ### Project Structure
 
@@ -498,7 +506,10 @@ src/pocketscope/
 ├── render/                 # Visualization pipeline
 │   ├── canvas.py           # Canvas/DisplayBackend protocols and drawing primitives
 │   ├── view_ppi.py         # Plan Position Indicator view (north-up)
+│   ├── airports_layer.py   # Airports overlay layer (markers + ident labels)
 │   └── layers/             # Composable render layers
+├── data/                   # Reference and lightweight spatial data helpers
+│   └── airports.py         # Airports loader + nearest-neighbor selection
 ├── tools/                  # Development and debugging tools
 │   └── record_replay.py    # Event recording/replay
 ├── examples/               # Small runnable examples
@@ -514,6 +525,7 @@ src/pocketscope/
 │   ├── golden_frames/      # Visual regression tests
 │   ├── render/             # Rendering tests (golden frames)
 │   │   └── test_golden_ppi.py   # Deterministic PPI snapshot test
+│   │   └── test_airports_golden.py   # Airports overlay golden snapshot test
 │   ├── integration/        # Integration tests
 │   ├── tools/              # Tool tests
 │   └── unit/               # Unit tests
@@ -536,6 +548,9 @@ Core runtime dependencies:
 - **msgpack>=1.0**: Efficient binary serialization
  - **aiohttp>=3.9**: HTTP client for live dump1090 polling
  - **pygame-ce>=2.5.5** on Python ≥3.13, else **pygame>=2.3.0**: Display/input backend (module import remains `pygame`)
+  
+Optional data overlay:
+- Airports overlay uses a plain JSON file of airports (identifier, lat, lon); see `sample_data/airports.json` for a ready-to-use subset around MA/NH/RI/CT.
 
 ### Installation
 
@@ -602,6 +617,8 @@ pytest src/pocketscope/tests/core/test_events.py
 pytest src/pocketscope/tests/core/test_geo_unit.py
 pytest src/pocketscope/tests/core/test_geo_property.py
 pytest src/pocketscope/tests/tools/test_record_replay.py
+pytest tests/render/test_airports_unit.py
+pytest tests/render/test_airports_golden.py
 
 # Run with coverage
 pytest --cov=src/pocketscope
@@ -630,6 +647,7 @@ pytest tests/ingest/test_dump1090_json_source.py -q
 - **Core Tests** (`tests/core/`): Event system and time abstraction
 - **Tool Tests** (`tests/tools/`): Record/replay and utilities  
 - **Rendering/Golden Frame Tests** (`tests/render/`, `tests/golden_frames/`): Deterministic visual regression tests (headless)
+    - Airports overlay golden: `tests/render/test_airports_golden.py`
 - **Test Data** (`tests/data/`): Sample data files for testing
 
 ### Code Quality
@@ -796,11 +814,29 @@ python -m pocketscope.examples.live_view --simple
 
 # Tweak data block typography (font size and line gap)
 python -m pocketscope.examples.live_view --block-font-px 12 --block-line-gap-px -5
+
+# Enable airports overlay using a bundled sample list
+python -m pocketscope.examples.live_view \
+    --show-airports \
+    --airports-json sample_data/airports.json
 ```
 
 Notes:
 - Requires a GUI-capable environment; if the window doesn't appear, check `SDL_VIDEODRIVER` and system display settings.
 - Rendering remains deterministic in headless tests; the viewer explicitly requests a visible window.
+
+### Airports Overlay
+
+- Layer: `src/pocketscope/render/airports_layer.py`
+- Data helper: `src/pocketscope/data/airports.py` provides:
+    - `load_airports_json(path) -> list[Airport]` to load `{identifier, lat, lon}` arrays
+    - `nearest_airports(lat, lon, airports, max_nm=50.0, k=3)` for simple nearest selection using haversine distance
+- Live viewer flags:
+    - `--show-airports` to enable overlay
+    - `--airports-json PATH` to specify an airports file (see `sample_data/airports.json`)
+- Rendering rules:
+    - 5x5 px square markers (dim gray), ident labels in white, clamped on-screen
+    - Range-based culling at current PPI range
 
 ## File Formats
 
