@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass
-from typing import Any, Optional
+from typing import TYPE_CHECKING, Any, Optional, Sequence, cast
 
 from pocketscope.core.events import EventBus
 from pocketscope.core.geo import ecef_to_enu, geodetic_to_ecef
@@ -19,6 +19,9 @@ from pocketscope.core.tracks import TrackService
 from pocketscope.platform.display.pygame_backend import PygameDisplayBackend
 from pocketscope.render.view_ppi import PpiView, TrackSnapshot
 from pocketscope.ui.status_overlay import StatusOverlay
+
+if TYPE_CHECKING:
+    from pocketscope.data.sectors import Sector
 
 pg: Any = None
 try:  # optional import guard for environments without SDL
@@ -72,6 +75,7 @@ class UiController:
         center_lat: float | None = None,
         center_lon: float | None = None,
         airports: Optional[list[tuple[float, float, str]]] = None,
+        sectors: Optional[object] = None,
     ) -> None:
         self._display = display
         self._view = view
@@ -89,6 +93,8 @@ class UiController:
         self._airports: Optional[list[tuple[float, float, str]]] = (
             list(airports) if airports else None
         )
+        # Optional sectors: Sequence[Sector]
+        self._sectors = sectors
         # FPS tracking (EMA)
         self._prev_frame_t: Optional[float] = None
         self._fps_avg: float = cfg.target_fps
@@ -129,6 +135,7 @@ class UiController:
                     center_lon=self._center_lon,
                     tracks=snaps,
                     airports=self._airports,
+                    sectors=cast("Optional[Sequence[Sector]]", self._sectors),
                 )
 
                 # Diagnostics overlay

@@ -8,13 +8,15 @@ PocketScope is a handheld Pi-powered ATC-style scope for decoding and displaying
 - **Event-Driven System**: Async EventBus with bounded queues and backpressure handling
 - **Time Abstraction**: Deterministic testing support with SimTimeSource and RealTimeSource
 - **Modular Design**: Clean separation between ingestion, processing, and visualization
- - **Rendering/UI**: Framework-agnostic Canvas API, Pygame display/input backends, ATC-style data blocks, and deterministic golden-frame tests
+ - **Rendering/UI**: Framework-agnostic Canvas API, Pygame display/input backends, ATC-style data blocks, sector polygon overlays, and deterministic golden-frame tests
 
 ### Data Sources
 - **ADS-B**: File-based playback with deterministic timing and live polling of dump1090 `aircraft.json`
 - **Aircraft Tracking**: Real-time track maintenance with ring-buffer trails, state aggregation, and expiry management
 - **GPS**: Position and navigation data (NMEA serial)
 - **IMU**: Inertial measurement unit integration (9-axis sensors)
+- **Airports**: Static airport reference data from JSON files with identifier, lat/lon positioning
+- **Sector Data**: ARTCC sector polygon overlays (JSON/GeoJSON format)
 
 ### Infrastructure
 - **Record/Replay System**: JSONL-based event recording and deterministic replay
@@ -440,7 +442,8 @@ async def test_track_behavior():
     - Ownship symbol
     - Ring-buffer trails, aircraft glyphs, and labels
     - Optional airports overlay (5x5 px squares + monospaced ident labels) with range-based culling
-        - ATC-style three-line data blocks with leader lines (default)
+    - Optional sector polygon overlays with configurable colors and transparency
+    - ATC-style three-line data blocks with leader lines (default)
 
 ##### ATC-style Data Blocks
 The PPI view supports rich ATC-style data blocks backed by `render/labels.py`:
@@ -497,9 +500,11 @@ src/pocketscope/
 │   ├── canvas.py           # Canvas/DisplayBackend protocols and drawing primitives
 │   ├── view_ppi.py         # Plan Position Indicator view (north-up)
 │   ├── airports_layer.py   # Airports overlay layer (markers + ident labels)
+│   ├── sectors_layer.py    # Sector polygon overlay layer
 │   └── layers/             # Composable render layers
 ├── data/                   # Reference and lightweight spatial data helpers
-│   └── airports.py         # Airports loader + nearest-neighbor selection
+│   ├── airports.py         # Airports loader + nearest-neighbor selection
+│   └── sectors.py          # ARTCC sector polygons loader (JSON/GeoJSON)
 ├── tools/                  # Development and debugging tools
 │   └── record_replay.py    # Event recording/replay
 ├── examples/               # Small runnable examples
@@ -807,6 +812,9 @@ python -m pocketscope.examples.live_view --block-font-px 12 --block-line-gap-px 
 # Enable airports overlay using a bundled sample list (auto-detected if present)
 python -m pocketscope.examples.live_view --airports sample_data/airports.json
 
+# Enable sector polygon overlays (auto-detected if present)
+python -m pocketscope.examples.live_view --sectors sample_data/artcc.json
+
 # Local JSONL playback (overrides --url) and loops
 python -m pocketscope.examples.live_view --playback tests/data/adsb_trace_airports.jsonl
 ```
@@ -827,11 +835,25 @@ Notes:
     - 5x5 px square markers (dim gray), ident labels in white, clamped on-screen
     - Range-based culling at current PPI range
 
+### Sector Polygons Overlay
+
+- Layer: `src/pocketscope/render/sectors_layer.py`
+- Data helper: `src/pocketscope/data/sectors.py` provides:
+    - `load_sectors_json(path) -> list[Sector]` to load sector polygon data from JSON or GeoJSON
+    - Support for both simple JSON format (`{name, points: [{lat, lon}]}`) and GeoJSON FeatureCollection
+    - Automatic format detection and robust parsing with error handling
+- Live viewer flags:
+    - `--sectors PATH` to specify a sectors file (defaults to `sample_data/artcc.json` when present)
+- Rendering rules:
+    - Translucent polygon outlines with configurable color and transparency
+    - Uses ENU local tangent plane projection for accurate rendering
+    - Efficient clipping and range-based rendering optimization
+
 ### UI and Controls
 
 - Module: `src/pocketscope/ui/controllers.py` provides an interactive `UiController` with a status overlay (`ui/status_overlay.py`).
 - Key bindings (when using the live viewer with pygame window):
-    - `[` or `-`: zoom out; `]` or `=`: zoom in; `o`: toggle overlay; `q`/`ESC`: quit; mouse wheel: zoom in/out.
+    - `[` or `-`: zoom out; `]` or `=`: zoom in; `o`: toggle overlay (airports/sectors); `q`/`ESC`: quit; mouse wheel: zoom in/out.
     - Target FPS and range ladder are configurable via `UiConfig`.
 
 ## File Formats
@@ -924,6 +946,10 @@ MIT License - see LICENSE file for details.
 - ✅ WGS‑84 geodesy helpers with deterministic unit and property tests
 - ✅ Rendering/UI foundation: Canvas API, Pygame display/input backends
 - ✅ PPI view with rings, ownship, trails, and labels
+- ✅ ATC-style data blocks with leader lines and collision avoidance
+- ✅ Airports overlay with range-based culling and auto-detection
+- ✅ Sector polygon overlays with JSON/GeoJSON support and transparency
+- ✅ Interactive UI controls (zoom, overlay toggle, keyboard/mouse input)
 - ✅ Deterministic golden-frame rendering test (headless, pinned SHA-256)
 - ✅ Comprehensive test suite
 - ✅ Development tooling and quality checks

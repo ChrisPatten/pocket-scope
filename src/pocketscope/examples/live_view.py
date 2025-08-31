@@ -37,6 +37,7 @@ from pocketscope.core.models import AircraftTrack
 from pocketscope.core.time import RealTimeSource
 from pocketscope.core.tracks import TrackService
 from pocketscope.data.airports import load_airports_json
+from pocketscope.data.sectors import load_sectors_json
 from pocketscope.ingest.adsb.json_source import Dump1090JsonSource
 from pocketscope.ingest.adsb.playback_source import FilePlaybackSource
 from pocketscope.platform.display.pygame_backend import PygameDisplayBackend
@@ -131,6 +132,7 @@ async def main_async(args: argparse.Namespace) -> None:
     )
 
     airports = None
+    sectors = None
     airports_path: str | None = None
     if args.airports:
         airports_path = args.airports
@@ -152,6 +154,27 @@ async def main_async(args: argparse.Namespace) -> None:
         except Exception as e:
             print(f"[live_view] Failed to load airports: {e}")
 
+    # Sectors: optional path, default to sample_data/artcc.json if present
+    sectors_path: str | None = None
+    if args.sectors:
+        sectors_path = args.sectors
+    else:
+        try_default1 = (
+            Path(__file__).resolve().parents[3] / "sample_data" / "artcc.json"
+        )
+        try_default2 = Path.cwd() / "sample_data" / "artcc.json"
+        if try_default1.exists():
+            sectors_path = str(try_default1)
+        elif try_default2.exists():
+            sectors_path = str(try_default2)
+
+    if sectors_path:
+        try:
+            secs = load_sectors_json(sectors_path)
+            sectors = secs
+        except Exception as e:
+            print(f"[live_view] Failed to load sectors: {e}")
+
     ui = UiController(
         display=display,
         view=view,
@@ -162,6 +185,7 @@ async def main_async(args: argparse.Namespace) -> None:
         center_lat=float(args.center[0]),
         center_lon=float(args.center[1]),
         airports=airports,
+        sectors=sectors,
     )
 
     _print_help()
@@ -246,6 +270,15 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help=(
             "Path to airports.json; defaults to sample_data/airports.json if present"
+        ),
+    )
+    p.add_argument(
+        "--sectors",
+        type=str,
+        default=None,
+        help=(
+            "Path to sectors file (simple JSON or GeoJSON FeatureCollection);"
+            " defaults to sample_data/artcc.json if present"
         ),
     )
     return p.parse_args()
