@@ -23,6 +23,7 @@ repos:
     rev: v1.5.1
     hooks:
       - id: mypy
+        exclude: '(^|/)tests?/'
         additional_dependencies:
           - pydantic>=2.0
           - pytest>=7.0

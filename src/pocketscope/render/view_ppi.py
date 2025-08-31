@@ -23,7 +23,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from math import cos, radians, sin
-from typing import Iterable, List, Optional, Sequence, Tuple
+from typing import TYPE_CHECKING, Iterable, List, Optional, Sequence, Tuple
 
 from pocketscope.core.geo import ecef_to_enu, enu_to_screen, geodetic_to_ecef
 from pocketscope.render.airports_layer import AirportsLayer
@@ -32,6 +32,9 @@ from pocketscope.render.labels import DataBlockFormatter as LabelFormatter
 from pocketscope.render.labels import DataBlockLayout as LabelLayout
 from pocketscope.render.labels import OwnshipRef
 from pocketscope.render.labels import TrackSnapshot as LabelTrack
+
+if TYPE_CHECKING:  # for type hints only
+    from pocketscope.data.sectors import Sector
 
 ColorBG: Color = (0, 0, 0, 255)
 ColorRings: Color = (80, 80, 80, 255)
@@ -103,6 +106,7 @@ class PpiView:
         center_lon: float,
         tracks: Iterable[TrackSnapshot],
         airports: Optional[Sequence[Tuple[float, float, str]]] = None,
+        sectors: Optional[Sequence["Sector"]] = None,
     ) -> None:
         """Draw the PPI view contents.
         - Deterministic: draws tracks sorted by (callsign, icao), optional text
@@ -169,6 +173,26 @@ class PpiView:
         _draw_cardinal(90.0, "E")
         _draw_cardinal(180.0, "S")
         _draw_cardinal(270.0, "W")
+
+        # Optional sectors overlay: draw beneath ownship/tracks but above background.
+        if sectors:
+            try:
+                from pocketscope.data.sectors import Sector as _Sector
+                from pocketscope.render.sectors_layer import SectorsLayer
+
+                _secs: list[_Sector] = list(sectors)
+                SectorsLayer().draw(
+                    canvas,
+                    center_lat=center_lat,
+                    center_lon=center_lon,
+                    range_nm=self.range_nm,
+                    sectors=_secs,
+                    screen_size=(w, h),
+                    rotation_deg=self.rotation_deg,
+                )
+            except Exception:
+                # Defensive: ignore any rendering issues to keep PPI robust
+                pass
 
         # Ownship
         canvas.filled_circle((cx, cy), 4, color=ColorOwnship)

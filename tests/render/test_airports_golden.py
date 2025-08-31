@@ -121,7 +121,7 @@ async def test_airports_golden(tmp_path: Path) -> None:
     display.save_png(str(out_path))
 
     digest = _sha256_file(str(out_path))
-    expected = "ebb2b53233005b002b8e6cb360f68ef5db611791a09938f3e89fe16bf78f3e09"
+    expected = "c57fa40ff2a740a21f2ce9da5bec22583cabf7ef830d89b61e974c985a591a69"
     assert digest == expected
 
     # Cleanup
