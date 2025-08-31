@@ -9,7 +9,7 @@ import pytest
 from pocketscope.core.events import EventBus
 from pocketscope.core.time import SimTimeSource
 from pocketscope.core.tracks import TrackService
-from pocketscope.data.airports import load_airports_json, nearest_airports
+from pocketscope.data.sectors import load_sectors_json
 from pocketscope.ingest.adsb.playback_source import FilePlaybackSource
 from pocketscope.render.view_ppi import PpiView, TrackSnapshot
 
@@ -44,7 +44,7 @@ async def _drain_playback(ts: SimTimeSource, src: FilePlaybackSource) -> None:
 
 
 @pytest.mark.asyncio
-async def test_airports_golden(tmp_path: Path) -> None:
+async def test_render_golden(tmp_path: Path) -> None:
     # Ensure headless before importing pygame backend
     os.environ.setdefault("SDL_VIDEODRIVER", "dummy")
     from pocketscope.platform.display.pygame_backend import PygameDisplayBackend
@@ -55,7 +55,7 @@ async def test_airports_golden(tmp_path: Path) -> None:
 
     # Start services
     await tracks.run()
-    src = FilePlaybackSource("tests/data/adsb_trace_airports.jsonl", ts=ts, bus=bus)
+    src = FilePlaybackSource("tests/data/render_golden_aircraft.jsonl", ts=ts, bus=bus)
     task = __import__("asyncio").create_task(src.run())
 
     # Drain playback deterministically
@@ -97,10 +97,14 @@ async def test_airports_golden(tmp_path: Path) -> None:
             )
         )
 
-    # Prepare airports (limit to nearest to keep scene clean)
-    aps = load_airports_json("tests/data/airports_ma.json")
-    near = nearest_airports(center_lat, center_lon, aps, max_nm=50.0, k=3)
-    airports_tuples = [(ap.lat, ap.lon, ap.ident) for ap in near]
+    # Prepare airport
+    airports_tuples = [
+        (42.0008792, -71.1980411, "1B9"),  # Label should be offset
+        (42.12, -71.00, "BED"),  # Label should be default NE
+    ]
+
+    # Load sample sectors (2 polygons)
+    sectors = load_sectors_json("tests/data/render_golden_sectors.json")
 
     # Render a frame
     display = PygameDisplayBackend(size=(320, 480))
@@ -113,15 +117,16 @@ async def test_airports_golden(tmp_path: Path) -> None:
         center_lon=center_lon,
         tracks=snaps,
         airports=airports_tuples,
+        sectors=sectors,
     )
     display.end_frame()
 
     # Save and assert hash
-    out_path = tmp_path / "golden_airports.png"
+    out_path = Path(__file__).parent.parent / "out/golden_render.png"
     display.save_png(str(out_path))
 
     digest = _sha256_file(str(out_path))
-    expected = "c57fa40ff2a740a21f2ce9da5bec22583cabf7ef830d89b61e974c985a591a69"
+    expected = "a66b635b344747d616c543235852924c87013f07553c140b138952e4af480e51"
     assert digest == expected
 
     # Cleanup

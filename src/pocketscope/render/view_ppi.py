@@ -127,6 +127,9 @@ class PpiView:
         # Clear background
         canvas.clear(ColorBG)
 
+        # Track range ring label positions to avoid airport label conflicts
+        range_ring_exclusions: list[tuple[int, int, int, int]] = []
+
         # Range rings
         ring_ticks = [2.0, 5.0, 10.0]
         for nm in ring_ticks:
@@ -135,11 +138,29 @@ class PpiView:
             r_px = int((nm * meters_per_nm) / m_per_px)
             canvas.circle((cx, cy), r_px, width=1, color=ColorRings)
             if self.show_text_annotations:
+                label_text = f"{int(nm)} nm"
+                label_x = cx + r_px + 4
+                label_y = cy - 8
                 canvas.text(
-                    (cx + r_px + 4, cy - 8),
-                    f"{int(nm)} nm",
-                    size_px=12,
+                    (label_x, label_y),
+                    label_text,
+                    size_px=self.label_font_px,
                     color=ColorLabels,
+                )
+                # Add exclusion zone around this label
+                # Estimate label dimensions (conservative monospace assumption)
+                char_w = max(6, int(round(self.label_font_px * 0.6)))
+                label_w = len(label_text) * char_w
+                label_h = self.label_font_px
+                # Add some padding around the label
+                padding = 4
+                range_ring_exclusions.append(
+                    (
+                        label_x - padding,
+                        label_y - padding,
+                        label_w + 2 * padding,
+                        label_h + 2 * padding,
+                    )
                 )
 
         # Cardinal ticks and labels: draw short pips at N/E/S/W bearings
@@ -167,7 +188,22 @@ class PpiView:
                 tan_y = dir_x
                 lx = outer[0] - int(round(dir_x * 8)) + int(round(tan_x * 6))
                 ly = outer[1] - int(round(dir_y * 8)) + int(round(tan_y * 6))
-                canvas.text((lx, ly), label, size_px=12, color=ColorLabels)
+                canvas.text(
+                    (lx, ly), label, size_px=self.label_font_px, color=ColorLabels
+                )
+                # Add exclusion zone around cardinal label
+                char_w = max(6, int(round(self.label_font_px * 0.6)))
+                label_w = len(label) * char_w
+                label_h = self.label_font_px
+                padding = 4
+                range_ring_exclusions.append(
+                    (
+                        lx - padding,
+                        ly - padding,
+                        label_w + 2 * padding,
+                        label_h + 2 * padding,
+                    )
+                )
 
         _draw_cardinal(0.0, "N")
         _draw_cardinal(90.0, "E")
@@ -244,7 +280,7 @@ class PpiView:
                             ident=str(ident).upper(), lat=float(lat), lon=float(lon)
                         )
                     )
-                AirportsLayer(font_px=12).draw(
+                AirportsLayer(font_px=self.label_font_px).draw(
                     canvas,
                     center_lat=center_lat,
                     center_lon=center_lon,
@@ -252,6 +288,7 @@ class PpiView:
                     airports=aps,
                     screen_size=(w, h),
                     rotation_deg=self.rotation_deg,
+                    range_ring_exclusions=range_ring_exclusions,
                 )
             except Exception:
                 pass
@@ -318,7 +355,10 @@ class PpiView:
                 if self.show_simple_labels:
                     label_text = t.callsign or t.icao
                     canvas.text(
-                        (gx + 6, gy - 12), label_text, size_px=12, color=ColorLabels
+                        (gx + 6, gy - 12),
+                        label_text,
+                        size_px=self.label_font_px,
+                        color=ColorLabels,
                     )
 
         # Draw data blocks last

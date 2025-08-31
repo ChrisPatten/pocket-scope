@@ -44,6 +44,61 @@ class AirportsLayer:
         y = max(0, min(H - h, y))
         return (x, y)
 
+    @staticmethod
+    def _intersects_exclusions(
+        x: int, y: int, w: int, h: int, exclusions: list[tuple[int, int, int, int]]
+    ) -> bool:
+        """Check if a rectangle intersects with any exclusion zone."""
+        if not exclusions:
+            return False
+
+        for ex, ey, ew, eh in exclusions:
+            # Check if rectangles overlap
+            if x < ex + ew and x + w > ex and y < ey + eh and y + h > ey:
+                return True
+        return False
+
+    def _find_best_label_position(
+        self,
+        sx: int,
+        sy: int,
+        text: str,
+        char_w: int,
+        label_h: int,
+        W: int,
+        H: int,
+        exclusions: list[tuple[int, int, int, int]] | None,
+    ) -> tuple[int, int] | None:
+        """Find the best position for an airport label, avoiding exclusions."""
+        tw = max(0, len(text) * char_w)
+
+        # Try different positions around the airport marker in order of preference
+        positions = [
+            (sx + 6, sy - 8),  # NE (original)
+            (sx + 6, sy + 8),  # SE
+            (sx - tw - 6, sy - 8),  # NW
+            (sx - tw - 6, sy + 8),  # SW
+            (sx, sy - label_h - 8),  # N
+            (sx, sy + 8),  # S
+            (sx + 8, sy),  # E
+            (sx - tw - 8, sy),  # W
+        ]
+
+        for tx, ty in positions:
+            # Clamp to screen bounds
+            tx_clamped, ty_clamped = self._clamp_label(tx, ty, tw, label_h, W, H)
+
+            # Check if it intersects with exclusions
+            if exclusions and self._intersects_exclusions(
+                tx_clamped, ty_clamped, tw, label_h, exclusions
+            ):
+                continue
+
+            return (tx_clamped, ty_clamped)
+
+        # If no position works, return None to skip the label
+        return None
+
     def draw(
         self,
         canvas: Canvas,
@@ -53,6 +108,7 @@ class AirportsLayer:
         airports: Sequence[Airport],
         screen_size: tuple[int, int],
         rotation_deg: float = 0.0,
+        range_ring_exclusions: list[tuple[int, int, int, int]] | None = None,
     ) -> None:
         """Render airport markers and labels.
 
@@ -61,6 +117,11 @@ class AirportsLayer:
         - Label: ident to the NE of the marker with offset (+6, -8).
         - Cull airports outside the current range_nm (haversine).
         - Keep labels on-screen by clamping to canvas bounds.
+        - Avoid placing labels in range ring exclusion zones.
+
+        Args:
+            range_ring_exclusions: List of (x, y, width, height) rectangles
+                                 where airport labels should not be placed.
         """
 
         W, H = int(screen_size[0]), int(screen_size[1])
@@ -113,10 +174,12 @@ class AirportsLayer:
             sx, sy = to_screen(ap.lat, ap.lon)
             draw_square((sx, sy), size=5)
 
-            # Label to NE with small offset
+            # Find best position for label avoiding exclusions
             text = ap.ident
-            # Rough width in px for clamping
-            tw = max(0, len(text) * char_w)
-            tx, ty = sx + 6, sy - 8
-            tx, ty = self._clamp_label(tx, ty, tw, label_h, W, H)
-            canvas.text((tx, ty), text, size_px=self.font_px, color=LabelColor)
+            label_pos = self._find_best_label_position(
+                sx, sy, text, char_w, label_h, W, H, range_ring_exclusions
+            )
+
+            if label_pos is not None:
+                tx, ty = label_pos
+                canvas.text((tx, ty), text, size_px=self.font_px, color=LabelColor)

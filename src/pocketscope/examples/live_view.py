@@ -3,7 +3,7 @@ Live desktop viewer for dump1090 JSON traffic.
 
 Defaults to full ATC-style three-line data blocks with leader lines. Use
 ``--simple`` to show minimal one-line labels instead. Typography can be
-customized via ``--block-font-px`` and ``--block-line-gap-px``.
+customized via ``--font-px`` and ``--block-line-gap-px``.
 
 How to run:
     python -m pocketscope.examples.live_view \
@@ -17,7 +17,7 @@ Optional label switches:
 
     # Tweak data block typography
     python -m pocketscope.examples.live_view \
-            --block-font-px 12 --block-line-gap-px -5
+            --font-px 12 --block-line-gap-px -5
 
 This opens a Pygame window and renders live traffic centered on the given
 coordinates. Press Ctrl+C to exit.
@@ -121,13 +121,13 @@ async def main_async(args: argparse.Namespace) -> None:
     if args.playback:
         src = FilePlaybackSource(args.playback, ts=ts, bus=bus, speed=1.0, loop=True)
     else:
-        src = Dump1090JsonSource(args.url, bus=bus, poll_hz=5.0)
+        src = Dump1090JsonSource(args.url, bus=bus, poll_hz=1.0)
 
     # Open a window (portrait)
     display = PygameDisplayBackend(size=(480, 800), create_window=True)
     view = PpiView(
         show_data_blocks=not bool(args.simple),
-        label_font_px=args.block_font_px,
+        label_font_px=args.font_px,
         label_line_gap_px=args.block_line_gap_px,
     )
 
@@ -186,6 +186,7 @@ async def main_async(args: argparse.Namespace) -> None:
         center_lon=float(args.center[1]),
         airports=airports,
         sectors=sectors,
+        font_px=args.font_px,
     )
 
     _print_help()
@@ -224,7 +225,7 @@ def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="PocketScope Live Viewer")
     p.add_argument(
         "--url",
-        default="https://adsb.chrispatten.dev/data/aircraft.json",
+        default="http://127.0.0.1:8080/data/aircraft.json",
         help="dump1090 aircraft.json URL",
     )
     p.add_argument(
@@ -251,11 +252,11 @@ def parse_args() -> argparse.Namespace:
         help="Show simple labels instead of ATC-style three-line data blocks",
     )
     p.add_argument(
-        "--block-font-px",
-        dest="block_font_px",
+        "--font-px",
+        dest="font_px",
         type=int,
         default=12,
-        help="Data block font size in px (default: 12)",
+        help="Font size in px for all text on canvas (default: 12)",
     )
     p.add_argument(
         "--block-line-gap-px",

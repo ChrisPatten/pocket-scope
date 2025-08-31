@@ -807,7 +807,7 @@ python -m pocketscope.examples.live_view \
 python -m pocketscope.examples.live_view --simple
 
 # Tweak data block typography (font size and line gap)
-python -m pocketscope.examples.live_view --block-font-px 12 --block-line-gap-px -5
+python -m pocketscope.examples.live_view --font-px 12 --block-line-gap-px -5
 
 # Enable airports overlay using a bundled sample list (auto-detected if present)
 python -m pocketscope.examples.live_view --airports sample_data/airports.json

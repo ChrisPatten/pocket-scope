@@ -76,6 +76,7 @@ class UiController:
         center_lon: float | None = None,
         airports: Optional[list[tuple[float, float, str]]] = None,
         sectors: Optional[object] = None,
+        font_px: int = 12,
     ) -> None:
         self._display = display
         self._view = view
@@ -85,7 +86,7 @@ class UiController:
         self._cfg = cfg
         self._running = False
         self._task: asyncio.Task[None] | None = None
-        self._overlay = StatusOverlay(font_px=12)
+        self._overlay = StatusOverlay(font_px=font_px)
         # Defaults for Boston area if not provided
         self._center_lat = 42.0 if center_lat is None else float(center_lat)
         self._center_lon = -71.0 if center_lon is None else float(center_lon)
