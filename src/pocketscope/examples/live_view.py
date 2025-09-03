@@ -41,6 +41,7 @@ from pocketscope.data.sectors import load_sectors_json
 from pocketscope.ingest.adsb.json_source import Dump1090JsonSource
 from pocketscope.ingest.adsb.playback_source import FilePlaybackSource
 from pocketscope.platform.display.pygame_backend import PygameDisplayBackend
+from pocketscope.platform.display.web_backend import WebDisplayBackend
 from pocketscope.render.view_ppi import PpiView, TrackSnapshot
 from pocketscope.ui.controllers import UiConfig, UiController
 
@@ -107,7 +108,7 @@ def _print_help() -> None:
 async def main_async(args: argparse.Namespace) -> None:
     ts = RealTimeSource()
     bus = EventBus()
-    tracks = TrackService(bus, ts)
+    tracks = TrackService(bus, ts, expiry_s=300.0)
 
     # Source selection
     class _Source(Protocol):
@@ -124,7 +125,12 @@ async def main_async(args: argparse.Namespace) -> None:
         src = Dump1090JsonSource(args.url, bus=bus, poll_hz=1.0)
 
     # Open a window (portrait)
-    display = PygameDisplayBackend(size=(480, 800), create_window=True)
+    # Optionally expose the view over HTTP for a simple browser UI
+    display: PygameDisplayBackend | WebDisplayBackend
+    if args.web_ui:
+        display = WebDisplayBackend(size=(1280, 800), create_window=False)
+    else:
+        display = PygameDisplayBackend(size=(480, 800), create_window=True)
     view = PpiView(
         show_data_blocks=not bool(args.simple),
         label_font_px=args.font_px,
@@ -170,7 +176,13 @@ async def main_async(args: argparse.Namespace) -> None:
 
     if sectors_path:
         try:
-            secs = load_sectors_json(sectors_path)
+            secs = load_sectors_json(
+                sectors_path,
+                center_lat=float(args.center[0]),
+                center_lon=float(args.center[1]),
+                range_nm=float(args.range),
+                cull_factor=2.0,
+            )
             sectors = secs
         except Exception as e:
             print(f"[live_view] Failed to load sectors: {e}")
@@ -203,14 +215,21 @@ async def main_async(args: argparse.Namespace) -> None:
 
         # If UI finished (user quit), stop source and tracks.
         if ui_task in done:
+            if (exc := ui_task.exception()) is not None:
+                print(f"[live_view] UI task error: {exc}")
             await src.stop()
             await tracks.stop()
         # If source finished first (error or end), stop UI as well.
         if src_task in done:
+            if (exc := src_task.exception()) is not None:
+                print(f"[live_view] Source task error: {exc}")
             await ui.stop()
 
         # Await remaining tasks and swallow exceptions to ensure cleanup.
-        await asyncio.gather(*pending, return_exceptions=True)
+        results = await asyncio.gather(*pending, return_exceptions=True)
+        for r in results:
+            if isinstance(r, Exception):
+                print(f"[live_view] pending task error: {r}")
     finally:
         # Best-effort final cleanup.
         await tracks.stop()
@@ -281,6 +300,12 @@ def parse_args() -> argparse.Namespace:
             "Path to sectors file (simple JSON or GeoJSON FeatureCollection);"
             " defaults to sample_data/artcc.json if present"
         ),
+    )
+    p.add_argument(
+        "--web-ui",
+        dest="web_ui",
+        action="store_true",
+        help="Serve a minimal web UI at http://127.0.0.1:8000/ displaying the view",
     )
     return p.parse_args()
 
