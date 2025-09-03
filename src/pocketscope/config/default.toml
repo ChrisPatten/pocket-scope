@@ -31,6 +31,7 @@ dev = [
 
 [project.scripts]
 pocketscope = "pocketscope.__main__:main"
+pocketscope-maxrange = "pocketscope.tools.max_range_tracker:main"
 
 [tool.black]
 line-length = 88
