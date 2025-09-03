@@ -68,8 +68,20 @@ class AirportsLayer:
         W: int,
         H: int,
         exclusions: list[tuple[int, int, int, int]] | None,
+        occupied: list[tuple[int, int, int, int]] | None = None,
     ) -> tuple[int, int] | None:
-        """Find the best position for an airport label, avoiding exclusions."""
+        """Find a non-overlapping label position near (sx, sy).
+
+        Tries a set of candidate offsets (NE, SE, NW, SW, N, S, E, W). For each
+        candidate, clamps to screen bounds and rejects any position that
+        intersects with provided ``exclusions`` (e.g., range ring labels) or
+        previously placed airport label rectangles in ``occupied``. If all
+        direct candidates collide, performs a small spiral nudge around each
+        candidate to find the first collision-free placement.
+
+        Returns top-left (x, y) if a position is found; otherwise None to skip
+        rendering the label.
+        """
         tw = max(0, len(text) * char_w)
 
         # Try different positions around the airport marker in order of preference
@@ -84,17 +96,40 @@ class AirportsLayer:
             (sx - tw - 8, sy),  # W
         ]
 
+        avoid_rects: list[tuple[int, int, int, int]] = []
+        if exclusions:
+            avoid_rects.extend(exclusions)
+        if occupied:
+            avoid_rects.extend(occupied)
+
+        # First pass: try canonical positions in order; return first that fits
+        candidates: list[tuple[int, int]] = []
         for tx, ty in positions:
-            # Clamp to screen bounds
-            tx_clamped, ty_clamped = self._clamp_label(tx, ty, tw, label_h, W, H)
-
-            # Check if it intersects with exclusions
-            if exclusions and self._intersects_exclusions(
-                tx_clamped, ty_clamped, tw, label_h, exclusions
+            txc, tyc = self._clamp_label(tx, ty, tw, label_h, W, H)
+            candidates.append((txc, tyc))
+            if not avoid_rects or not self._intersects_exclusions(
+                txc, tyc, tw, label_h, avoid_rects
             ):
-                continue
+                return (txc, tyc)
 
-            return (tx_clamped, ty_clamped)
+        # Second pass: if all canonical positions collide, do a small spiral
+        # around the first preferred candidate to find a nearby fit.
+        if candidates:
+            base_x, base_y = candidates[0]
+            step = 6
+            max_attempts = 48
+            attempts = 0
+            while attempts < max_attempts:
+                r = 1 + attempts // 4
+                dir_idx = attempts % 4
+                dx = [step * r, 0, -step * r, 0][dir_idx]
+                dy = [0, step * r, 0, -step * r][dir_idx]
+                nx, ny = self._clamp_label(base_x + dx, base_y + dy, tw, label_h, W, H)
+                if not avoid_rects or not self._intersects_exclusions(
+                    nx, ny, tw, label_h, avoid_rects
+                ):
+                    return (nx, ny)
+                attempts += 1
 
         # If no position works, return None to skip the label
         return None
@@ -166,6 +201,9 @@ class AirportsLayer:
         char_w = max(6, int(round(self.font_px * 0.6)))
         label_h = self.font_px
 
+        # Track placed label rectangles to avoid overlaps between airport labels
+        placed_labels: list[tuple[int, int, int, int]] = []
+
         for ap in airports:
             # Range cull using haversine in NM
             if haversine_nm(center_lat, center_lon, ap.lat, ap.lon) > range_nm:
@@ -174,12 +212,23 @@ class AirportsLayer:
             sx, sy = to_screen(ap.lat, ap.lon)
             draw_square((sx, sy), size=5)
 
-            # Find best position for label avoiding exclusions
+            # Find best position for label avoiding exclusions and prior labels
             text = ap.ident
             label_pos = self._find_best_label_position(
-                sx, sy, text, char_w, label_h, W, H, range_ring_exclusions
+                sx,
+                sy,
+                text,
+                char_w,
+                label_h,
+                W,
+                H,
+                range_ring_exclusions,
+                placed_labels,
             )
 
             if label_pos is not None:
                 tx, ty = label_pos
                 canvas.text((tx, ty), text, size_px=self.font_px, color=LabelColor)
+                # Record occupied label rectangle (x, y, w, h)
+                tw = max(0, len(text) * char_w)
+                placed_labels.append((tx, ty, tw, label_h))
