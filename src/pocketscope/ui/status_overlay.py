@@ -71,6 +71,8 @@ class StatusOverlay:
         active_tracks: int,
         bus_summary: str,
         clock_utc: str,
+        units: str = "nm_ft_kt",
+        demo_mode: bool = False,
     ) -> None:
         """
         Draw a semi-transparent panel with the provided metrics.
@@ -84,14 +86,27 @@ class StatusOverlay:
         active_tracks: Count of active tracks.
         bus_summary: Short EventBus metrics summary string.
         clock_utc: Wall-clock time (UTC) formatted as HH:MM:SSZ.
+        units: Display units identifier for the range value.
+        demo_mode: When true a "DEMO" line is appended.
         """
 
-        # Format text lines first to size the background
+        if units == "mi_ft_mph":
+            rng = range_nm * 1.15078
+            rng_units = "mi"
+        elif units == "km_m_kmh":
+            rng = range_nm * 1.852
+            rng_units = "km"
+        else:
+            rng = range_nm
+            rng_units = "nm"
+
         lines: List[str] = [
-            f"FPS {fps_inst:4.1f} ({fps_avg:4.1f})  RNG {range_nm:4.0f} nm",
+            f"FPS {fps_inst:4.1f} ({fps_avg:4.1f})  RNG {rng:4.0f} {rng_units}",
             f"TRK {active_tracks:3d}  {bus_summary}",
             f"UTC {clock_utc}",
         ]
+        if demo_mode:
+            lines.append("DEMO")
 
         pad_x, pad_y = 6, 4
         text_w, text_h = _measure_text_lines(lines, font_px=self._font_px)

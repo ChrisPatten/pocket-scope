@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Dict, Sequence, Tuple
 
 from pocketscope.render.canvas import Canvas, Color, DisplayBackend
@@ -189,4 +190,5 @@ class PygameDisplayBackend(DisplayBackend):
         local_pg = pg
         if local_pg is None:  # pragma: no cover - should not happen at runtime
             raise RuntimeError("pygame is not available")
+        Path(path).parent.mkdir(parents=True, exist_ok=True)
         local_pg.image.save(self._surface, path)

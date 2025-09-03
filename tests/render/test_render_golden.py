@@ -126,7 +126,7 @@ async def test_render_golden(tmp_path: Path) -> None:
     display.save_png(str(out_path))
 
     digest = _sha256_file(str(out_path))
-    expected = "f1616ab738ba299ae593fafad0065db0edcb90fafa65e2c176501711fe717aae"
+    expected = "a66b635b344747d616c543235852924c87013f07553c140b138952e4af480e51"
     assert digest == expected
 
     # Cleanup

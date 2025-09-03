@@ -12,12 +12,15 @@ import asyncio
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Optional, Sequence, cast
 
-from pocketscope.core.events import EventBus
+from pocketscope.core.events import EventBus, Subscription, unpack
 from pocketscope.core.geo import ecef_to_enu, geodetic_to_ecef
 from pocketscope.core.time import TimeSource
 from pocketscope.core.tracks import TrackService
 from pocketscope.platform.display.pygame_backend import PygameDisplayBackend
 from pocketscope.render.view_ppi import PpiView, TrackSnapshot
+from pocketscope.settings.schema import Settings
+from pocketscope.settings.store import SettingsStore
+from pocketscope.ui.softkeys import SoftKeyBar
 from pocketscope.ui.status_overlay import StatusOverlay
 
 if TYPE_CHECKING:
@@ -87,6 +90,17 @@ class UiController:
         self._running = False
         self._task: asyncio.Task[None] | None = None
         self._overlay = StatusOverlay(font_px=font_px)
+        self._settings: Settings = SettingsStore.load()
+        self._cfg.range_nm = float(self._settings.range_nm)
+        self.units: str = self._settings.units
+        self.track_length_mode: str = self._settings.track_length_mode
+        self.demo_mode: bool = self._settings.demo_mode
+        self._apply_track_windows()
+        self._softkeys: SoftKeyBar | None = None
+        self._cfg_sub: Subscription | None = bus.subscribe("cfg.changed")
+        self._cfg_task: asyncio.Task[None] | None = asyncio.create_task(
+            self._cfg_listener()
+        )
         # Defaults for Boston area if not provided
         self._center_lat = 42.0 if center_lat is None else float(center_lat)
         self._center_lon = -71.0 if center_lon is None else float(center_lon)
@@ -104,6 +118,10 @@ class UiController:
             self._rotation_deg: float = float(getattr(self._view, "rotation_deg", 0.0))
         except Exception:
             self._rotation_deg = 0.0
+
+    def set_softkeys(self, bar: SoftKeyBar) -> None:
+        self._softkeys = bar
+        self._softkeys.layout()
 
     async def run(self) -> None:
         self._running = True
@@ -152,7 +170,11 @@ class UiController:
                         active_tracks=len(snaps),
                         bus_summary=bus_summary,
                         clock_utc=clock_utc,
+                        units=self.units,
+                        demo_mode=self.demo_mode,
                     )
+                if self._softkeys:
+                    self._softkeys.draw(canvas)
 
                 self._display.end_frame()
 
@@ -171,16 +193,57 @@ class UiController:
 
     async def stop(self) -> None:
         self._running = False
+        if self._cfg_sub:
+            await self._cfg_sub.close()
+            self._cfg_sub = None
+        if self._cfg_task:
+            self._cfg_task.cancel()
+            try:
+                await self._cfg_task
+            except asyncio.CancelledError:
+                pass
+            self._cfg_task = None
 
-    # Input handlers -----------------------------------------------------
     def zoom_in(self) -> None:
         self._cfg.range_nm = self._step_range(self._cfg.range_nm, direction=-1)
+        self._settings.range_nm = self._cfg.range_nm
+        SettingsStore.save_debounced(self._settings)
 
     def zoom_out(self) -> None:
         self._cfg.range_nm = self._step_range(self._cfg.range_nm, direction=+1)
+        self._settings.range_nm = self._cfg.range_nm
+        SettingsStore.save_debounced(self._settings)
 
     def toggle_overlay(self) -> None:
         self._cfg.overlay = not self._cfg.overlay
+
+    def cycle_units(self) -> None:
+        order = ["nm_ft_kt", "mi_ft_mph", "km_m_kmh"]
+        i = order.index(self.units)
+        self.units = order[(i + 1) % len(order)]
+        self._settings.units = self.units
+        SettingsStore.save_debounced(self._settings)
+
+    def cycle_track_length(self) -> None:
+        order = ["short", "medium", "long"]
+        i = order.index(self.track_length_mode)
+        self.track_length_mode = order[(i + 1) % len(order)]
+        self._settings.track_length_mode = self.track_length_mode
+        self._apply_track_windows()
+        SettingsStore.save_debounced(self._settings)
+
+    def toggle_demo(self) -> None:
+        self.demo_mode = not self.demo_mode
+        self._settings.demo_mode = self.demo_mode
+        SettingsStore.save_debounced(self._settings)
+
+    def _apply_track_windows(self) -> None:
+        mapping = {"short": 15.0, "medium": 45.0, "long": 120.0}
+        default = mapping.get(self.track_length_mode, 45.0)
+        next_map = {"short": "medium", "medium": "long", "long": "long"}
+        pinned = mapping[next_map[self.track_length_mode]]
+        self._tracks._trail_len_default_s = default
+        self._tracks._trail_len_pinned_s = pinned
 
     def rotate_left(self, step_deg: float = 5.0) -> None:
         """Rotate view counter-clockwise (left arrow)."""
@@ -199,6 +262,8 @@ class UiController:
                 self._running = False
             elif ev.type == pg.KEYDOWN:
                 key = ev.key
+                if self._softkeys:
+                    self._softkeys.on_key(pg.key.name(key))
                 if key in (pg.K_LEFTBRACKET, pg.K_MINUS):
                     self.zoom_out()
                 elif key in (pg.K_RIGHTBRACKET, pg.K_EQUALS):
@@ -211,6 +276,10 @@ class UiController:
                     self.toggle_overlay()
                 elif key in (pg.K_q, pg.K_ESCAPE):
                     self._running = False
+            elif ev.type == pg.MOUSEBUTTONDOWN:
+                if self._softkeys:
+                    x, y = ev.pos
+                    self._softkeys.on_mouse(x, y, ev.button == 1)
             elif ev.type == pg.MOUSEWHEEL:
                 if getattr(ev, "y", 0) > 0:
                     self.zoom_in()
@@ -234,6 +303,25 @@ class UiController:
         # Clamp to config bounds
         nv = max(float(self._cfg.min_range_nm), min(float(self._cfg.max_range_nm), nv))
         return nv
+
+    async def _cfg_listener(self) -> None:
+        if self._cfg_sub is None:
+            return
+        try:
+            async for env in self._cfg_sub:
+                data = unpack(env.payload)
+                try:
+                    new = Settings.model_validate(data)
+                except Exception:
+                    continue
+                self._settings = new
+                self._cfg.range_nm = float(new.range_nm)
+                self.units = new.units
+                self.track_length_mode = new.track_length_mode
+                self.demo_mode = new.demo_mode
+                self._apply_track_windows()
+        except asyncio.CancelledError:
+            pass
 
     def _build_snapshots(self) -> list[TrackSnapshot]:
         # Convert TrackService tracks into TrackSnapshot with short ENU trail
