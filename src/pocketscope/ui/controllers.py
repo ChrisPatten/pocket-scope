@@ -89,7 +89,12 @@ class UiController:
         self._cfg = cfg
         self._running = False
         self._task: asyncio.Task[None] | None = None
-        self._overlay = StatusOverlay(font_px=font_px)
+        # Overlay width: use full display width for now (could be narrower)
+        try:
+            disp_w, _disp_h = self._display.size()
+        except Exception:
+            disp_w = 300  # fallback
+        self._overlay = StatusOverlay(font_px=font_px, width_px=disp_w)
         self._settings: Settings = SettingsStore.load()
         self._cfg.range_nm = float(self._settings.range_nm)
         self.units: str = self._settings.units
@@ -159,17 +164,21 @@ class UiController:
 
                 # Diagnostics overlay
                 if self._cfg.overlay:
-                    fps_inst, fps_avg = self._update_fps(t0)
-                    bus_summary = self._bus_summary()
+                    # FPS/bus diagnostics removed from overlay per new wireframe
+                    _fps_inst, _fps_avg = self._update_fps(
+                        t0
+                    )  # still computed to keep EMA warm
+                    # Future: health flags derived from services; for now assume True
                     clock_utc = self._fmt_clock(self._ts.wall_time())
                     self._overlay.draw(
                         canvas,
-                        fps_inst=fps_inst,
-                        fps_avg=fps_avg,
                         range_nm=self._cfg.range_nm,
-                        active_tracks=len(snaps),
-                        bus_summary=bus_summary,
                         clock_utc=clock_utc,
+                        center_lat=self._center_lat,
+                        center_lon=self._center_lon,
+                        gps_ok=True,
+                        imu_ok=True,
+                        decoder_ok=True,
                         units=self.units,
                         demo_mode=self.demo_mode,
                     )

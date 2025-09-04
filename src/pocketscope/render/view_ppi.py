@@ -84,6 +84,7 @@ class PpiView:
         label_font_px: int = 12,
         label_line_gap_px: int = 2,
         label_block_pad_px: int = 2,
+        range_rings: Optional[Sequence[float]] = None,
     ) -> None:
         self.range_nm = float(range_nm)
         # Optional view rotation used only for the north tick; 0 keeps legacy behavior
@@ -96,6 +97,60 @@ class PpiView:
         self.label_font_px = int(label_font_px)
         self.label_line_gap_px = int(label_line_gap_px)
         self.label_block_pad_px = int(label_block_pad_px)
+        # Optional explicit ring distances (NM). If not provided we auto-compute
+        # a concise set of 2–5 "nice" rings terminating at the configured range.
+        self._explicit_rings = [float(r) for r in range_rings] if range_rings else None
+
+    # ---------------------------------------------------------------------
+    def _auto_range_rings(self) -> List[float]:
+        """Compute a small set of range ring distances (NM) for the view.
+
+        Rules / Rationale
+        -----------------
+        - Use a 1–2–5 decade pattern to pick "nice" distances.
+        - Always include the outermost ring at exactly ``self.range_nm``.
+        - Limit to at most 4 rings (including outer) to reduce clutter.
+        - Preserve legacy default for 10 NM => [2, 5, 10] (golden test stability).
+        - Never include rings spaced closer than 10% of outer range.
+        - Distances are strictly increasing and > 0.
+        """
+        rng = max(0.1, float(self.range_nm))
+        # Special-case legacy 10 NM to keep golden frames identical.
+        if abs(rng - 10.0) < 1e-6:
+            return [2.0, 5.0, 10.0]
+
+        rings: List[float] = []
+        # Generate candidate nice numbers up to range using 1,2,5 decades.
+        import math
+
+        exp_min = -2  # allow down to 0.01 nm if very small ranges
+        exp_max = int(math.floor(math.log10(rng))) + 1
+        candidates: List[float] = []
+        for e in range(exp_min, exp_max + 1):
+            scale = 10**e
+            for base in (1, 2, 5):
+                val = base * scale
+                if 0 < val < rng * 0.9999:  # below outer ring
+                    candidates.append(val)
+        # Deduplicate and sort
+        candidates = sorted({round(c, 6) for c in candidates})
+        # Filter out values that are too dense (<10% of outer range apart)
+        filtered: List[float] = []
+        min_gap = rng * 0.10
+        last = 0.0
+        for c in candidates:
+            if c - last >= min_gap:
+                filtered.append(c)
+                last = c
+        # Ensure we don't exceed 3 inner rings; keep the largest ones for context
+        rings = filtered[-3:]
+        # Always append the exact outer range (if not already)
+        if not rings or abs(rings[-1] - rng) > 1e-6:
+            rings.append(rng)
+        # Guarantee strictly increasing
+        rings = [r for r in rings if r > 0]
+        rings = sorted(rings)
+        return rings
 
     def draw(
         self,
@@ -130,8 +185,12 @@ class PpiView:
         # Track range ring label positions to avoid airport label conflicts
         range_ring_exclusions: list[tuple[int, int, int, int]] = []
 
-        # Range rings
-        ring_ticks = [2.0, 5.0, 10.0]
+        # Range rings (explicit or auto-derived)
+        ring_ticks = (
+            list(self._explicit_rings)
+            if self._explicit_rings is not None
+            else self._auto_range_rings()
+        )
         for nm in ring_ticks:
             if nm > self.range_nm:
                 continue

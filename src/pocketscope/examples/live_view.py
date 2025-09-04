@@ -204,13 +204,13 @@ async def main_async(args: argparse.Namespace) -> None:
     )
     bar = SoftKeyBar(
         display.size(),
+        bar_height=60,
+        pad_y=10,
+        border_width=0,
         actions={
-            "Zoom-": ui.zoom_out,
-            "Units": ui.cycle_units,
-            "Tracks": ui.cycle_track_length,
-            "Demo": ui.toggle_demo,
+            "-": ui.zoom_out,
             "Settings": lambda: None,
-            "Zoom+": ui.zoom_in,
+            "+": ui.zoom_in,
         },
     )
     ui.set_softkeys(bar)
