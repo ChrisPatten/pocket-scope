@@ -1,1 +1,0 @@
-# Golden frame rendering tests
