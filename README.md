@@ -8,7 +8,8 @@ PocketScope is a handheld Pi-powered ATC-style scope for decoding and displaying
 - **Event-Driven System**: Async EventBus with bounded queues and backpressure handling
 - **Time Abstraction**: Deterministic testing support with SimTimeSource and RealTimeSource
 - **Modular Design**: Clean separation between ingestion, processing, and visualization
- - **Rendering/UI**: Framework-agnostic Canvas API, Pygame display/input backends, ATC-style data blocks, sector polygon overlays, and deterministic golden-frame tests
+- **Rendering/UI**: Framework-agnostic Canvas API, Pygame display/input backends, ATC-style data blocks, sector polygon overlays, and deterministic golden-frame tests
+- **Persistent UI Settings**: Debounced JSON settings (units, default range, track length preset, demo mode, altitude filter, north-up lock) with soft key bar + settings screen
 
 ### Data Sources
 - **ADS-B**: File-based playback with deterministic timing and live polling of dump1090 `aircraft.json`
@@ -428,6 +429,22 @@ async def test_track_behavior():
 - Pygame-based backends implement this contract and support both on-screen and fully headless operation via SDL's dummy video driver.
 - Airports overlay: lightweight markers + ident labels rendered via a dedicated layer (`render/airports_layer.py`) with range culling and on-screen clamping.
 
+#### Persistent Settings & Soft Keys
+
+User-facing configuration is now persisted across runs:
+
+- `Settings` model (`settings/schema.py`) stored at `~/.pocketscope/settings.json` (override path with `POCKETSCOPE_HOME`).
+- Debounced atomic writes via `SettingsStore` to minimize unnecessary disk I/O while adjusting controls rapidly.
+- `ConfigWatcher` publishes `cfg.changed` when the file mtime changes allowing hot reload (e.g. manual edit in an editor) without restarting.
+- Soft key bar (`ui/softkeys.py`) renders large tap/click targets (Zoom-/+, Units, Tracks, Demo, Settings) with auto font scaling.
+- Settings screen overlay (`ui/settings_screen.py`) toggled by Settings soft key or `s` key; edits are staged and flushed explicitly via Save (Back dismisses without forcing immediate write).
+- Persisted fields: units; default range step (2/5/10/20/40/80 NM); track length preset (short=15s, medium=45s, long=120s); demo mode; altitude filter band (All, 0–5k, 5–10k, 10–20k, >20k); north-up lock.
+- Altitude filter excludes aircraft outside selected band (and hides unknown altitude when a band is active).
+- North-up lock enforces rotation 0°; unlock enables arrow-key rotation.
+- Demo mode loops a bundled JSONL trace (`sample_data/demo_adsb.jsonl`), temporarily re-centers on first record and displays a DEMO badge.
+
+Extensive tests in `tests/ui/` assert persistence, hot reload, filter correctness, rotation lock behavior, settings screen mouse interactions, and trail length trimming.
+
 #### Pygame Backends
 - Display backend: `src/pocketscope/platform/display/pygame_backend.py`
     - Offscreen Surface with per-pixel alpha
@@ -444,6 +461,7 @@ async def test_track_behavior():
     - Optional airports overlay (5x5 px squares + monospaced ident labels) with range-based culling
     - Optional sector polygon overlays with configurable colors and transparency
     - ATC-style three-line data blocks with leader lines (default)
+    - Altitude filter band + north-up lock (rotation enforced when locked; filtering applied during snapshot build)
 
 ##### ATC-style Data Blocks
 The PPI view supports rich ATC-style data blocks backed by `render/labels.py`:
@@ -464,6 +482,7 @@ Defaults:
 - Leader lines and collision-aware placement are enabled automatically.
  - Airports overlay can be enabled in the live viewer via `--airports PATH`; if omitted, a `sample_data/airports.json` file is auto-detected when present.
     - ENU mapping from geodetic sources
+ - Soft key bar + settings screen available in live viewer for quick range, units, track length, demo toggle, altitude filter, and north-up lock adjustments.
 
 #### Rendering Tests
 - A lightweight, headless input smoke test validates the pygame backend event flow.
@@ -642,7 +661,9 @@ pytest tests/ingest/test_dump1090_json_source.py -q
 - **Tool Tests** (`tests/tools/`): Record/replay and utilities  
 - **Rendering/Golden Frame Tests** (`tests/render/`, `tests/golden_frames/`): Deterministic visual regression tests (headless)
     - Airports overlay golden: `tests/render/test_airports_golden.py`
+    - Golden render smoke updated to ensure soft key / settings overlay do not regress drawing
 - **Test Data** (`tests/data/`): Sample data files for testing
+ - **UI / Settings Tests** (`tests/ui/`): Soft keys, settings persistence, altitude filter, north-up lock, settings screen mouse, track length trimming.
 
 ### Code Quality
 
@@ -817,6 +838,10 @@ python -m pocketscope.examples.live_view --sectors sample_data/artcc.json
 
 # Local JSONL playback (overrides --url) and loops
 python -m pocketscope.examples.live_view --playback tests/data/adsb_trace_airports.jsonl
+
+# Run with persistent settings + soft keys + settings screen
+python -m pocketscope.examples.live_view --url http://127.0.0.1:8080/data/aircraft.json --range 20 --center 42.0,-71.0
+    # Interact via soft keys (click/tap) or press 's' for Settings. Settings stored in ~/.pocketscope/settings.json
 ```
 
 Notes:
@@ -853,8 +878,23 @@ Notes:
 
 - Module: `src/pocketscope/ui/controllers.py` provides an interactive `UiController` with a status overlay (`ui/status_overlay.py`).
 - Key bindings (when using the live viewer with pygame window):
-    - `[` or `-`: zoom out; `]` or `=`: zoom in; `o`: toggle overlay (airports/sectors); `q`/`ESC`: quit; mouse wheel: zoom in/out.
+    - `[` or `-`: zoom out; `]` or `=`: zoom in; `o`: toggle overlay (airports/sectors)
+    - `s`: toggle Settings screen; `u`: cycle units; `t`: cycle track length; `d`: toggle demo mode
+    - Arrow Left / Right: rotate when north-up lock disabled; `q` / `ESC`: quit; mouse wheel: zoom in/out.
     - Target FPS and range ladder are configurable via `UiConfig`.
+
+#### Settings Screen Fields
+
+| Field | Description | Persistence |
+|-------|-------------|-------------|
+| Units | Cycle nm/ft/kt → mi/ft/mph → km/m/kmh | Debounced save |
+| Range Default | Default zoom ladder step (2–80 NM) | Debounced save |
+| Track Length | Trail retention preset (15s / 45s / 120s; pinned = next tier) | Debounced save (immediate retrim) |
+| Altitude Filter | Visibility band (All, 0–5k, 5–10k, 10–20k, >20k) | Debounced save |
+| Demo Mode | Loop JSONL trace + DEMO badge + temporary recenter | Debounced save |
+| North-up Lock | Enforce rotation 0°; unlock enables arrow rotation | Debounced save |
+
+Save soft key immediately flushes; Back dismisses without forcing immediate write.
 
 ## File Formats
 
@@ -950,6 +990,12 @@ MIT License - see LICENSE file for details.
 - ✅ Airports overlay with range-based culling and auto-detection
 - ✅ Sector polygon overlays with JSON/GeoJSON support and transparency
 - ✅ Interactive UI controls (zoom, overlay toggle, keyboard/mouse input)
+ - ✅ Soft key bar with autoscaling labels
+ - ✅ Persistent JSON settings (units, range, track length, demo mode, altitude filter, north-up lock)
+ - ✅ Settings screen overlay (staged edits + Back/Save softkeys)
+ - ✅ Altitude filter banding & snapshot filtering
+ - ✅ North-up lock & view rotation (arrow keys when unlocked)
+ - ✅ Demo mode with looping JSONL playback + center override & badge
 - ✅ Deterministic golden-frame rendering test (headless, pinned SHA-256)
 - ✅ Comprehensive test suite
 - ✅ Development tooling and quality checks
