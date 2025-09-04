@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Sequence, Tuple
 
 from pocketscope.data.sectors import Sector, load_sectors_json
@@ -53,8 +54,8 @@ class FakeCanvas:
         self.calls.append(("text", (pos, s), {"size_px": size_px, "color": color}))
 
 
-def test_load_and_normalize() -> None:
-    sectors = load_sectors_json("tests/data/sectors_sample.json")
+def test_load_and_normalize(fixtures_dir: Path) -> None:
+    sectors = load_sectors_json(str(fixtures_dir / "sectors_sample.json"))
     names = {s.name for s in sectors}
     assert "ZBW37" in names and "ZBW38" in names
     # Must have 4 points each
@@ -62,8 +63,8 @@ def test_load_and_normalize() -> None:
         assert len(s.points) == 4
 
 
-def test_draw_square_polyline_and_label() -> None:
-    sectors = load_sectors_json("tests/data/sectors_sample.json")
+def test_draw_square_polyline_and_label(fixtures_dir: Path) -> None:
+    sectors = load_sectors_json(str(fixtures_dir / "sectors_sample.json"))
     # Choose the ZBW37 one, a ~square around (42.0, -71.1)
     s = [x for x in sectors if x.name == "ZBW37"][0]
 

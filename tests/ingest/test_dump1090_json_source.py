@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import json
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -12,13 +11,6 @@ from aiohttp import web
 from pocketscope.core.events import EventBus, unpack
 from pocketscope.core.models import AdsbMessage
 from pocketscope.ingest.adsb.json_source import Dump1090JsonSource
-
-
-def load_fixture(name: str) -> dict[str, Any]:
-    p = Path(__file__).resolve().parents[1] / "data" / name
-    with p.open("r", encoding="utf-8") as f:
-        data: dict[str, Any] = json.load(f)
-        return data
 
 
 async def _start_test_server(
@@ -57,7 +49,9 @@ async def _start_test_server(
 
 
 @pytest.mark.asyncio
-async def test_dump1090_json_source_maps_and_publishes(tmp_path: Path) -> None:
+async def test_dump1090_json_source_maps_and_publishes(
+    tmp_path: Path, load_fixture
+) -> None:
     # Prepare fixture and server
     fixture = load_fixture("aircraft_sample.json")
     runner, site, url = await _start_test_server([(200, fixture)])
@@ -114,7 +108,7 @@ async def test_dump1090_json_source_maps_and_publishes(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_dump1090_json_source_backoff_and_recovery() -> None:
+async def test_dump1090_json_source_backoff_and_recovery(load_fixture) -> None:
     # First response 500, then good
     fixture = load_fixture("aircraft_sample.json")
     runner, site, url = await _start_test_server(

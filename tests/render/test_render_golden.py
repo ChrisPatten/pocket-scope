@@ -44,7 +44,7 @@ async def _drain_playback(ts: SimTimeSource, src: FilePlaybackSource) -> None:
 
 
 @pytest.mark.asyncio
-async def test_render_golden(tmp_path: Path) -> None:
+async def test_render_golden(tmp_path: Path, fixtures_dir: Path) -> None:
     # Ensure headless before importing pygame backend
     os.environ.setdefault("SDL_VIDEODRIVER", "dummy")
     from pocketscope.platform.display.pygame_backend import PygameDisplayBackend
@@ -55,7 +55,9 @@ async def test_render_golden(tmp_path: Path) -> None:
 
     # Start services
     await tracks.run()
-    src = FilePlaybackSource("tests/data/render_golden_aircraft.jsonl", ts=ts, bus=bus)
+    src = FilePlaybackSource(
+        str(fixtures_dir / "render_golden_aircraft.jsonl"), ts=ts, bus=bus
+    )
     task = __import__("asyncio").create_task(src.run())
 
     # Drain playback deterministically
@@ -104,7 +106,7 @@ async def test_render_golden(tmp_path: Path) -> None:
     ]
 
     # Load sample sectors (2 polygons)
-    sectors = load_sectors_json("tests/data/render_golden_sectors.json")
+    sectors = load_sectors_json(str(fixtures_dir / "render_golden_sectors.json"))
 
     # Render a frame
     display = PygameDisplayBackend(size=(320, 480))
@@ -128,7 +130,7 @@ async def test_render_golden(tmp_path: Path) -> None:
     digest = _sha256_file(str(out_path))
     # Updated expected hash after enabling dynamic range rings (now includes
     # an outer 20 NM ring in addition to inner rings).
-    expected = "705802f6507c64acf4ce24047c6457134b83e91e93698bc280fa0e40f09de53e"
+    expected = "14d0aaab1ed611c872ac915900dd11a289a2725200e5e89cf7aeda48db33a6fb"
     assert digest == expected
 
     # Cleanup

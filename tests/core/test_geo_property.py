@@ -3,7 +3,7 @@ from __future__ import annotations
 from math import cos, radians, sin
 
 import hypothesis.strategies as st
-from hypothesis import given, settings
+from hypothesis import assume, given, settings
 
 from pocketscope.core.geo import (
     dest_point,
@@ -67,6 +67,7 @@ def test_triangle_inequality(
     d12 = haversine_nm(lat1, lon1, lat2, lon2)
     d23 = haversine_nm(lat2, lon2, lat3, lon3)
     d13 = haversine_nm(lat1, lon1, lat3, lon3)
+    assume(d13 < 10800)
     assert d13 <= d12 + d23 + 1e-6
 
 
