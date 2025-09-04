@@ -118,6 +118,11 @@ class _PygameCanvas(Canvas):
         surf = font.render(s, True, _pygame_color(color))
         self._surface.blit(surf, pos)
 
+    def text_size(self, s: str, size_px: int = 12) -> Tuple[int, int]:
+        font = self._font_cache.get(size_px)
+        w, h = font.size(s)
+        return int(w), int(h)
+
 
 class PygameDisplayBackend(DisplayBackend):
     """Pygame implementation of DisplayBackend with offscreen surface.

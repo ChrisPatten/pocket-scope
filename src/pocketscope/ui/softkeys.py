@@ -233,6 +233,7 @@ class SoftKeyBar:
             "u": "Units",
             "t": "Tracks",
             "d": "Demo",
+            "s": "Settings",
         }
         label = mapping.get(key)
         if label:
