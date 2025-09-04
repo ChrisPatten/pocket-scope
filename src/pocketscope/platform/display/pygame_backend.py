@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Dict, Sequence, Tuple
 
 from pocketscope.render.canvas import Canvas, Color, DisplayBackend
@@ -117,6 +118,11 @@ class _PygameCanvas(Canvas):
         surf = font.render(s, True, _pygame_color(color))
         self._surface.blit(surf, pos)
 
+    def text_size(self, s: str, size_px: int = 12) -> Tuple[int, int]:
+        font = self._font_cache.get(size_px)
+        w, h = font.size(s)
+        return int(w), int(h)
+
 
 class PygameDisplayBackend(DisplayBackend):
     """Pygame implementation of DisplayBackend with offscreen surface.
@@ -189,4 +195,5 @@ class PygameDisplayBackend(DisplayBackend):
         local_pg = pg
         if local_pg is None:  # pragma: no cover - should not happen at runtime
             raise RuntimeError("pygame is not available")
+        Path(path).parent.mkdir(parents=True, exist_ok=True)
         local_pg.image.save(self._surface, path)

@@ -4,7 +4,10 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "pocketscope"
-version = "0.1.0"
+# Version is managed in pyproject.toml via attr = "pocketscope.__version__"
+# and defined in pocketscope/__init__.py. This local value is intentionally
+# omitted to prevent divergence.
+# version = "(see pocketscope.__version__)"
 description = "PocketScope — a handheld Pi-powered ATC-style scope for decoding and displaying ADS-B traffic"
 readme = "README.md"
 requires-python = ">=3.11"

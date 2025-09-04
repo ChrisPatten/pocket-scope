@@ -43,7 +43,9 @@ from pocketscope.ingest.adsb.playback_source import FilePlaybackSource
 from pocketscope.platform.display.pygame_backend import PygameDisplayBackend
 from pocketscope.platform.display.web_backend import WebDisplayBackend
 from pocketscope.render.view_ppi import PpiView, TrackSnapshot
+from pocketscope.tools.config_watcher import ConfigWatcher
 from pocketscope.ui.controllers import UiConfig, UiController
+from pocketscope.ui.softkeys import SoftKeyBar
 
 
 def _make_snapshots(
@@ -200,6 +202,20 @@ async def main_async(args: argparse.Namespace) -> None:
         sectors=sectors,
         font_px=args.font_px,
     )
+    bar = SoftKeyBar(
+        display.size(),
+        bar_height=60,
+        pad_y=10,
+        border_width=0,
+        actions={
+            "-": ui.zoom_out,
+            "Settings": lambda: None,
+            "+": ui.zoom_in,
+        },
+    )
+    ui.set_softkeys(bar)
+    watcher = ConfigWatcher(bus, poll_hz=2.0)
+    asyncio.create_task(watcher.run())
 
     _print_help()
     # Start track maintenance (spawns internal tasks and returns immediately).

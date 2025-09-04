@@ -126,7 +126,9 @@ async def test_render_golden(tmp_path: Path) -> None:
     display.save_png(str(out_path))
 
     digest = _sha256_file(str(out_path))
-    expected = "f1616ab738ba299ae593fafad0065db0edcb90fafa65e2c176501711fe717aae"
+    # Updated expected hash after enabling dynamic range rings (now includes
+    # an outer 20 NM ring in addition to inner rings).
+    expected = "705802f6507c64acf4ce24047c6457134b83e91e93698bc280fa0e40f09de53e"
     assert digest == expected
 
     # Cleanup

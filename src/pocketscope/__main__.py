@@ -1,5 +1,7 @@
 import argparse
 
+from pocketscope import __version__
+
 
 def main() -> None:
     parser = argparse.ArgumentParser(
@@ -8,7 +10,11 @@ def main() -> None:
             "PocketScope: Modular sensor ingest, processing, and " "visualization."
         ),
     )
-    parser.add_argument("--version", action="version", version="PocketScope 0.1.0")
+    parser.add_argument(
+        "--version",
+        action="version",
+        version=f"PocketScope {__version__}",
+    )
     parser.parse_args()
     # Add CLI logic here
 

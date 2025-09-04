@@ -4,7 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "pocketscope"
-version = "0.1.0"
+# Version is now sourced from the package attribute pocketscope.__version__
+version = { attr = "pocketscope.__version__" }
 description = "PocketScope — a handheld Pi-powered ATC-style scope for decoding and displaying ADS-B traffic"
 readme = "README.md"
 requires-python = ">=3.11"

@@ -345,3 +345,31 @@ class TrackService:
             # Use the track's latest message time as reference for re-trimming
             current_time = track.last_ts.timestamp()
             self._trim_trail(track, current_time)
+
+    # Maintenance helpers -------------------------------------------------
+    def retrim_all(self) -> None:
+        """Force re-trimming of all active track histories.
+
+        Invoked when the global trail length settings change (e.g. user
+        cycles Track Length in the settings menu) so the visual trails
+        shrink immediately instead of waiting for the next position
+        update per track. Uses each track's latest timestamp as the
+        reference time which matches the semantics in :meth:`pin`.
+        """
+        for track in self._tracks.values():
+            try:
+                self._trim_trail(track, track.last_ts.timestamp())
+            except Exception:
+                # Defensive: never let a single bad track block others
+                continue
+
+    # Demo / maintenance utilities ------------------------------------
+    def clear(self) -> None:
+        """Remove all active tracks and reset internal state.
+
+        Used when toggling demo playback on/off so previously ingested
+        tracks (live or demo) do not mix. Intentionally silent and fast.
+        """
+        self._tracks.clear()
+        self._pinned.clear()
+        self._last_position_ts.clear()
