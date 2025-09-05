@@ -14,7 +14,7 @@ from pocketscope.ingest.adsb.json_source import Dump1090JsonSource
 
 
 async def _start_test_server(
-    responses: list[tuple[int, dict[str, Any]]]
+    responses: list[tuple[int, dict[str, Any]]],
 ) -> tuple[web.AppRunner, web.TCPSite, str]:
     """Start a simple aiohttp server that serves a sequence of JSON responses.
 

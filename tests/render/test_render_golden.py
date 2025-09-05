@@ -82,20 +82,24 @@ async def test_render_golden(tmp_path: Path, fixtures_dir: Path) -> None:
                 lat=lat,
                 lon=lon,
                 callsign=tr.callsign,
-                course_deg=_flt(tr.state.get("track_deg"))
-                if "track_deg" in tr.state
-                else None,
+                course_deg=(
+                    _flt(tr.state.get("track_deg")) if "track_deg" in tr.state else None
+                ),
                 trail_enu=None,
                 geo_alt_ft=None,
-                baro_alt_ft=_flt(tr.state.get("baro_alt"))
-                if "baro_alt" in tr.state
-                else None,
-                ground_speed_kt=_flt(tr.state.get("ground_speed"))
-                if "ground_speed" in tr.state
-                else None,
-                vertical_rate_fpm=_flt(tr.state.get("vertical_rate"))
-                if "vertical_rate" in tr.state
-                else None,
+                baro_alt_ft=(
+                    _flt(tr.state.get("baro_alt")) if "baro_alt" in tr.state else None
+                ),
+                ground_speed_kt=(
+                    _flt(tr.state.get("ground_speed"))
+                    if "ground_speed" in tr.state
+                    else None
+                ),
+                vertical_rate_fpm=(
+                    _flt(tr.state.get("vertical_rate"))
+                    if "vertical_rate" in tr.state
+                    else None
+                ),
             )
         )
 
@@ -128,6 +132,8 @@ async def test_render_golden(tmp_path: Path, fixtures_dir: Path) -> None:
     display.save_png(str(out_path))
 
     digest = _sha256_file(str(out_path))
+    # Golden hash updated after display backend typing changes
+    # (verify visually before updating this value)
     expected = "14d0aaab1ed611c872ac915900dd11a289a2725200e5e89cf7aeda48db33a6fb"
     assert digest == expected
 

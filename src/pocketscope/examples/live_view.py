@@ -29,7 +29,7 @@ import argparse
 import asyncio
 from collections.abc import Iterable
 from pathlib import Path
-from typing import Protocol
+from typing import TYPE_CHECKING, Any, Awaitable, Optional, Protocol, cast
 
 from pocketscope.core.events import EventBus
 from pocketscope.core.geo import ecef_to_enu, geodetic_to_ecef
@@ -42,10 +42,33 @@ from pocketscope.ingest.adsb.json_source import Dump1090JsonSource
 from pocketscope.ingest.adsb.playback_source import FilePlaybackSource
 from pocketscope.platform.display.pygame_backend import PygameDisplayBackend
 from pocketscope.platform.display.web_backend import WebDisplayBackend
+from pocketscope.render.canvas import DisplayBackend
 from pocketscope.render.view_ppi import PpiView, TrackSnapshot
 from pocketscope.tools.config_watcher import ConfigWatcher
 from pocketscope.ui.controllers import UiConfig, UiController
 from pocketscope.ui.softkeys import SoftKeyBar
+
+if TYPE_CHECKING:  # pragma: no cover - for static type checking only
+    from pocketscope.platform.display.ili9341_backend import (
+        ILI9341DisplayBackend as _ILI9341Cls,
+    )
+    from pocketscope.platform.input.xpt2046_touch import XPT2046Touch as _TouchCls
+else:  # runtime optional imports with graceful fallback
+    try:  # optional on desktop / hardware
+        from pocketscope.platform.display.ili9341_backend import (
+            ILI9341DisplayBackend as _ILI9341Cls,
+        )
+    except Exception:  # pragma: no cover
+        _ILI9341Cls = None
+    try:
+        from pocketscope.platform.input.xpt2046_touch import XPT2046Touch as _TouchCls
+    except Exception:  # pragma: no cover
+        _TouchCls = None
+
+# Public optional names (narrow types when available)
+ILI9341DisplayBackend: Optional[type[Any]] = _ILI9341Cls
+XPT2046Touch: Optional[type[Any]] = _TouchCls
+## (imports moved to top for lint compliance)
 
 
 def _make_snapshots(
@@ -126,10 +149,26 @@ async def main_async(args: argparse.Namespace) -> None:
     else:
         src = Dump1090JsonSource(args.url, bus=bus, poll_hz=1.0)
 
-    # Open a window (portrait)
-    # Optionally expose the view over HTTP for a simple browser UI
-    display: PygameDisplayBackend | WebDisplayBackend
-    if args.web_ui:
+    # Open a window (portrait) and optionally expose the view over HTTP.
+    display: DisplayBackend
+    touch: Any | None = None
+    if getattr(args, "tft", False) and ILI9341DisplayBackend is not None:
+        # Physical TFT portrait 240x320 (rotate logical view if desired later)
+        display = ILI9341DisplayBackend(width=240, height=320)
+        if XPT2046Touch is not None:  # pragma: no branch - simple availability
+            touch = XPT2046Touch(width=240, height=320)
+            _run = getattr(touch, "run", None)
+            if callable(_run):
+                try:
+                    maybe_coro = _run()
+                except Exception:
+                    maybe_coro = None
+                if maybe_coro is not None and hasattr(maybe_coro, "__await__"):
+                    asyncio.create_task(
+                        cast(Awaitable[Any], maybe_coro)  # type: ignore[arg-type]
+                    )
+        print("[live_view] TFT mode active (ILI9341 + XPT2046)")
+    elif args.web_ui:
         display = WebDisplayBackend(size=(1280, 800), create_window=False)
     else:
         display = PygameDisplayBackend(size=(480, 800), create_window=True)
@@ -214,6 +253,16 @@ async def main_async(args: argparse.Namespace) -> None:
         },
     )
     ui.set_softkeys(bar)
+    # If touch backend active, log basic tap events for diagnostics.
+    if touch is not None and hasattr(touch, "get_events"):
+
+        async def _touch_logger() -> None:
+            while True:
+                for ev in touch.get_events():
+                    print(f"[touch] {ev.type} {ev.x},{ev.y} ts={ev.ts:.3f}")
+                await asyncio.sleep(0.05)
+
+        asyncio.create_task(_touch_logger())
     watcher = ConfigWatcher(bus, poll_hz=2.0)
     asyncio.create_task(watcher.run())
 
@@ -322,6 +371,12 @@ def parse_args() -> argparse.Namespace:
         dest="web_ui",
         action="store_true",
         help="Serve a minimal web UI at http://127.0.0.1:8000/ displaying the view",
+    )
+    p.add_argument(
+        "--tft",
+        dest="tft",
+        action="store_true",
+        help="Use SPI TFT (ILI9341) + touch (XPT2046) instead of pygame",
     )
     return p.parse_args()
 

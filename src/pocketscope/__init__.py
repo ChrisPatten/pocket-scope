@@ -2,7 +2,7 @@
 
 The project version is defined here as the single source of truth and
 exposed via ``__version__``. The packaging configuration (pyproject.toml)
-is configured to read this attribute using 
+is configured to read this attribute using
 ``version = { attr = "pocketscope.__version__" }``.
 Update this value when making a manual version bump (until automated
 tag-based versioning is introduced).

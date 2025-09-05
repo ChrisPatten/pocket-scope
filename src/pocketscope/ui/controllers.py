@@ -20,7 +20,7 @@ from pocketscope.core.geo import ecef_to_enu, geodetic_to_ecef
 from pocketscope.core.time import TimeSource
 from pocketscope.core.tracks import TrackService
 from pocketscope.ingest.adsb.playback_source import FilePlaybackSource
-from pocketscope.platform.display.pygame_backend import PygameDisplayBackend
+from pocketscope.render.canvas import DisplayBackend
 from pocketscope.render.view_ppi import PpiView, TrackSnapshot
 from pocketscope.settings.schema import Settings
 from pocketscope.settings.store import SettingsStore
@@ -86,7 +86,7 @@ class UiController:
     def __init__(
         self,
         *,
-        display: PygameDisplayBackend,
+        display: DisplayBackend,
         view: PpiView,
         bus: EventBus,
         ts: TimeSource,
@@ -602,16 +602,16 @@ class UiController:
                     callsign=tr.callsign,
                     course_deg=course,
                     trail_enu=trail_enu if len(trail_enu) >= 2 else None,
-                    geo_alt_ft=float(geo_alt)
-                    if isinstance(geo_alt, (int, float))
-                    else None,
-                    baro_alt_ft=float(baro_alt)
-                    if isinstance(baro_alt, (int, float))
-                    else None,
+                    geo_alt_ft=(
+                        float(geo_alt) if isinstance(geo_alt, (int, float)) else None
+                    ),
+                    baro_alt_ft=(
+                        float(baro_alt) if isinstance(baro_alt, (int, float)) else None
+                    ),
                     ground_speed_kt=float(gs) if isinstance(gs, (int, float)) else None,
-                    vertical_rate_fpm=float(vr)
-                    if isinstance(vr, (int, float))
-                    else None,
+                    vertical_rate_fpm=(
+                        float(vr) if isinstance(vr, (int, float)) else None
+                    ),
                 )
             )
         return out

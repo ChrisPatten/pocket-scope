@@ -17,13 +17,13 @@ Recording events:
     bus = EventBus()
     ts = RealTimeSource()
     recorder = JsonlRecorder(bus, ts, "events.jsonl", ["adsb.raw", "gps.nmea"])
-    
+
     # Start recording in background
     record_task = asyncio.create_task(recorder.run())
-    
+
     # Publish some events...
     await bus.publish("adsb.raw", b"some data")
-    
+
     # Stop recording
     await recorder.stop()
 
@@ -31,7 +31,7 @@ Replaying with real time:
     bus = EventBus()
     ts = RealTimeSource()
     replayer = JsonlReplayer(bus, ts, "events.jsonl", speed=2.0)  # 2x speed
-    
+
     # Replay events in real-time
     await replayer.run()
 
@@ -39,15 +39,15 @@ Replaying with simulated time (deterministic):
     bus = EventBus()
     ts = SimTimeSource(start=0.0)
     replayer = JsonlReplayer(bus, ts, "events.jsonl")
-    
+
     # Start replay in background
     replay_task = asyncio.create_task(replayer.run())
-    
+
     # Manually advance time to trigger events
     next_time = replayer.next_due_monotonic()
     if next_time is not None:
         ts.set_time(next_time)
-    
+
     # Continue advancing time as needed...
 """
 

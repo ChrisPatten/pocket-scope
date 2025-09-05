@@ -9,6 +9,7 @@ defensive hard-coded defaults so the application can still run. These
 fallbacks intentionally mirror the historical literals to retain test
 stability if the YAML is missing or corrupt.
 """
+
 from __future__ import annotations
 
 from dataclasses import dataclass

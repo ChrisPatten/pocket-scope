@@ -23,9 +23,11 @@ class Settings(BaseModel):
     units: str = Field(default=UNITS_ORDER[0])
     range_nm: float = Field(default=10.0)
     track_length_mode: str = Field(
-        default=TRACK_LENGTH_CYCLE_ORDER[1]
-        if len(TRACK_LENGTH_CYCLE_ORDER) > 1
-        else TRACK_LENGTH_CYCLE_ORDER[0]
+        default=(
+            TRACK_LENGTH_CYCLE_ORDER[1]
+            if len(TRACK_LENGTH_CYCLE_ORDER) > 1
+            else TRACK_LENGTH_CYCLE_ORDER[0]
+        )
     )
     demo_mode: bool = Field(default=False)
     # Altitude filter band. One of:

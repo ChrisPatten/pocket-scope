@@ -36,6 +36,12 @@ dev = [
   "pre-commit>=3.0",
   "hypothesis>=6.0"
 ]
+pi = [
+  # Raspberry Pi hardware interfaces (optional; only install on Pi)
+  "spidev>=3.6",
+  "RPi.GPIO>=0.7",
+  "Pillow>=10.0"
+]
 
 [project.scripts]
 pocketscope = "pocketscope.__main__:main"
@@ -63,6 +69,9 @@ overrides = [
   { module = "hypothesis.*", ignore_missing_imports = true },
   { module = "msgpack", ignore_missing_imports = true },
   { module = "pygame.*", ignore_missing_imports = true },
+  { module = "spidev", ignore_missing_imports = true },
+  { module = "RPi.*", ignore_missing_imports = true },
+  { module = "PIL.*", ignore_missing_imports = true },
   { module = "aiohttp.*", ignore_missing_imports = true },
   { module = "pocketscope.tests.*", disallow_untyped_decorators = false },
 ]
