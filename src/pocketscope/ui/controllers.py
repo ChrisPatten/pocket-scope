@@ -24,6 +24,17 @@ from pocketscope.platform.display.pygame_backend import PygameDisplayBackend
 from pocketscope.render.view_ppi import PpiView, TrackSnapshot
 from pocketscope.settings.schema import Settings
 from pocketscope.settings.store import SettingsStore
+from pocketscope.settings.values import (
+    ALTITUDE_FILTER_BANDS,
+    ALTITUDE_FILTER_CYCLE_ORDER,
+    RANGE_LADDER_NM,
+    SETTINGS_SCREEN_CONFIG,
+    TRACK_LENGTH_CYCLE_ORDER,
+    TRACK_LENGTH_MODES,
+    TRACK_SERVICE_DEFAULTS,
+    UNITS_ORDER,
+    ZOOM_LIMITS,
+)
 from pocketscope.ui.settings_screen import SettingsScreen
 from pocketscope.ui.softkeys import SoftKeyBar
 from pocketscope.ui.status_overlay import StatusOverlay
@@ -43,8 +54,9 @@ except Exception:  # pragma: no cover
 @dataclass(slots=True)
 class UiConfig:
     range_nm: float = 10.0
-    min_range_nm: float = 2.0
-    max_range_nm: float = 80.0
+    # min/max zoom sourced from configuration (still mutable at runtime)
+    min_range_nm: float = float(ZOOM_LIMITS.get("min_range_nm", 2.0))
+    max_range_nm: float = float(ZOOM_LIMITS.get("max_range_nm", 80.0))
     target_fps: float = 30.0
     overlay: bool = True
 
@@ -91,6 +103,23 @@ class UiController:
         self._view = view
         self._bus = bus
         self._ts = ts
+        # Apply track service defaults if instance appears to have library defaults
+        try:
+            if isinstance(tracks, TrackService):
+                if getattr(tracks, "_trail_len_default_s", None) == 60.0:
+                    setattr(
+                        tracks,
+                        "_trail_len_default_s",
+                        float(TRACK_SERVICE_DEFAULTS.get("trail_len_default_s", 60.0)),
+                    )
+                if getattr(tracks, "_trail_len_pinned_s", None) == 180.0:
+                    setattr(
+                        tracks,
+                        "_trail_len_pinned_s",
+                        float(TRACK_SERVICE_DEFAULTS.get("trail_len_pinned_s", 180.0)),
+                    )
+        except Exception:
+            pass
         self._tracks = tracks
         self._cfg = cfg
         # Runtime state
@@ -113,8 +142,10 @@ class UiController:
         self.altitude_filter: str = getattr(self._settings, "altitude_filter", "All")
         self.north_up_lock: bool = getattr(self._settings, "north_up_lock", True)
 
-        # Settings screen overlay (slightly larger font for readability)
-        settings_font_px = int(font_px * 1.2)
+        # Settings screen overlay (multiplier from configuration)
+        settings_font_px = int(
+            font_px * float(SETTINGS_SCREEN_CONFIG.get("font_multiplier", 1.2))
+        )
         self._settings_screen = SettingsScreen(
             self._settings, font_px=settings_font_px, pad_px=6
         )
@@ -280,7 +311,7 @@ class UiController:
         self._cfg.overlay = not self._cfg.overlay
 
     def cycle_units(self, *, persist: bool = True) -> None:
-        order = ["nm_ft_kt", "mi_ft_mph", "km_m_kmh"]
+        order = list(UNITS_ORDER)
         i = order.index(self.units)
         self.units = order[(i + 1) % len(order)]
         self._settings.units = self.units
@@ -288,7 +319,7 @@ class UiController:
             SettingsStore.save_debounced(self._settings)
 
     def cycle_track_length(self, *, persist: bool = True) -> None:
-        order = ["short", "medium", "long"]
+        order = list(TRACK_LENGTH_CYCLE_ORDER)
         i = order.index(self.track_length_mode)
         self.track_length_mode = order[(i + 1) % len(order)]
         self._settings.track_length_mode = self.track_length_mode
@@ -315,7 +346,7 @@ class UiController:
         Order matches settings screen menu. Persists (debounced) when *persist*
         is True.
         """
-        order = ["All", "0–5k", "5–10k", "10–20k", ">20k"]
+        order = list(ALTITUDE_FILTER_CYCLE_ORDER)
         i = order.index(self.altitude_filter)
         self.altitude_filter = order[(i + 1) % len(order)]
         # Persist altitude filter band in settings model (schema includes field)
@@ -324,10 +355,18 @@ class UiController:
             SettingsStore.save_debounced(self._settings)
 
     def _apply_track_windows(self) -> None:
-        mapping = {"short": 15.0, "medium": 45.0, "long": 120.0}
-        default = mapping.get(self.track_length_mode, 45.0)
-        next_map = {"short": "medium", "medium": "long", "long": "long"}
-        pinned = mapping[next_map[self.track_length_mode]]
+        mapping = TRACK_LENGTH_MODES
+        # Default trail length for active tracks
+        default = mapping.get(self.track_length_mode, list(mapping.values())[0])
+        # Pinned length chooses the next longer mode or clamps to longest
+        try:
+            order = list(TRACK_LENGTH_CYCLE_ORDER)
+            idx = order.index(self.track_length_mode)
+            next_idx = min(idx + 1, len(order) - 1)
+            pinned_mode = order[next_idx]
+            pinned = mapping.get(pinned_mode, default)
+        except Exception:  # pragma: no cover - defensive fallback
+            pinned = default
         self._tracks._trail_len_default_s = default
         self._tracks._trail_len_pinned_s = pinned
         # Re-trim existing active tracks immediately so UI reflects change
@@ -454,7 +493,7 @@ class UiController:
 
     def _step_range(self, value: float, *, direction: int) -> float:
         # Discrete zoom ladder
-        steps = [2.0, 5.0, 10.0, 20.0, 40.0, 80.0]
+        steps = list(RANGE_LADDER_NM)
         v = float(value)
         # Find nearest step index
         idx = 0
@@ -502,30 +541,19 @@ class UiController:
             pass
 
     def _build_snapshots(self) -> list[TrackSnapshot]:
-        # Convert TrackService tracks into TrackSnapshot with short ENU trail
         tracks = self._tracks.list_active()
-        # Pre-compute altitude filter bounds
         band = self.altitude_filter
-        # Bounds are inclusive of lower, exclusive of upper except last band
-        lo: float | None = None
-        hi: float | None = None
-        if band == "0–5k":
-            lo, hi = 0.0, 5000.0
-        elif band == "5–10k":
-            lo, hi = 5000.0, 10000.0
-        elif band == "10–20k":
-            lo, hi = 10000.0, 20000.0
-        elif band == ">20k":
-            lo, hi = 20000.0, None
+        lo, hi = ALTITUDE_FILTER_BANDS.get(band, (None, None))
         out: list[TrackSnapshot] = []
-        # Precompute center ECEF once per frame
+        # Precompute center ECEF once per frame (avoid repetition inside loop)
         _ox, _oy, _oz = geodetic_to_ecef(self._center_lat, self._center_lon, 0.0)
         for tr in tracks:
             if not tr.history:
                 continue
             last = tr.history[-1]
             lat, lon = float(last[1]), float(last[2])
-            # Altitude filter: use geo_alt preferred then baro_alt else last trail alt
+            # Determine altitude used for filtering. Preference order:
+            # geo_alt, then baro_alt, then last trail altitude sample.
             alt_for_filter: float | None = None
             _ga = tr.state.get("geo_alt")
             _ba = tr.state.get("baro_alt")
@@ -534,43 +562,38 @@ class UiController:
             elif isinstance(_ba, (int, float)):
                 alt_for_filter = float(_ba)
             else:
-                # Trail point altitude (4th tuple element) may be set
                 try:
                     if isinstance(last[3], (int, float)):
                         alt_for_filter = float(last[3])
                 except Exception:
                     pass
-            if band != "All" and alt_for_filter is not None:
+            if band != "All":
+                if alt_for_filter is None:
+                    # Exclude tracks lacking altitude when filtering active
+                    continue
                 if lo is not None and alt_for_filter < lo:
                     continue
                 if hi is not None and alt_for_filter >= hi:
                     continue
-            elif band != "All" and alt_for_filter is None:
-                # If filtering by band and have no altitude, exclude
-                continue
+            # Course
             course = None
             v = tr.state.get("track_deg")
             if isinstance(v, (int, float)):
                 course = float(v)
-
-            # Trail: last ~60 samples -> ENU
+            # Trail (last ~60 samples) converted to ENU
             pts = tr.history[-60:]
             trail_enu: list[tuple[float, float]] = []
-            # NOTE: use lon_pt variable name to avoid clobbering altitude
-            # lower-bound variable 'lo' defined earlier for filtering.
             for _, la, lon_pt, _alt in pts:
                 tx, ty, tz = geodetic_to_ecef(float(la), float(lon_pt), 0.0)
                 e, n, _ = ecef_to_enu(
                     tx, ty, tz, self._center_lat, self._center_lon, 0.0
                 )
                 trail_enu.append((e, n))
-
-            # Optional kinematics for data blocks
+            # Optional kinematics
             geo_alt = tr.state.get("geo_alt")
             baro_alt = tr.state.get("baro_alt")
             gs = tr.state.get("ground_speed")
             vr = tr.state.get("vertical_rate")
-
             out.append(
                 TrackSnapshot(
                     icao=tr.icao24,

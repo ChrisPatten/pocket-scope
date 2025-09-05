@@ -32,17 +32,31 @@ from pocketscope.render.labels import DataBlockFormatter as LabelFormatter
 from pocketscope.render.labels import DataBlockLayout as LabelLayout
 from pocketscope.render.labels import OwnshipRef
 from pocketscope.render.labels import TrackSnapshot as LabelTrack
+from pocketscope.settings.values import AUTO_RING_CONFIG, PPI_CONFIG, THEME
 
 if TYPE_CHECKING:  # for type hints only
     from pocketscope.data.sectors import Sector
 
-ColorBG: Color = (0, 0, 0, 255)
-ColorRings: Color = (80, 80, 80, 255)
-ColorOwnship: Color = (255, 255, 255, 255)
-ColorTrails: Color = (0, 180, 255, 180)
-ColorAircraft: Color = (255, 255, 0, 255)
-ColorLabels: Color = (255, 255, 255, 255)
-ColorDataBlock: Color = (0, 255, 0, 255)
+_PPI_THEME = THEME.get("colors", {}).get("ppi", {}) if isinstance(THEME, dict) else {}
+
+
+def _col(v: object, fb: tuple[int, int, int, int]) -> Color:
+    if (
+        isinstance(v, (list, tuple))
+        and len(v) == 4
+        and all(isinstance(c, (int, float)) for c in v)
+    ):
+        return (int(v[0]), int(v[1]), int(v[2]), int(v[3]))
+    return fb
+
+
+ColorBG: Color = _col(_PPI_THEME.get("background"), (0, 0, 0, 255))
+ColorRings: Color = _col(_PPI_THEME.get("rings"), (80, 80, 80, 255))
+ColorOwnship: Color = _col(_PPI_THEME.get("ownship"), (255, 255, 255, 255))
+ColorTrails: Color = _col(_PPI_THEME.get("trails"), (0, 180, 255, 180))
+ColorAircraft: Color = _col(_PPI_THEME.get("aircraft"), (255, 255, 0, 255))
+ColorLabels: Color = _col(_PPI_THEME.get("labels"), (255, 255, 255, 255))
+ColorDataBlock: Color = _col(_PPI_THEME.get("datablock"), (0, 255, 0, 255))
 
 
 @dataclass(slots=True)
@@ -88,12 +102,24 @@ class PpiView:
     ) -> None:
         self.range_nm = float(range_nm)
         # Optional view rotation used only for the north tick; 0 keeps legacy behavior
+        if rotation_deg == 0.0 and isinstance(PPI_CONFIG, dict):
+            # no explicit rotation; keep 0 but note configured step
+            pass
         self.rotation_deg = float(rotation_deg) % 360.0
         self.show_data_blocks = bool(show_data_blocks)
         self.show_simple_labels = bool(show_simple_labels)
         self.show_text_annotations = bool(show_text_annotations)
         self.show_airports = bool(show_airports)
-        # Data-block typography
+        # Data-block typography (allow config overrides when not explicitly passed)
+        ty_cfg = (
+            PPI_CONFIG.get("typography", {}) if isinstance(PPI_CONFIG, dict) else {}
+        )
+        if label_font_px == 12:
+            label_font_px = int(ty_cfg.get("label_font_px", label_font_px))
+        if label_line_gap_px == 2:
+            label_line_gap_px = int(ty_cfg.get("line_gap_px", label_line_gap_px))
+        if label_block_pad_px == 2:
+            label_block_pad_px = int(ty_cfg.get("block_pad_px", label_block_pad_px))
         self.label_font_px = int(label_font_px)
         self.label_line_gap_px = int(label_line_gap_px)
         self.label_block_pad_px = int(label_block_pad_px)
@@ -115,42 +141,57 @@ class PpiView:
         - Distances are strictly increasing and > 0.
         """
         rng = max(0.1, float(self.range_nm))
-        # Special-case legacy 10 NM to keep golden frames identical.
-        if abs(rng - 10.0) < 1e-6:
-            return [2.0, 5.0, 10.0]
+        # Legacy special cases from config (string keys for stable mapping)
+        special = AUTO_RING_CONFIG.get("legacy_special_cases", {})
+        try:
+            if isinstance(special, dict):
+                key = f"{rng:.1f}"
+                val = special.get(key)
+                if isinstance(val, list):
+                    rings = [float(x) for x in val]
+                    return rings
+        except Exception:  # pragma: no cover - defensive
+            pass
 
-        rings: List[float] = []
-        # Generate candidate nice numbers up to range using 1,2,5 decades.
+        ring_list: List[float] = []
+        # Generate candidate nice numbers up to range using configured pattern.
         import math
 
-        exp_min = -2  # allow down to 0.01 nm if very small ranges
+        exp_min = int(AUTO_RING_CONFIG.get("min_exp", -2))
         exp_max = int(math.floor(math.log10(rng))) + 1
         candidates: List[float] = []
         for e in range(exp_min, exp_max + 1):
             scale = 10**e
-            for base in (1, 2, 5):
+            pattern = AUTO_RING_CONFIG.get("nice_pattern", [1, 2, 5])
+            try:
+                bases = [int(b) for b in pattern]
+            except Exception:
+                bases = [1, 2, 5]
+            for base in bases:
                 val = base * scale
                 if 0 < val < rng * 0.9999:  # below outer ring
                     candidates.append(val)
         # Deduplicate and sort
         candidates = sorted({round(c, 6) for c in candidates})
-        # Filter out values that are too dense (<10% of outer range apart)
+        # Filter: remove candidates closer than configured fraction of
+        # outer range to avoid visual clutter.
         filtered: List[float] = []
-        min_gap = rng * 0.10
+        min_gap = rng * float(AUTO_RING_CONFIG.get("min_gap_fraction", 0.10))
         last = 0.0
         for c in candidates:
             if c - last >= min_gap:
                 filtered.append(c)
                 last = c
-        # Ensure we don't exceed 3 inner rings; keep the largest ones for context
-        rings = filtered[-3:]
+        # Ensure we don't exceed configured number of inner rings; keep largest
+        max_inner = int(AUTO_RING_CONFIG.get("max_inner_rings", 3))
+        ring_list = filtered[-max_inner:]
         # Always append the exact outer range (if not already)
-        if not rings or abs(rings[-1] - rng) > 1e-6:
-            rings.append(rng)
+        if not ring_list or abs(ring_list[-1] - rng) > 1e-6:
+            ring_list.append(rng)
         # Guarantee strictly increasing
-        rings = [r for r in rings if r > 0]
-        rings = sorted(rings)
-        return rings
+        ring_list = [r for r in ring_list if r > 0]
+        ring_list = sorted(ring_list)
+        return ring_list
 
     def draw(
         self,
@@ -198,8 +239,13 @@ class PpiView:
             canvas.circle((cx, cy), r_px, width=1, color=ColorRings)
             if self.show_text_annotations:
                 label_text = f"{int(nm)} nm"
-                label_x = cx + r_px + 4
-                label_y = cy - 8
+                rr_cfg = (
+                    PPI_CONFIG.get("range_ring_label", {})
+                    if isinstance(PPI_CONFIG, dict)
+                    else {}
+                )
+                label_x = cx + r_px + int(rr_cfg.get("offset_x_px", 4))
+                label_y = cy + int(rr_cfg.get("offset_y_px", -8))
                 canvas.text(
                     (label_x, label_y),
                     label_text,
@@ -212,7 +258,7 @@ class PpiView:
                 label_w = len(label_text) * char_w
                 label_h = self.label_font_px
                 # Add some padding around the label
-                padding = 4
+                padding = int(rr_cfg.get("padding_px", 4))
                 range_ring_exclusions.append(
                     (
                         label_x - padding,

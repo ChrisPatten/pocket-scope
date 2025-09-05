@@ -16,11 +16,27 @@ from typing import Any, Callable, Dict, List, Tuple
 
 from pocketscope.render.canvas import Canvas, Color
 from pocketscope.render.fonts import get_mono
+from pocketscope.settings.values import STATUS_OVERLAY_CONFIG, THEME
 
-# Colors / defaults
-_COLOR_BG: Color = (32, 32, 32, 180)
-_COLOR_TEXT: Color = (255, 255, 255, 255)
-_COLOR_BORDER: Color = (255, 255, 255, 255)
+# Colors / defaults from theme
+_SO_THEME = (
+    THEME.get("colors", {}).get("status_overlay", {}) if isinstance(THEME, dict) else {}
+)
+
+
+def _c(v: object, fb: tuple[int, int, int, int]) -> Color:
+    if (
+        isinstance(v, (list, tuple))
+        and len(v) == 4
+        and all(isinstance(c, (int, float)) for c in v)
+    ):
+        return (int(v[0]), int(v[1]), int(v[2]), int(v[3]))
+    return fb
+
+
+_COLOR_BG: Color = _c(_SO_THEME.get("bg"), (32, 32, 32, 180))
+_COLOR_TEXT: Color = _c(_SO_THEME.get("text"), (255, 255, 255, 255))
+_COLOR_BORDER: Color = _c(_SO_THEME.get("border"), (255, 255, 255, 255))
 
 
 def _measure_text_lines(lines: List[str], *, font_px: int) -> Tuple[int, int]:
@@ -129,16 +145,34 @@ class StatusOverlay:
         lon_dir = "E" if center_lon >= 0 else "W"
         lat_el = f"Lat {abs(center_lat):.2f}{lat_dir}"
         lon_el = f"Lon {abs(center_lon):.2f}{lon_dir}"
-        line1: List[str] = [
-            f"GPS {mark(gps_ok)}",
-            f"IMU {mark(imu_ok)}",
-            f"DEC {mark(decoder_ok)}",
-            f"RNG {rng:.0f}{rng_units}",
-        ]
-        line2: List[str] = [clock_utc, lat_el, lon_el]
+        cfg_elems = STATUS_OVERLAY_CONFIG.get("elements", {})
+        # Build line1
+        line1_keys = cfg_elems.get("line1", ["GPS", "IMU", "DEC", "RNG"])
+        line1: List[str] = []
+        for key in line1_keys:
+            k = key.upper()
+            if k == "GPS":
+                line1.append(f"GPS {mark(gps_ok)}")
+            elif k == "IMU":
+                line1.append(f"IMU {mark(imu_ok)}")
+            elif k == "DEC":
+                line1.append(f"DEC {mark(decoder_ok)}")
+            elif k == "RNG":
+                line1.append(f"RNG {rng:.0f}{rng_units}")
+        line2_keys = cfg_elems.get("line2", ["CLOCK", "LAT", "LON"])
+        line2: List[str] = []
+        for key in line2_keys:
+            k = key.upper()
+            if k == "CLOCK":
+                line2.append(clock_utc)
+            elif k == "LAT":
+                line2.append(lat_el)
+            elif k == "LON":
+                line2.append(lon_el)
         lines: List[List[str]] = [line1, line2]
         if demo_mode:
-            lines.append(["DEMO MODE"])  # third single-cell line
+            demo_line = cfg_elems.get("demo_line", "DEMO MODE")
+            lines.append([demo_line])  # third single-cell line
 
         # --- Determine per-line cell counts & widths ------------------
         # For auto-width we take max of total rendered widths among lines

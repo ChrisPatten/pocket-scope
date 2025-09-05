@@ -38,12 +38,39 @@ if TYPE_CHECKING:  # pragma: no cover - for type checking only
 
 from pocketscope.render.canvas import Canvas, Color
 from pocketscope.settings.schema import Settings
+from pocketscope.settings.values import (
+    ALTITUDE_FILTER_CYCLE_ORDER,
+    RANGE_LADDER_NM,
+    SETTINGS_SCREEN_CONFIG,
+    THEME,
+    TRACK_LENGTH_CYCLE_ORDER,
+    TRACK_LENGTH_MODES,
+    UNITS_ORDER,
+)
 
-_COLOR_BG: Color = (0, 0, 0, 255)
-_COLOR_HILITE: Color = (0, 120, 0, 255)
-_COLOR_TEXT: Color = (255, 255, 255, 255)
-_COLOR_TITLE_BG: Color = (24, 24, 24, 255)
-_COLOR_TITLE_FG: Color = (255, 255, 255, 255)
+# Resolve themed colors with sensible fallbacks
+_SC_THEME = (
+    THEME.get("colors", {}).get("settings_screen", {})
+    if isinstance(THEME, dict)
+    else {}
+)
+
+
+def _c(v: object, fb: tuple[int, int, int, int]) -> Color:
+    if (
+        isinstance(v, (list, tuple))
+        and len(v) == 4
+        and all(isinstance(c, (int, float)) for c in v)
+    ):
+        return (int(v[0]), int(v[1]), int(v[2]), int(v[3]))
+    return fb
+
+
+_COLOR_BG: Color = _c(_SC_THEME.get("bg"), (0, 0, 0, 255))
+_COLOR_HILITE: Color = _c(_SC_THEME.get("hilite"), (0, 120, 0, 255))
+_COLOR_TEXT: Color = _c(_SC_THEME.get("text"), (255, 255, 255, 255))
+_COLOR_TITLE_BG: Color = _c(_SC_THEME.get("title_bg"), (24, 24, 24, 255))
+_COLOR_TITLE_FG: Color = _c(_SC_THEME.get("title_fg"), (255, 255, 255, 255))
 
 
 @dataclass(slots=True)
@@ -67,20 +94,27 @@ class SettingsScreen:
     ) -> None:
         self.visible: bool = False
         self._settings = settings
+        base_px = SETTINGS_SCREEN_CONFIG.get("base_font_px")
+        if isinstance(base_px, (int, float)):
+            font_px = int(base_px)
         self.font_px = int(font_px)
         # Horizontal padding used for left label inset and right value inset
         self.pad_px = max(0, int(pad_px))
         self._items: List[MenuItem] = [
-            MenuItem("Units", "cycle", ("nm_ft_kt", "mi_ft_mph", "km_m_kmh")),
-            MenuItem("Range Default", "cycle", ("2", "5", "10", "20", "40", "80")),
-            MenuItem("Track Length", "cycle", ("short", "medium", "long")),
+            MenuItem("Units", "cycle", tuple(UNITS_ORDER)),
             MenuItem(
-                "Altitude Filter",  # placeholder future feature
+                "Range Default",
                 "cycle",
-                ("All", "0–5k", "5–10k", "10–20k", ">20k"),
+                tuple(str(int(r)) for r in RANGE_LADDER_NM),
+            ),
+            MenuItem("Track Length", "cycle", tuple(TRACK_LENGTH_CYCLE_ORDER)),
+            MenuItem(
+                "Altitude Filter",
+                "cycle",
+                tuple(ALTITUDE_FILTER_CYCLE_ORDER),
             ),
             MenuItem("Demo Mode", "toggle"),
-            MenuItem("North-up Lock", "toggle"),  # rotation feature TBD
+            MenuItem("North-up Lock", "toggle"),
         ]
         self._sel: int = 0
 
@@ -160,12 +194,16 @@ class SettingsScreen:
             controller.cycle_units(persist=False)
             self._settings.units = controller.units
         elif item.label == "Range Default":
-            ladder = [2.0, 5.0, 10.0, 20.0, 40.0, 80.0]
+            ladder = list(RANGE_LADDER_NM)
             cur = float(self._settings.range_nm)
-            idx = ladder.index(cur) if cur in ladder else 2
+            try:
+                idx = ladder.index(cur)
+            except ValueError:
+                # Fallback to first if out of ladder
+                idx = 0
             cur = ladder[(idx + 1) % len(ladder)]
             self._settings.range_nm = cur
-            controller._cfg.range_nm = cur  # sync immediate visual range
+            controller._cfg.range_nm = cur
         elif item.label == "Track Length":
             controller.cycle_track_length(persist=False)
             self._settings.track_length_mode = controller.track_length_mode
@@ -262,8 +300,11 @@ class SettingsScreen:
         if item.label == "Range Default":
             return f"{int(self._settings.range_nm):d}nm"
         if item.label == "Track Length":
-            mapping = {"short": "15s", "medium": "45s", "long": "120s"}
-            return mapping.get(controller.track_length_mode, "?")
+            # Derive human-readable seconds from central config
+            secs = TRACK_LENGTH_MODES.get(controller.track_length_mode)
+            if isinstance(secs, (int, float)):
+                return f"{int(secs)}s"
+            return "?"
         if item.label == "Altitude Filter":
             return getattr(controller, "altitude_filter", "All")
         if item.label == "Demo Mode":

@@ -23,10 +23,27 @@ from pocketscope.core.geo import (
     haversine_nm,
 )
 from pocketscope.data.airports import Airport
-from pocketscope.render.canvas import Canvas
+from pocketscope.render.canvas import Canvas, Color
+from pocketscope.settings.values import THEME
 
-MarkerColor = (160, 160, 160, 255)
-LabelColor = (255, 255, 255, 255)
+_AL_THEME = (
+    THEME.get("colors", {}).get("airports_layer", {}) if isinstance(THEME, dict) else {}
+)
+
+
+def _coerce_color(val: object, fallback: tuple[int, int, int, int]) -> Color:
+    if (
+        isinstance(val, (list, tuple))
+        and len(val) == 4
+        and all(isinstance(c, (int, float)) for c in val)
+    ):
+        r, g, b, a = (int(val[0]), int(val[1]), int(val[2]), int(val[3]))
+        return (r, g, b, a)
+    return fallback
+
+
+MarkerColor: Color = _coerce_color(_AL_THEME.get("marker"), (160, 160, 160, 255))
+LabelColor: Color = _coerce_color(_AL_THEME.get("label"), (255, 255, 255, 255))
 
 
 class AirportsLayer:

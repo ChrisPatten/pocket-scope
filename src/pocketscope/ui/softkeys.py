@@ -5,10 +5,26 @@ from __future__ import annotations
 from typing import Callable, Dict, List, Tuple
 
 from pocketscope.render.canvas import Canvas, Color
+from pocketscope.settings.values import THEME
 
-_COLOR_BG: Color = (32, 32, 32, 255)
-_COLOR_TEXT: Color = (255, 255, 255, 255)
-_COLOR_BORDER: Color = (255, 0, 0, 255)
+_SK_THEME = (
+    THEME.get("colors", {}).get("softkeys", {}) if isinstance(THEME, dict) else {}
+)
+
+
+def _c(v: object, fb: tuple[int, int, int, int]) -> Color:
+    if (
+        isinstance(v, (list, tuple))
+        and len(v) == 4
+        and all(isinstance(c, (int, float)) for c in v)
+    ):
+        return (int(v[0]), int(v[1]), int(v[2]), int(v[3]))
+    return fb
+
+
+_COLOR_BG: Color = _c(_SK_THEME.get("bg"), (32, 32, 32, 255))
+_COLOR_TEXT: Color = _c(_SK_THEME.get("text"), (255, 255, 255, 255))
+_COLOR_BORDER: Color = _c(_SK_THEME.get("border"), (255, 0, 0, 255))
 _PAD_X_DEFAULT = 4
 _PAD_Y_DEFAULT = 2
 
