@@ -232,7 +232,15 @@ class ILI9341DisplayBackend(DisplayBackend):
         if GPIO is not None:
             GPIO.output(self._dc, 1)
         if self._spi is not None:
-            self._spi.writebytes(list(out))
+            # Some SPI drivers / kernel builds have limits on a single write
+            # argument size (observed 'Argument list size exceeds 4096 bytes').
+            # Chunk large frame transfers to stay well under that threshold.
+            CHUNK = 2048  # bytes per transfer (tunable)
+            total = len(out)
+            mv = memoryview(out)
+            for i in range(0, total, CHUNK):
+                # Convert only the slice needed for this transfer to a list[int]
+                self._spi.writebytes(list(mv[i : i + CHUNK]))
 
     def save_png(self, path: str) -> None:
         if self._frame is None:
