@@ -113,6 +113,13 @@ class Dump1090JsonSource:
         self._interval = 1.0 / max(0.1, float(poll_hz))
         self._timeout_s = float(timeout_s)
         self._verify_tls = bool(verify_tls)
+        # Optional runtime override via env var: set to 0/false/no to disable
+        _vt = os.environ.get("DUMP1090_VERIFY_TLS")
+        if _vt is not None:
+            if _vt.strip().lower() in {"0", "false", "no"}:
+                self._verify_tls = False
+            elif _vt.strip().lower() in {"1", "true", "yes"}:
+                self._verify_tls = True
         self._ext_session = session
         self._session: Optional[aiohttp.ClientSession] = None
         self._running = False
@@ -143,8 +150,14 @@ class Dump1090JsonSource:
                     backoff = 0.2
                 except asyncio.CancelledError:
                     raise
-                except Exception as e:
-                    logger.warning(f"dump1090 poll error: {e}")
+                except Exception:
+                    # Include exception type and stack for easier field
+                    # debugging (e.g. TLS, JSON issues)
+                    logger.exception(
+                        "dump1090 poll error (url=%s, verify_tls=%s)",
+                        self._url,
+                        self._verify_tls,
+                    )
                     # Exponential backoff up to max_backoff
                     await asyncio.sleep(backoff)
                     backoff = min(max_backoff, backoff * 2.0)
