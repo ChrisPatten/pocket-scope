@@ -1,30 +1,9 @@
 """
 Dump1090 JSON polling source.
 
-This module provides Dump1090JsonSource which periodically polls a dump1090
-"aircraft.json" endpoint and publishes normalized AdsbMessage events to the
-EventBus. It implements light caching via ETag/Last-Modified and backs off on
-transient failures.
-
-Expected dump1090 fields (per-aircraft object):
- - hex: ICAO24 in lowercase hex (required)
- - flight: Callsign (optional, may include trailing spaces)
- - lat, lon: Position (optional; publish state without position if missing)
- - alt_baro: Baro altitude in feet (optional)
- - alt_geom: Geometric altitude in feet (optional)
- - gs: Ground speed in knots (optional)
- - track: Course over ground in degrees true (optional)
- - baro_rate: Vertical rate (ft/min) (optional)
- - squawk: Transponder code as string (optional)
- - nic: Navigation Integrity Category (optional)
- - nac_p: Navigation Accuracy Category for Position (optional)
- - seen, seen_pos: Seconds since last overall/pos update (optional; used to skip stale)
-
-Top-level fields:
- - now: Wall time (seconds since epoch). Used for message timestamp if present.
-
-Only aircraft with a valid 6-hex ICAO24 are published. Entries with obviously
-stale timestamps (seen/seen_pos > 60 seconds) are skipped.
+Polls a dump1090 "aircraft.json" endpoint and publishes normalized AdsbMessage
+objects onto an EventBus topic (default: "adsb.msg"). Includes caching,
+timeouts, IPv4 forcing, and diagnostics.
 """
 
 from __future__ import annotations
@@ -33,6 +12,7 @@ import asyncio
 import json
 import logging
 import os
+import socket
 import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -54,17 +34,13 @@ def _is_valid_icao24(s: Any) -> bool:
     s = s.strip().lower()
     if len(s) != 6:
         return False
-    for ch in s:
-        if ch not in "0123456789abcdef":
-            return False
-    return True
+    return all(ch in "0123456789abcdef" for ch in s)
 
 
 def _coerce_float(v: Any) -> Optional[float]:
     try:
         if v is None:
             return None
-        # Reject NaN/inf implicitly by float() then isfinite? Keep simple here.
         return float(v)
     except Exception:
         return None
@@ -86,10 +62,7 @@ class _CacheState:
 
 
 class Dump1090JsonSource:
-    """
-    Polls dump1090 'aircraft.json' and publishes AdsbMessage to topic 'adsb.msg'.
-    Default poll rate: 5 Hz (every 0.2 s). Handles transient errors with backoff.
-    """
+    """Periodically polls dump1090 and publishes AdsbMessage events."""
 
     def __init__(
         self,
@@ -102,7 +75,6 @@ class Dump1090JsonSource:
         timeout_s: float = 3.0,
         verify_tls: bool = True,
     ) -> None:
-        # Support relative path via env var base
         base = os.environ.get("DUMP1090_BASE_URL")
         if url.startswith("/") and base:
             self._url = base.rstrip("/") + url
@@ -113,27 +85,35 @@ class Dump1090JsonSource:
         self._topic = topic
         self._interval = 1.0 / max(0.1, float(poll_hz))
 
-        # Allow override of total request timeout via env var DUMP1090_TIMEOUT_S
         _to = os.environ.get("DUMP1090_TIMEOUT_S")
-        if _to is not None:
+        if _to:
             try:
                 timeout_s = float(_to)
             except ValueError:
-                logger.warning(
-                    "Invalid DUMP1090_TIMEOUT_S=%r (expect float); using default %s",
-                    _to,
-                    timeout_s,
-                )
+                logger.warning("Invalid DUMP1090_TIMEOUT_S=%r", _to)
         self._timeout_s = float(timeout_s)
 
         self._verify_tls = bool(verify_tls)
         _vt = os.environ.get("DUMP1090_VERIFY_TLS")
-        if _vt is not None:
+        if _vt:
             val = _vt.strip().lower()
             if val in {"0", "false", "no"}:
                 self._verify_tls = False
             elif val in {"1", "true", "yes"}:
                 self._verify_tls = True
+
+        self._connect_timeout_s: float | None = None
+        _cto = os.environ.get("DUMP1090_CONNECT_TIMEOUT_S")
+        if _cto:
+            try:
+                self._connect_timeout_s = max(0.1, float(_cto))
+            except ValueError:
+                logger.warning("Invalid DUMP1090_CONNECT_TIMEOUT_S=%r", _cto)
+
+        self._force_ipv4 = False
+        _force_v4 = os.environ.get("DUMP1090_FORCE_IPV4")
+        if _force_v4 and _force_v4.strip().lower() in {"1", "true", "yes"}:
+            self._force_ipv4 = True
 
         self._ext_session = session
         self._session: Optional[aiohttp.ClientSession] = None
@@ -141,31 +121,35 @@ class Dump1090JsonSource:
         self._stop_event = asyncio.Event()
         self._cache = _CacheState()
 
-        # Error/backoff bookkeeping
         self._consec_errors = 0
         self._last_success_monotonic = time.monotonic()
+        self._dns_logged = False
 
     async def run(self) -> None:
         if self._running:
             return
         self._running = True
 
-        # Prepare session if not provided
         if self._ext_session is not None:
             self._session = self._ext_session
         else:
-            timeout = aiohttp.ClientTimeout(total=self._timeout_s)
-            connector = aiohttp.TCPConnector(ssl=self._verify_tls)
+            timeout = aiohttp.ClientTimeout(
+                total=self._timeout_s, connect=self._connect_timeout_s
+            )
+            if self._force_ipv4:
+                connector = aiohttp.TCPConnector(
+                    ssl=self._verify_tls, family=socket.AF_INET
+                )
+            else:
+                connector = aiohttp.TCPConnector(ssl=self._verify_tls)
             self._session = aiohttp.ClientSession(timeout=timeout, connector=connector)
 
         backoff = 0.2
         max_backoff = 2.0
-
         try:
             while not self._stop_event.is_set():
                 try:
                     await self._poll_once()
-                    # Success bookkeeping
                     backoff = 0.2
                     if self._consec_errors:
                         logger.info(
@@ -176,9 +160,7 @@ class Dump1090JsonSource:
                     self._last_success_monotonic = time.monotonic()
                 except asyncio.CancelledError:
                     raise
-                except Exception as e:
-                    # Include exception type and stack for easier field
-                    # debugging (e.g. TLS, JSON issues)
+                except Exception as e:  # noqa: BLE001
                     logger.exception(
                         "dump1090 poll error (url=%s, verify_tls=%s)",
                         self._url,
@@ -186,29 +168,26 @@ class Dump1090JsonSource:
                     )
                     self._consec_errors += 1
                     if isinstance(e, asyncio.TimeoutError):
-                        # Emit a concise timeout diagnostic (INFO level) without stack
                         logger.info(
-                            "dump1090 timeout (%.2fs) after %.2fs idle (consec_errors=%d)",  # noqa: E501
+                            "dump1090 timeout (%.2fs) after %.2fs idle (errors=%d)",
                             self._timeout_s,
                             time.monotonic() - self._last_success_monotonic,
                             self._consec_errors,
                         )
                     if self._consec_errors in {10, 30, 60}:
                         logger.error(
-                            "dump1090 still failing (%d consecutive errors, last exception: %s)",  # noqa: E501
+                            "dump1090 still failing (%d consecutive, last=%s)",
                             self._consec_errors,
                             e.__class__.__name__,
                         )
-                    # Exponential backoff up to max_backoff
                     await asyncio.sleep(backoff)
                     backoff = min(max_backoff, backoff * 2.0)
-                # Maintain cadence
                 await asyncio.sleep(self._interval)
         finally:
             if self._session and self._ext_session is None:
                 try:
                     await self._session.close()
-                except Exception:
+                except Exception:  # pragma: no cover
                     pass
             self._running = False
 
@@ -222,13 +201,35 @@ class Dump1090JsonSource:
             headers["If-None-Match"] = self._cache.etag
         if self._cache.last_modified:
             headers["If-Modified-Since"] = self._cache.last_modified
+
+        if not self._dns_logged and self._url.startswith("http"):
+            try:
+                from urllib.parse import urlparse
+
+                parsed = urlparse(self._url)
+                host = parsed.hostname
+                if host:
+                    infos = await asyncio.get_running_loop().getaddrinfo(
+                        host, parsed.port or (443 if parsed.scheme == "https" else 80)
+                    )
+                    addrs = sorted({ai[4][0] for ai in infos})
+                    logger.debug(
+                        "dump1090 DNS %s -> %s (force_ipv4=%s)",
+                        host,
+                        addrs,
+                        self._force_ipv4,
+                    )
+            except Exception:
+                logger.debug("dump1090 DNS diagnostic failed", exc_info=True)
+            finally:
+                self._dns_logged = True
+
         start = time.monotonic()
         async with self._session.get(self._url, headers=headers) as resp:
             if resp.status == 304:
                 return False
             resp.raise_for_status()
 
-            # Cache headers
             etag = resp.headers.get("ETag")
             if etag:
                 self._cache.etag = etag
@@ -236,12 +237,11 @@ class Dump1090JsonSource:
             if lm:
                 self._cache.last_modified = lm
 
-            # Parse JSON payload
             text = await resp.text()
             elapsed = time.monotonic() - start
             if elapsed > self._timeout_s * 0.8:
                 logger.debug(
-                    "dump1090 poll slow: %.3fs (timeout %.2fs) size=%s bytes",
+                    "dump1090 poll slow: %.3fs (timeout %.2fs) size=%d bytes",
                     elapsed,
                     self._timeout_s,
                     len(text),
@@ -251,7 +251,6 @@ class Dump1090JsonSource:
             return True
 
     def _handle_payload(self, data: dict[str, Any]) -> None:
-        # Determine timestamp
         now_s = _coerce_float(data.get("now"))
         if now_s is None:
             from time import time as _now
@@ -264,27 +263,25 @@ class Dump1090JsonSource:
             return
 
         for ac in ac_list:
-            if not isinstance(ac, dict):  # defensive
+            if not isinstance(ac, dict):
                 continue
             icao = ac.get("hex")
             if not _is_valid_icao24(icao):
                 continue
             icao = str(icao).strip().lower()
 
-            # Staleness check
             seen = _coerce_float(ac.get("seen")) or 0.0
             seen_pos = _coerce_float(ac.get("seen_pos")) or 0.0
             if seen > 60.0 or seen_pos > 60.0:
                 continue
 
-            callsign_raw = ac.get("flight")
             callsign = None
-            if isinstance(callsign_raw, str):
-                callsign = callsign_raw.strip() or None
+            raw_cs = ac.get("flight")
+            if isinstance(raw_cs, str):
+                callsign = raw_cs.strip() or None
 
             lat = _coerce_float(ac.get("lat"))
             lon = _coerce_float(ac.get("lon"))
-
             baro_alt = _coerce_float(ac.get("alt_baro"))
             geo_alt = _coerce_float(ac.get("alt_geom"))
             gs = _coerce_float(ac.get("gs"))
@@ -311,12 +308,6 @@ class Dump1090JsonSource:
                 src="JSON",
             )
 
-            # Serialize with ISO timestamp for msgpack
             msg_dict = msg.model_dump()
             msg_dict["ts"] = msg.ts.isoformat()
-            # Fire-and-forget publish (async caller)
-            # Use create_task? EventBus.publish is async; call directly but do
-            # not await here. However, we're in sync context; schedule
-            # publishing via asyncio.create_task to avoid blocking on many
-            # aircraft.
             asyncio.create_task(self._bus.publish(self._topic, pack(msg_dict)))
