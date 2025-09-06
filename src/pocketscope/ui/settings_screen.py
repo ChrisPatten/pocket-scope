@@ -48,6 +48,11 @@ from pocketscope.settings.values import (
     UNITS_ORDER,
 )
 
+# Explicit choices for typography controls (kept small and sensible for Pi)
+LABEL_FONT_SIZES = (8, 10, 12, 14, 16, 18, 20, 24, 28, 32, 36, 40, 48)
+# Line gap choices in pixels (relative offset between data-block lines)
+LABEL_LINE_GAP_VALUES = tuple(range(-6, 7))  # -6..6
+
 # Resolve themed colors with sensible fallbacks
 _SC_THEME = (
     THEME.get("colors", {}).get("settings_screen", {})
@@ -115,6 +120,15 @@ class SettingsScreen:
             ),
             MenuItem("Demo Mode", "toggle"),
             MenuItem("North-up Lock", "toggle"),
+            # Typography controls (appended so legacy menu indices remain stable)
+            MenuItem(
+                "Label Font", "cycle", tuple(str(int(x)) for x in LABEL_FONT_SIZES)
+            ),
+            MenuItem(
+                "Label Line Gap",
+                "cycle",
+                tuple(str(int(x)) for x in LABEL_LINE_GAP_VALUES),
+            ),
         ]
         self._sel: int = 0
 
@@ -207,6 +221,49 @@ class SettingsScreen:
         elif item.label == "Track Length":
             controller.cycle_track_length(persist=False)
             self._settings.track_length_mode = controller.track_length_mode
+        elif item.label == "Label Font":
+            # Cycle through explicit font-size choices
+            try:
+                cur = int(getattr(self._settings, "label_font_px", self.font_px))
+            except Exception:
+                cur = int(self.font_px)
+            # Find current index in canonical list or fallback to nearest
+            sizes = list(LABEL_FONT_SIZES)
+            # Find current index robustly without relying on .index to avoid
+            # narrow Literal typing on the tuple which causes mypy to complain.
+            idx = next((i for i, s in enumerate(sizes) if s == cur), -1)
+            if idx == -1:
+                # choose closest larger or fallback to first
+                idx = 0
+                for i, s in enumerate(sizes):
+                    if s >= cur:
+                        idx = i
+                        break
+            idx = (idx + 1) % len(sizes)
+            new = int(sizes[idx])
+            self._settings.label_font_px = new
+            # Apply immediately to controller/view
+            try:
+                controller._view.label_font_px = int(new)
+            except Exception:
+                pass
+        elif item.label == "Label Line Gap":
+            try:
+                cur = int(getattr(self._settings, "label_line_gap_px", 0))
+            except Exception:
+                cur = 0
+            gaps = list(LABEL_LINE_GAP_VALUES)
+            # Use enumerate-based search to avoid Literal typing issues
+            idx = next((i for i, g in enumerate(gaps) if g == cur), -1)
+            if idx == -1:
+                idx = 0
+            idx = (idx + 1) % len(gaps)
+            new = int(gaps[idx])
+            self._settings.label_line_gap_px = new
+            try:
+                controller._view.label_line_gap_px = int(new)
+            except Exception:
+                pass
         elif item.label == "Altitude Filter":
             controller.cycle_altitude_filter(persist=False)
             # Mirror into settings model
@@ -311,4 +368,8 @@ class SettingsScreen:
             return "ON" if controller.demo_mode else "OFF"
         if item.label == "North-up Lock":
             return "ON" if getattr(controller, "north_up_lock", True) else "OFF"
+        if item.label == "Label Font":
+            return f"{int(getattr(self._settings, 'label_font_px', self.font_px))}px"
+        if item.label == "Label Line Gap":
+            return f"{int(getattr(self._settings, 'label_line_gap_px', 0))}px"
         return None

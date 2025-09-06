@@ -136,6 +136,15 @@ class ILI9341DisplayBackend(DisplayBackend):
     def _init_gpio(self) -> None:
         if GPIO is None:  # pragma: no cover
             return
+        # Disable RPi.GPIO warnings about channels "already in use" when
+        # reinitializing GPIO (common when restarting services or running
+        # multiple processes). The warning is harmless; use this to keep
+        # logs clean. See RuntimeWarning message suggesting this API.
+        try:
+            GPIO.setwarnings(False)
+        except Exception:
+            # Be defensive: some test/mocks may not implement setwarnings.
+            pass
         GPIO.setmode(GPIO.BCM)
         for p in (self._dc, self._rst, self._led):
             GPIO.setup(p, GPIO.OUT)

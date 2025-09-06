@@ -15,6 +15,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable, Optional, Sequence, cast
 
+from pocketscope import config as _config
 from pocketscope.core.events import EventBus, Subscription, unpack
 from pocketscope.core.geo import ecef_to_enu, geodetic_to_ecef
 from pocketscope.core.time import TimeSource
@@ -150,6 +151,16 @@ class UiController:
             self._settings, font_px=settings_font_px, pad_px=6
         )
         self._apply_track_windows()
+        # Apply persisted typography settings to active view if available
+        try:
+            if hasattr(self._view, "label_font_px"):
+                self._view.label_font_px = int(self._settings.label_font_px)
+            if hasattr(self._view, "label_line_gap_px"):
+                self._view.label_line_gap_px = int(self._settings.label_line_gap_px)
+            if hasattr(self._view, "label_block_pad_px"):
+                self._view.label_block_pad_px = int(self._settings.label_block_pad_px)
+        except Exception:
+            pass
 
         # Softkeys (late-bound via set_softkeys)
         self._softkeys: SoftKeyBar | None = None
@@ -331,7 +342,18 @@ class UiController:
         self.demo_mode = not self.demo_mode
         self._settings.demo_mode = self.demo_mode
         if persist:
-            SettingsStore.save_debounced(self._settings)
+            # Save immediately to avoid race where the file watcher may read
+            # an older file version and publish a stale config that resets
+            # the in-memory demo flag. Debounce is used elsewhere, but demo
+            # toggles are explicit user actions that should persist promptly.
+            try:
+                SettingsStore.save(self._settings)
+            except Exception:
+                # Fall back to debounced save if direct save fails
+                try:
+                    SettingsStore.save_debounced(self._settings)
+                except Exception:
+                    pass
         try:
             if self.demo_mode:
                 self._start_demo_mode()
@@ -529,6 +551,29 @@ class UiController:
                 self._apply_track_windows()
                 # Refresh visible settings screen with external changes
                 self._settings_screen.refresh_from_controller(self._settings)
+                # Update central runtime config and notify listeners so
+                # renderers and other components can react to external
+                # settings changes dynamically. Notifications are deferred
+                # to the event loop inside the config module to avoid
+                # synchronous timing hazards.
+                try:
+                    _config.update_from_settings(self._settings)
+                except Exception:
+                    pass
+                # Apply typography changes to active view
+                try:
+                    if hasattr(self._view, "label_font_px"):
+                        self._view.label_font_px = int(self._settings.label_font_px)
+                    if hasattr(self._view, "label_line_gap_px"):
+                        self._view.label_line_gap_px = int(
+                            self._settings.label_line_gap_px
+                        )
+                    if hasattr(self._view, "label_block_pad_px"):
+                        self._view.label_block_pad_px = int(
+                            self._settings.label_block_pad_px
+                        )
+                except Exception:
+                    pass
                 # Respond to external demo_mode changes
                 try:
                     if self.demo_mode and self._demo_task is None:

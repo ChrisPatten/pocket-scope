@@ -4,7 +4,12 @@ from __future__ import annotations
 
 from pydantic import BaseModel, Field, field_validator
 
-from .values import ALTITUDE_FILTER_CYCLE_ORDER, TRACK_LENGTH_CYCLE_ORDER, UNITS_ORDER
+from .values import (
+    ALTITUDE_FILTER_CYCLE_ORDER,
+    PPI_CONFIG,
+    TRACK_LENGTH_CYCLE_ORDER,
+    UNITS_ORDER,
+)
 
 
 class Settings(BaseModel):
@@ -40,6 +45,16 @@ class Settings(BaseModel):
     # When true the PPI orientation is locked north-up (rotation_deg forced to 0).
     # When false the user may rotate the view with left/right arrow keys.
     north_up_lock: bool = Field(default=True)
+    # Typography controls for PPI data-blocks (editable + persisted)
+    label_font_px: int = Field(
+        default=int(PPI_CONFIG.get("typography", {}).get("label_font_px", 12))
+    )
+    label_line_gap_px: int = Field(
+        default=int(PPI_CONFIG.get("typography", {}).get("line_gap_px", 2))
+    )
+    label_block_pad_px: int = Field(
+        default=int(PPI_CONFIG.get("typography", {}).get("block_pad_px", 2))
+    )
 
     @field_validator("units")
     @classmethod

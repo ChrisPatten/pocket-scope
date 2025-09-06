@@ -23,8 +23,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from math import cos, radians, sin
-from typing import TYPE_CHECKING, Iterable, List, Optional, Sequence, Tuple
+from typing import TYPE_CHECKING, Any, Iterable, List, Optional, Sequence, Tuple
 
+from pocketscope import config as _config
 from pocketscope.core.geo import ecef_to_enu, enu_to_screen, geodetic_to_ecef
 from pocketscope.render.airports_layer import AirportsLayer
 from pocketscope.render.canvas import Canvas, Color
@@ -57,6 +58,41 @@ ColorTrails: Color = _col(_PPI_THEME.get("trails"), (0, 180, 255, 180))
 ColorAircraft: Color = _col(_PPI_THEME.get("aircraft"), (255, 255, 0, 255))
 ColorLabels: Color = _col(_PPI_THEME.get("labels"), (255, 255, 255, 255))
 ColorDataBlock: Color = _col(_PPI_THEME.get("datablock"), (0, 255, 0, 255))
+
+
+def _on_runtime_update(rc: Any) -> None:
+    """Update module-level color constants when runtime theme changes.
+
+    This callback is scheduled via the event loop by config.update_from_settings
+    so it must be quick and idempotent.
+    """
+    try:
+        if isinstance(rc, dict):
+            theme = rc
+        else:
+            theme = getattr(rc, "theme", {}) or {}
+        ppi_theme = (
+            theme.get("colors", {}).get("ppi", {}) if isinstance(theme, dict) else {}
+        )
+        # Update colors in-place
+        global ColorBG, ColorRings, ColorOwnship, ColorTrails
+        global ColorAircraft, ColorLabels, ColorDataBlock
+        ColorBG = _col(ppi_theme.get("background"), ColorBG)
+        ColorRings = _col(ppi_theme.get("rings"), ColorRings)
+        ColorOwnship = _col(ppi_theme.get("ownship"), ColorOwnship)
+        ColorTrails = _col(ppi_theme.get("trails"), ColorTrails)
+        ColorAircraft = _col(ppi_theme.get("aircraft"), ColorAircraft)
+        ColorLabels = _col(ppi_theme.get("labels"), ColorLabels)
+        ColorDataBlock = _col(ppi_theme.get("datablock"), ColorDataBlock)
+    except Exception:
+        pass
+
+
+# Register listener (no-op if already registered elsewhere)
+try:
+    _config.register_listener(_on_runtime_update)
+except Exception:
+    pass
 
 
 @dataclass(slots=True)

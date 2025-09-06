@@ -31,6 +31,7 @@ from collections.abc import Iterable
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Awaitable, Optional, Protocol, cast
 
+from pocketscope.config import make_ui_config
 from pocketscope.core.events import EventBus
 from pocketscope.core.geo import ecef_to_enu, geodetic_to_ecef
 from pocketscope.core.models import AircraftTrack
@@ -230,17 +231,24 @@ async def main_async(args: argparse.Namespace) -> None:
         except Exception as e:
             print(f"[live_view] Failed to load sectors: {e}")
 
+    # Build runtime config (values <- persisted settings <- CLI args)
+    rc = make_ui_config(args=args)
+    # Convert config.UIData -> UiConfig used by controller
+    ui_cfg = UiConfig(
+        range_nm=float(rc.ui.range_nm),
+        min_range_nm=float(rc.ui.min_range_nm),
+        max_range_nm=float(rc.ui.max_range_nm),
+        target_fps=float(rc.ui.target_fps),
+        overlay=bool(rc.ui.overlay),
+    )
+
     ui = UiController(
         display=display,
         view=view,
         bus=bus,
         ts=ts,
         tracks=tracks,
-        cfg=UiConfig(
-            range_nm=float(args.range),
-            overlay=True,
-            target_fps=float(getattr(args, "fps", 30.0)),
-        ),
+        cfg=ui_cfg,
         center_lat=float(args.center[0]),
         center_lon=float(args.center[1]),
         airports=airports,
@@ -252,6 +260,13 @@ async def main_async(args: argparse.Namespace) -> None:
         bar_height=60,
         pad_y=10,
         border_width=0,
+        # Provide a lightweight measurement function on TFT so we never
+        # attempt to import pygame for text metrics on embedded hardware.
+        measure_fn=(
+            (lambda s, sz: (int(sz * 0.6) * len(s), sz))
+            if getattr(args, "tft", False)
+            else None
+        ),
         actions={
             "-": ui.zoom_out,
             "Settings": lambda: None,

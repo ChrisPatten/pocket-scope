@@ -56,7 +56,7 @@ theme:
     softkeys:
       bg: [32, 32, 32, 255]
       text: [255, 255, 255, 255]
-      border: [255, 0, 0, 255]
+      border: [32, 32, 32, 255]
     status_overlay:
       bg: [32, 32, 32, 180]
       text: [255, 255, 255, 255]
