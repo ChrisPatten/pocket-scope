@@ -124,6 +124,7 @@ class SettingsScreen:
             ),
             MenuItem("Demo Mode", "toggle"),
             MenuItem("North-up Lock", "toggle"),
+            MenuItem("Flip Display", "toggle"),
             # Typography controls (appended so legacy menu indices remain stable)
             MenuItem(
                 "Label Font", "cycle", tuple(str(int(x)) for x in LABEL_FONT_SIZES)
@@ -439,6 +440,24 @@ class SettingsScreen:
         elif item.label == "North-up Lock":
             controller.toggle_north_up_lock(persist=False)
             self._settings.north_up_lock = controller.north_up_lock
+        elif item.label == "Flip Display":
+            # Toggle a setting that instructs display backends to rotate/flip
+            # the final framebuffer before sending to hardware. This is a
+            # staged change until the user presses Save.
+            try:
+                cur = bool(getattr(self._settings, "flip_display", False))
+            except Exception:
+                cur = False
+            new = not cur
+            self._settings.flip_display = new
+            # If controller exposes an interface for the display backend, try
+            # to apply immediately so the UI preview matches the setting.
+            try:
+                fn = getattr(controller, "apply_display_flip", None)
+                if callable(fn):
+                    fn(new)
+            except Exception:
+                pass
         # Persistence deferred until explicit Save
 
     # --- Rendering ----------------------------------------------------
@@ -533,6 +552,8 @@ class SettingsScreen:
             return "ON" if controller.demo_mode else "OFF"
         if item.label == "North-up Lock":
             return "ON" if getattr(controller, "north_up_lock", True) else "OFF"
+        if item.label == "Flip Display":
+            return "ON" if getattr(self._settings, "flip_display", False) else "OFF"
         if item.label == "Label Font":
             return f"{int(getattr(self._settings, 'label_font_px', self.font_px))}px"
         if item.label == "Label Line Gap":

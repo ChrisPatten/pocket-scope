@@ -45,6 +45,10 @@ class Settings(BaseModel):
     # When true the PPI orientation is locked north-up (rotation_deg forced to 0).
     # When false the user may rotate the view with left/right arrow keys.
     north_up_lock: bool = Field(default=True)
+    # When true the final rendered output will be flipped/rotated to match
+    # display hardware that requires the framebuffer orientation to be
+    # inverted. This value is persisted to settings.json as ``flip_display``.
+    flip_display: bool = Field(default=False)
     # Typography controls for PPI data-blocks (editable + persisted)
     label_font_px: int = Field(
         default=int(PPI_CONFIG.get("typography", {}).get("label_font_px", 12))

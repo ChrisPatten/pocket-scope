@@ -154,7 +154,14 @@ class ILI9341DisplayBackend(DisplayBackend):
         self._hz = hz
         self._spi: _SpiLike | None = None
         self._frame: Image.Image | None = None
+
+        # When True the final framebuffer will be rotated/flipped prior to
+        # transmission to the hardware. Controlled by settings and applied
+        # as an opt-in backend hook.
+        self._flip: bool = False
         self._fonts = _FontCache()
+
+        # Initialize hardware interfaces (no-ops in test environments)
         self._init_gpio()
         self._init_spi(spi_bus, spi_dev)
         self._init_panel()
@@ -162,14 +169,9 @@ class ILI9341DisplayBackend(DisplayBackend):
     def _init_gpio(self) -> None:
         if GPIO is None:  # pragma: no cover
             return
-        # Disable RPi.GPIO warnings about channels "already in use" when
-        # reinitializing GPIO (common when restarting services or running
-        # multiple processes). The warning is harmless; use this to keep
-        # logs clean. See RuntimeWarning message suggesting this API.
         try:
             GPIO.setwarnings(False)
         except Exception:
-            # Be defensive: some test/mocks may not implement setwarnings.
             pass
         GPIO.setmode(GPIO.BCM)
         for p in (self._dc, self._rst, self._led):
@@ -251,7 +253,15 @@ class ILI9341DisplayBackend(DisplayBackend):
     def end_frame(self) -> None:
         if self._frame is None:
             return
-        rgb = self._frame.convert("RGB")
+        # Respect optional flip/rotate setting by operating on a transient
+        # copy so we do not permanently mutate the stored frame buffer.
+        img = self._frame
+        try:
+            if self._flip:
+                img = img.transpose(Image.ROTATE_180)
+        except Exception:
+            img = self._frame
+        rgb = img.convert("RGB")
         raw = rgb.tobytes()
         out = bytearray(2 * self._w * self._h)
         oi = 0
@@ -267,21 +277,44 @@ class ILI9341DisplayBackend(DisplayBackend):
         if GPIO is not None:
             GPIO.output(self._dc, 1)
         if self._spi is not None:
-            # Some SPI drivers / kernel builds have limits on a single write
-            # argument size (observed 'Argument list size exceeds 4096 bytes').
-            # Chunk large frame transfers to stay well under that threshold.
-            CHUNK = 2048  # bytes per transfer (tunable)
+            CHUNK = 2048
             total = len(out)
             mv = memoryview(out)
             for i in range(0, total, CHUNK):
-                # Convert only the slice needed for this transfer to a list[int]
                 self._spi.writebytes(list(mv[i : i + CHUNK]))
 
     def save_png(self, path: str) -> None:
         if self._frame is None:
             return
         Path(path).parent.mkdir(parents=True, exist_ok=True)
-        self._frame.save(path)
+        try:
+            if self._flip:
+                img = self._frame.transpose(Image.ROTATE_180)
+                img.save(path)
+            else:
+                self._frame.save(path)
+        except Exception:
+            try:
+                self._frame.save(path)
+            except Exception:
+                pass
+
+    def apply_flip(self, flip: bool) -> None:
+        """Opt-in backend hook: set whether final output should be flipped.
+
+        This method is intentionally lightweight and idempotent. The actual
+        transformation is applied during frame finalization in :meth:`end_frame`.
+        """
+        try:
+            new = bool(flip)
+            if new != self._flip:
+                try:
+                    print(f"[ILI9341] apply_flip -> {new}")
+                except Exception:
+                    pass
+            self._flip = new
+        except Exception:
+            self._flip = False
 
 
 __all__ = ["ILI9341DisplayBackend"]

@@ -162,6 +162,18 @@ class UiController:
         self.altitude_filter: str = getattr(self._settings, "altitude_filter", "All")
         self.north_up_lock: bool = getattr(self._settings, "north_up_lock", True)
 
+        # Whether the final framebuffer should be flipped/rotated for the
+        # display hardware. Mirrors persisted setting but does not force a
+        # disk write; persistence is controlled by the settings screen Save.
+        self._flip_display: bool = bool(getattr(self._settings, "flip_display", False))
+
+        # Apply persisted flip state to backend immediately if supported.
+        try:
+            self.apply_display_flip(self._flip_display)
+        except Exception:
+            # Best-effort; do not break initialization if backend missing hook
+            pass
+
         # Settings screen overlay (multiplier from configuration)
         settings_font_px = int(
             font_px * float(SETTINGS_SCREEN_CONFIG.get("font_multiplier", 1.2))
@@ -317,6 +329,10 @@ class UiController:
                 # Draw softkeys last (either restricted or full set)
                 if self._softkeys:
                     self._softkeys.draw(canvas)
+
+                # No per-frame flip call here — flips are applied when the
+                # setting changes or at controller initialization to avoid
+                # repeatedly invoking backend hooks every frame.
 
                 self._display.end_frame()
 
@@ -588,6 +604,14 @@ class UiController:
                 self.demo_mode = new.demo_mode
                 self.altitude_filter = getattr(new, "altitude_filter", "All")
                 self.north_up_lock = getattr(new, "north_up_lock", True)
+                # Mirror flip_display runtime state and notify backend
+                try:
+                    self._flip_display = bool(getattr(new, "flip_display", False))
+                    fn = getattr(self._display, "apply_flip", None)
+                    if callable(fn):
+                        fn(self._flip_display)
+                except Exception:
+                    pass
                 self._apply_track_windows()
                 # Refresh visible settings screen with external changes
                 self._settings_screen.refresh_from_controller(self._settings)
@@ -745,6 +769,35 @@ class UiController:
         self._fps_avg = (1.0 - alpha) * self._fps_avg + alpha * fps_inst
         self._prev_frame_t = t1
         return (fps_inst, self._fps_avg)
+
+    def apply_display_flip(self, flip: bool) -> None:
+        """Set runtime flip flag and notify backend if it supports the hook.
+
+        This method provides a single callable used by the settings screen so
+        toggles can be applied immediately and consistently.
+        """
+        try:
+            new = bool(flip)
+        except Exception:
+            new = False
+        try:
+            if new != getattr(self, "_flip_display", None):
+                try:
+                    print(f"[UiController] apply_display_flip -> {new}")
+                except Exception:
+                    pass
+            self._flip_display = new
+        except Exception:
+            self._flip_display = False
+        try:
+            fn = getattr(self._display, "apply_flip", None)
+            if callable(fn):
+                try:
+                    fn(self._flip_display)
+                except Exception:
+                    pass
+        except Exception:
+            pass
 
     def _bus_summary(self) -> str:
         m = self._bus.metrics()
