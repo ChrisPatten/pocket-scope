@@ -234,7 +234,11 @@ async def main_async(args: argparse.Namespace) -> None:
         bus=bus,
         ts=ts,
         tracks=tracks,
-        cfg=UiConfig(range_nm=float(args.range), overlay=True, target_fps=30.0),
+        cfg=UiConfig(
+            range_nm=float(args.range),
+            overlay=True,
+            target_fps=float(getattr(args, "fps", 30.0)),
+        ),
         center_lat=float(args.center[0]),
         center_lon=float(args.center[1]),
         airports=airports,
@@ -377,6 +381,12 @@ def parse_args() -> argparse.Namespace:
         dest="tft",
         action="store_true",
         help="Use SPI TFT (ILI9341) + touch (XPT2046) instead of pygame",
+    )
+    p.add_argument(
+        "--fps",
+        type=float,
+        default=30.0,
+        help="Target frames per second for display updates (default: 30.0)",
     )
     return p.parse_args()
 
