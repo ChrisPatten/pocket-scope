@@ -39,7 +39,7 @@ async def test_settings_screen_full_flow(
         cfg=UiConfig(target_fps=10.0, range_nm=10.0),
     )
 
-    watcher = ConfigWatcher(bus, poll_hz=10.0)
+    watcher = ConfigWatcher(bus)
     watcher_task = asyncio.create_task(watcher.run())
     task = asyncio.create_task(ui.run())
 

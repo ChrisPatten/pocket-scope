@@ -133,7 +133,7 @@ def _print_help() -> None:
 async def main_async(args: argparse.Namespace) -> None:
     ts = RealTimeSource()
     bus = EventBus()
-    tracks = TrackService(bus, ts, expiry_s=300.0)
+    tracks = TrackService(bus, ts, expiry_s=300.0, sweep_interval_s=10.0)
 
     # Source selection
     class _Source(Protocol):
@@ -147,7 +147,9 @@ async def main_async(args: argparse.Namespace) -> None:
     if args.playback:
         src = FilePlaybackSource(args.playback, ts=ts, bus=bus, speed=1.0, loop=True)
     else:
-        src = Dump1090JsonSource(args.url, bus=bus, poll_hz=1.0)
+        src = Dump1090JsonSource(
+            args.url, bus=bus, poll_hz=1.0, main_loop=asyncio.get_running_loop()
+        )
 
     # Open a window (portrait) and optionally expose the view over HTTP.
     display: DisplayBackend
@@ -267,12 +269,14 @@ async def main_async(args: argparse.Namespace) -> None:
                 await asyncio.sleep(0.05)
 
         asyncio.create_task(_touch_logger())
-    watcher = ConfigWatcher(bus, poll_hz=2.0)
-    asyncio.create_task(watcher.run())
+
+    # Start background services
+    config_watcher = ConfigWatcher(bus)
+    asyncio.create_task(config_watcher.run())
+    await tracks.run()
 
     _print_help()
     # Start track maintenance (spawns internal tasks and returns immediately).
-    await tracks.run()
 
     # Run UI and source concurrently; stop others when one exits.
     src_task = asyncio.create_task(src.run(), name="adsb_source")

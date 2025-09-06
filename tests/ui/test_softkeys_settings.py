@@ -53,7 +53,7 @@ async def test_softkeys_and_hot_reload(
     )
     ui.set_softkeys(bar)
 
-    watcher = ConfigWatcher(bus, poll_hz=10.0)
+    watcher = ConfigWatcher(bus)
     watcher_task = asyncio.create_task(watcher.run())
 
     task = asyncio.create_task(ui.run())

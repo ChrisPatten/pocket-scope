@@ -211,7 +211,7 @@ async def test_expiry() -> None:
 
         # Advance to t=2.1 without new messages (past expiry)
         ts.advance(2.1)
-        await asyncio.sleep(0.1)  # Let expiry loop run
+        await asyncio.sleep(1.1)  # Let expiry loop run (it sleeps for 1s)
 
         # Track should be expired
         assert service.get("abc123") is None

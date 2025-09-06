@@ -13,6 +13,7 @@ import json
 import logging
 import os
 import socket
+import threading
 import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -74,6 +75,7 @@ class Dump1090JsonSource:
         session: Optional[aiohttp.ClientSession] = None,
         timeout_s: float = 3.0,
         verify_tls: bool = True,
+        main_loop: Optional[asyncio.AbstractEventLoop] = None,
     ) -> None:
         base = os.environ.get("DUMP1090_BASE_URL")
         if url.startswith("/") and base:
@@ -120,6 +122,7 @@ class Dump1090JsonSource:
         self._running = False
         self._stop_event = asyncio.Event()
         self._cache = _CacheState()
+        self._main_loop = main_loop or asyncio.get_running_loop()
 
         self._consec_errors = 0
         self._last_success_monotonic = time.monotonic()
@@ -130,66 +133,116 @@ class Dump1090JsonSource:
             return
         self._running = True
 
-        if self._ext_session is not None:
-            self._session = self._ext_session
-        else:
+        try:
+            if self._ext_session is not None:
+                await self._run_in_thread()
+            else:
+                # If managing session internally, ensure it's created and closed
+                # within the thread's event loop.
+                await self._run_in_thread_with_managed_session()
+        finally:
+            self._running = False
+
+    async def _run_in_thread(self) -> None:
+        """Executor for running the polling loop in a separate thread."""
+        loop = asyncio.new_event_loop()
+        thread = threading.Thread(target=loop.run_forever, daemon=True)
+        thread.start()
+
+        try:
+            # Schedule the main polling coroutine in the new loop
+            future = asyncio.run_coroutine_threadsafe(self._polling_loop(), loop)
+            # Wait for the stop signal from the main thread
+            await self._stop_event.wait()
+            # Once stop is signaled, cancel the polling task in the thread
+            future.cancel()
+            # Wait for cancellation to complete
+            try:
+                await asyncio.wrap_future(future)
+            except asyncio.CancelledError:
+                pass  # Expected
+        finally:
+            # Cleanly shut down the event loop in the thread
+            loop.call_soon_threadsafe(loop.stop)
+            thread.join(timeout=5.0)
+
+    async def _run_in_thread_with_managed_session(self) -> None:
+        """
+        Manages session lifecycle within the dedicated thread, then runs the
+        polling loop.
+        """
+
+        async def _runner_with_session() -> None:
             timeout = aiohttp.ClientTimeout(
                 total=self._timeout_s, connect=self._connect_timeout_s
             )
+            connector_args: dict[str, Any] = {"ssl": self._verify_tls}
             if self._force_ipv4:
-                connector = aiohttp.TCPConnector(
-                    ssl=self._verify_tls, family=socket.AF_INET
-                )
-            else:
-                connector = aiohttp.TCPConnector(ssl=self._verify_tls)
-            self._session = aiohttp.ClientSession(timeout=timeout, connector=connector)
+                connector_args["family"] = socket.AF_INET
 
+            connector = aiohttp.TCPConnector(**connector_args)
+            async with aiohttp.ClientSession(
+                timeout=timeout, connector=connector
+            ) as session:
+                self._session = session
+                await self._polling_loop()
+
+        loop = asyncio.new_event_loop()
+        thread = threading.Thread(target=loop.run_forever, daemon=True)
+        thread.start()
+
+        try:
+            future = asyncio.run_coroutine_threadsafe(_runner_with_session(), loop)
+            await self._stop_event.wait()
+            future.cancel()
+            try:
+                await asyncio.wrap_future(future)
+            except asyncio.CancelledError:
+                pass
+        finally:
+            loop.call_soon_threadsafe(loop.stop)
+            thread.join(timeout=5.0)
+
+    async def _polling_loop(self) -> None:
+        """The core polling logic, designed to run in any event loop."""
         backoff = 0.2
         max_backoff = 2.0
-        try:
-            while not self._stop_event.is_set():
-                try:
-                    await self._poll_once()
-                    backoff = 0.2
-                    if self._consec_errors:
-                        logger.info(
-                            "dump1090 poll recovered after %d consecutive errors",
-                            self._consec_errors,
-                        )
-                    self._consec_errors = 0
-                    self._last_success_monotonic = time.monotonic()
-                except asyncio.CancelledError:
-                    raise
-                except Exception as e:  # noqa: BLE001
-                    logger.exception(
-                        "dump1090 poll error (url=%s, verify_tls=%s)",
-                        self._url,
-                        self._verify_tls,
+        while not self._stop_event.is_set():
+            try:
+                await self._poll_once()
+                backoff = 0.2
+                if self._consec_errors:
+                    logger.info(
+                        "dump1090 poll recovered after %d consecutive errors",
+                        self._consec_errors,
                     )
-                    self._consec_errors += 1
-                    if isinstance(e, asyncio.TimeoutError):
-                        logger.info(
-                            "dump1090 timeout (%.2fs) after %.2fs idle (errors=%d)",
-                            self._timeout_s,
-                            time.monotonic() - self._last_success_monotonic,
-                            self._consec_errors,
-                        )
-                    if self._consec_errors in {10, 30, 60}:
-                        logger.error(
-                            "dump1090 still failing (%d consecutive, last=%s)",
-                            self._consec_errors,
-                            e.__class__.__name__,
-                        )
-                    await asyncio.sleep(backoff)
-                    backoff = min(max_backoff, backoff * 2.0)
-                await asyncio.sleep(self._interval)
-        finally:
-            if self._session and self._ext_session is None:
-                try:
-                    await self._session.close()
-                except Exception:  # pragma: no cover
-                    pass
-            self._running = False
+                self._consec_errors = 0
+                self._last_success_monotonic = time.monotonic()
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:  # noqa: BLE001
+                logger.exception(
+                    "dump1090 poll error (url=%s, verify_tls=%s)",
+                    self._url,
+                    self._verify_tls,
+                )
+                self._consec_errors += 1
+                if isinstance(e, asyncio.TimeoutError):
+                    logger.info(
+                        "dump1090 timeout (%.2fs) after %.2fs idle (errors=%d)",
+                        self._timeout_s,
+                        time.monotonic() - self._last_success_monotonic,
+                        self._consec_errors,
+                    )
+                if self._consec_errors in {10, 30, 60}:
+                    logger.error(
+                        "dump1090 still failing (%d consecutive, last=%s)",
+                        self._consec_errors,
+                        e.__class__.__name__,
+                    )
+                await asyncio.sleep(backoff)
+                backoff = min(max_backoff, backoff * 2.0)
+            await asyncio.sleep(self._interval)
 
     async def stop(self) -> None:
         self._stop_event.set()
@@ -209,8 +262,11 @@ class Dump1090JsonSource:
                 parsed = urlparse(self._url)
                 host = parsed.hostname
                 if host:
+                    # Run blocking DNS lookup in a thread to avoid
+                    # blocking the event loop
                     infos = await asyncio.get_running_loop().getaddrinfo(
-                        host, parsed.port or (443 if parsed.scheme == "https" else 80)
+                        host,
+                        parsed.port or (443 if parsed.scheme == "https" else 80),
                     )
                     addrs = sorted({ai[4][0] for ai in infos})
                     logger.debug(
@@ -310,4 +366,8 @@ class Dump1090JsonSource:
 
             msg_dict = msg.model_dump()
             msg_dict["ts"] = msg.ts.isoformat()
-            asyncio.create_task(self._bus.publish(self._topic, pack(msg_dict)))
+            # Use run_coroutine_threadsafe to publish from the worker thread's
+            # loop to the main thread's loop.
+            asyncio.run_coroutine_threadsafe(
+                self._bus.publish(self._topic, pack(msg_dict)), self._main_loop
+            )
