@@ -14,9 +14,8 @@ POCKETSCOPE_URL="https://adsb.chrispatten.dev/data/aircraft.json"
 POCKETSCOPE_CENTER="42.00748,-71.20899"
 POCKETSCOPE_SECTORS="./sample_data/us_states.json"
 POCKETSCOPE_FPS="15"
-POCKETSCOPE_RANGE="30"
 POCKETSCOPE_TFT="1"
-POCKETSCOPE_BLOCK_LINE_GAP="-4"
+POCKETSCOPE_HOME="/home/pocketscope/.pocketscope"
 EOF
 ````
 
@@ -47,7 +46,6 @@ ExecStart=/home/pocketscope/pocket-scope/.venv/bin/python -m pocketscope.example
   --sectors ${POCKETSCOPE_SECTORS} \
   --tft \
   --fps ${POCKETSCOPE_FPS} \
-  --range ${POCKETSCOPE_RANGE}
 
 KillSignal=SIGINT
 TimeoutStopSec=15

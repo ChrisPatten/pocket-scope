@@ -48,7 +48,33 @@ class _FontCache:
     def get(self, size_px: int) -> Any:
         f = self.fonts.get(size_px)
         if f is None:
-            f = ImageFont.load_default()
+            try:
+                # Try common scalable monospace TTFs first. These paths cover
+                # Linux and macOS typical installs; fall back to a name-based
+                # attempt and finally the Pillow default bitmap font.
+                candidates = [
+                    "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf",
+                    "/usr/share/fonts/truetype/liberation/LiberationMono-Regular.ttf",
+                    "/usr/share/fonts/truetype/freefont/FreeMono.ttf",
+                    "/Library/Fonts/Menlo.ttc",
+                    "/Library/Fonts/Consolas.ttf",
+                ]
+                font = None
+                for p in candidates:
+                    try:
+                        font = ImageFont.truetype(p, size_px)
+                        break
+                    except Exception:
+                        continue
+                if font is None:
+                    # Try a generic family name (may work on some platforms)
+                    try:
+                        font = ImageFont.truetype("DejaVuSansMono.ttf", size_px)
+                    except Exception:
+                        font = ImageFont.load_default()
+                f = font
+            except Exception:
+                f = ImageFont.load_default()
             self.fonts[size_px] = f
         return f
 

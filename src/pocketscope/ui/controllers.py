@@ -127,15 +127,34 @@ class UiController:
         self._running: bool = False
         self._task: asyncio.Task[None] | None = None
 
+        # Persistent settings load & field mirrors
+        # Load persisted settings early so overlay can pick up padding/font
+        # values from the store instead of falling back to defaults.
+        self._settings: Settings = SettingsStore.load()
         # Overlay (diagnostics / status)
         try:  # width may raise if backend not fully initialized in tests
             disp_w, _disp_h = self._display.size()
         except Exception:
             disp_w = 300  # pragmatic fallback for headless environments
-        self._overlay = StatusOverlay(font_px=font_px, width_px=disp_w)
-
-        # Persistent settings load & field mirrors
-        self._settings: Settings = SettingsStore.load()
+        # Use persisted status font size when available
+        try:
+            status_px = int(getattr(self._settings, "status_font_px", font_px))
+        except Exception:
+            status_px = font_px
+        # Optional explicit top/bottom pads
+        try:
+            st = getattr(self._settings, "status_pad_top_px", None)
+            sb = getattr(self._settings, "status_pad_bottom_px", None)
+            if st is not None:
+                st = int(st)
+            if sb is not None:
+                sb = int(sb)
+        except Exception:
+            st = None
+            sb = None
+        self._overlay = StatusOverlay(
+            font_px=status_px, pad_top=st, pad_bottom=sb, width_px=disp_w
+        )
         self._cfg.range_nm = float(self._settings.range_nm)
         self.units: str = self._settings.units
         self.track_length_mode: str = self._settings.track_length_mode
@@ -202,6 +221,27 @@ class UiController:
             self._rotation_deg = 0.0
 
     def set_softkeys(self, bar: SoftKeyBar) -> None:
+        # Apply persisted softkey typography/padding when available
+        try:
+            bar._requested_font_px = int(
+                getattr(self._settings, "softkeys_font_px", bar._requested_font_px)
+            )
+        except Exception:
+            pass
+        try:
+            bar.pad_x = int(getattr(self._settings, "softkeys_pad_x", bar.pad_x))
+        except Exception:
+            pass
+        try:
+            bar.pad_y = int(getattr(self._settings, "softkeys_pad_y", bar.pad_y))
+        except Exception:
+            pass
+        # Allow runtime settings to control height: clear any explicit height
+        # so layout will derive bar height from requested font + pad_y.
+        try:
+            bar.bar_height = None
+        except Exception:
+            pass
         self._softkeys = bar
 
         # Ensure Settings button is wired
@@ -572,6 +612,38 @@ class UiController:
                         self._view.label_block_pad_px = int(
                             self._settings.label_block_pad_px
                         )
+                    # Apply status overlay font size as well
+                    try:
+                        self._overlay.font_px = int(self._settings.status_font_px)
+                    except Exception:
+                        pass
+                    # Apply softkey typography/padding
+                    try:
+                        if self._softkeys:
+                            # Set requested font so layout uses it
+                            self._softkeys._requested_font_px = int(
+                                self._settings.softkeys_font_px
+                            )
+                            self._softkeys.pad_x = int(self._settings.softkeys_pad_x)
+                            self._softkeys.pad_y = int(self._settings.softkeys_pad_y)
+                            # Allow automatic height computation based on font/pad
+                            try:
+                                self._softkeys.bar_height = None
+                            except Exception:
+                                pass
+                            self._softkeys.layout()
+                    except Exception:
+                        pass
+                    # Apply explicit top/bottom padding when present
+                    try:
+                        spt = getattr(self._settings, "status_pad_top_px", None)
+                        spb = getattr(self._settings, "status_pad_bottom_px", None)
+                        if spt is not None:
+                            self._overlay.pad_top = int(spt)
+                        if spb is not None:
+                            self._overlay.pad_bottom = int(spb)
+                    except Exception:
+                        pass
                 except Exception:
                     pass
                 # Respond to external demo_mode changes

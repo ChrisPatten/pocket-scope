@@ -48,28 +48,64 @@ def _measure_text_lines(lines: List[str], *, font_px: int) -> Tuple[int, int]:
     """
 
     try:
-        import pygame
+        # Prefer Pillow measurement so sizing matches the Pillow-backed
+        # Canvas used by the ILI9341 backend. Try common TTF paths first.
+        try:
+            from PIL import ImageFont
 
-        # Ensure font subsystem is ready
-        if not pygame.get_init():
-            pygame.init()
-        if not pygame.font.get_init():
-            pygame.font.init()
+            candidates = [
+                "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf",
+                "/usr/share/fonts/truetype/liberation/LiberationMono-Regular.ttf",
+                "/usr/share/fonts/truetype/freefont/FreeMono.ttf",
+                "/Library/Fonts/Menlo.ttc",
+                "/Library/Fonts/Consolas.ttf",
+            ]
+            font = None
+            for p in candidates:
+                try:
+                    font = ImageFont.truetype(p, font_px)
+                    break
+                except Exception:
+                    continue
+            if font is None:
+                try:
+                    font = ImageFont.truetype("DejaVuSansMono.ttf", font_px)
+                except Exception:
+                    font = ImageFont.load_default()
+            max_w = 0
+            for s in lines:
+                try:
+                    m = font.getmask(s)
+                    w = m.size[0]
+                except Exception:
+                    w = int(len(s) * font_px * 0.6)
+                if w > max_w:
+                    max_w = w
+            total_h = font_px * len(lines)
+            return max_w, total_h
+        except Exception:
+            # Fall back to pygame-based measurement if Pillow isn't present
+            import pygame
 
-        fh = get_mono(font_px)
-        font_obj: Any = getattr(fh, "obj", None)
-        max_w = 0
-        for s in lines:
-            if font_obj is not None:
-                w, _ = font_obj.size(s)
-            else:  # pragma: no cover - fallback
-                w = int(len(s) * font_px * 0.6)
-            if w > max_w:
-                max_w = w
-        total_h = font_px * len(lines)
-        return max_w, total_h
+            if not pygame.get_init():
+                pygame.init()
+            if not pygame.font.get_init():
+                pygame.font.init()
+
+            fh = get_mono(font_px)
+            font_obj: Any = getattr(fh, "obj", None)
+            max_w = 0
+            for s in lines:
+                if font_obj is not None:
+                    w, _ = font_obj.size(s)
+                else:  # pragma: no cover - fallback
+                    w = int(len(s) * font_px * 0.6)
+                if w > max_w:
+                    max_w = w
+            total_h = font_px * len(lines)
+            return max_w, total_h
     except Exception:
-        # Conservative fallback in environments without pygame
+        # Conservative fallback in environments without Pillow/pygame
         max_len = max((len(s) for s in lines), default=0)
         return int(max_len * font_px * 0.6), font_px * len(lines)
 
@@ -92,20 +128,36 @@ class StatusOverlay:
         self,
         font_px: int = 12,
         *,
-        pad_x: int = 4,
-        pad_y: int = 2,
-        border_width: int = 0,
-        border_color: Color = _COLOR_BORDER,
+        pad_x: int | None = None,
+        pad_y: int | None = None,
+        pad_top: int | None = None,
+        pad_bottom: int | None = None,
         bg_color: Color = _COLOR_BG,
         text_color: Color = _COLOR_TEXT,
         measure_fn: Callable[[str, int], Tuple[int, int]] | None = None,
         width_px: int | None = None,
     ) -> None:
         self.font_px = int(font_px)
-        self.pad_x = max(0, int(pad_x))
-        self.pad_y = max(0, int(pad_y))
-        self.border_width = max(0, int(border_width))
-        self.border_color = border_color
+        # Compute sensible defaults scaled to the font size when caller
+        # doesn't specify explicit padding values. This keeps the overlay
+        # visually consistent across font sizes on different displays.
+        if pad_x is None:
+            self.pad_x = max(2, int(round(self.font_px * 0.3)))
+        else:
+            self.pad_x = max(0, int(pad_x))
+        if pad_y is None:
+            self.pad_y = max(1, int(round(self.font_px * 0.15)))
+        else:
+            self.pad_y = max(0, int(pad_y))
+        # Top/bottom padding used to compute automatic panel height
+        if pad_top is None:
+            self.pad_top = max(2, int(round(self.font_px * 0.4)))
+        else:
+            self.pad_top = max(0, int(pad_top))
+        if pad_bottom is None:
+            self.pad_bottom = max(2, int(round(self.font_px * 0.25)))
+        else:
+            self.pad_bottom = max(0, int(pad_bottom))
         self.bg_color = bg_color
         self.text_color = text_color
         self.width_px = width_px  # if None we compute dyn based on content
@@ -192,14 +244,16 @@ class StatusOverlay:
                 widest_cell = max(widest_cell, tw + 2 * self.pad_x)
         width = self.width_px or (max_cells * widest_cell)
         line_height = self.font_px + 2 * self.pad_y
-        panel_h = line_height * len(lines)
+        # Include top/bottom padding in total panel height so the overlay
+        # visually separates from content above/below and scales with font.
+        panel_h = self.pad_top + (line_height * len(lines)) + self.pad_bottom
 
         # --- Background fill ------------------------------------------
         for dy in range(panel_h):
             canvas.line((0, dy), (width - 1, dy), color=self.bg_color)
 
         # --- Draw each line's cells -----------------------------------
-        y = 0
+        y = self.pad_top
         for cells in lines:
             n = max(1, len(cells))
             cell_w = width // n
@@ -217,26 +271,7 @@ class StatusOverlay:
                 canvas.text((tx, ty), text, size_px=self.font_px, color=self.text_color)
             y += line_height
 
-        # --- Optional outer border ------------------------------------
-        if self.border_width > 0:
-            bw = self.border_width
-            for i in range(bw):
-                # top
-                canvas.line((0, i), (width - 1, i), color=self.border_color)
-                # bottom
-                canvas.line(
-                    (0, panel_h - 1 - i),
-                    (width - 1, panel_h - 1 - i),
-                    color=self.border_color,
-                )
-                # left
-                canvas.line((i, 0), (i, panel_h - 1), color=self.border_color)
-                # right
-                canvas.line(
-                    (width - 1 - i, 0),
-                    (width - 1 - i, panel_h - 1),
-                    color=self.border_color,
-                )
+    # No border: overlay is a translucent band only
 
     # ------------------------------------------------------------------
     def _measure_text_internal(self, text: str, size_px: int) -> Tuple[int, int]:
@@ -245,15 +280,46 @@ class StatusOverlay:
         if cached is not None:
             return cached
         try:
-            import pygame as _pg
+            # Prefer Pillow measurement when available so measurements match
+            # the Pillow-backed Canvas used by the ILI9341 backend.
+            try:
+                from PIL import ImageFont
 
-            if not _pg.get_init():  # defensive init
-                _pg.init()
-            if not _pg.font.get_init():
-                _pg.font.init()
-            font = _pg.font.Font(None, size_px)
-            # pygame's size returns a 2-tuple of ints (w,h)
-            wh: Tuple[int, int] = font.size(text)
+                # Try to obtain a truetype font similar to the backend's
+                # _FontCache; fall back to default ImageFont if not found.
+                try:
+                    # Use a common monospace name first; if it fails,
+                    # ImageFont.load_default will provide a bitmap font.
+                    font = ImageFont.truetype("DejaVuSansMono.ttf", size_px)
+                except Exception:
+                    try:
+                        font = ImageFont.load_default()
+                    except Exception:
+                        font = None
+                # Initialize wh to a conservative estimate; may be replaced
+                # by precise measurement below. This avoids mypy thinking
+                # the name is conditionally defined in multiple places.
+                wh = (int(size_px * 0.6) * len(text), size_px)
+                if font is not None:
+                    # Use getmask to obtain rendered mask size which is
+                    # consistent across Pillow font implementations.
+                    try:
+                        m = font.getmask(text)
+                        wh = (m.size[0], m.size[1])
+                    except Exception:
+                        # keep conservative fallback
+                        pass
+            except Exception:
+                # Fallback to pygame if Pillow not available / failed
+                import pygame as _pg
+
+                if not _pg.get_init():  # defensive init
+                    _pg.init()
+                if not _pg.font.get_init():
+                    _pg.font.init()
+                font = _pg.font.Font(None, size_px)
+                # pygame's size returns a 2-tuple of ints (w,h)
+                wh = font.size(text)
         except Exception:
             wh = (int(size_px * 0.6) * len(text), size_px)
         self._measure_cache[key] = wh

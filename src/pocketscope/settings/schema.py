@@ -55,6 +55,16 @@ class Settings(BaseModel):
     label_block_pad_px: int = Field(
         default=int(PPI_CONFIG.get("typography", {}).get("block_pad_px", 2))
     )
+    # Status overlay font size (separate from PPI label font)
+    status_font_px: int = Field(default=12)
+    # Optional explicit top/bottom padding for status overlay. When None the
+    # overlay computes sensible defaults scaled to the font size.
+    status_pad_top_px: int | None = Field(default=None)
+    status_pad_bottom_px: int | None = Field(default=None)
+    # Softkey bar typography/padding (persisted)
+    softkeys_font_px: int = Field(default=12)
+    softkeys_pad_x: int = Field(default=4)
+    softkeys_pad_y: int = Field(default=2)
 
     @field_validator("units")
     @classmethod
