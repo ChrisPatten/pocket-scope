@@ -33,6 +33,7 @@ import asyncio
 import json
 import logging
 import os
+import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Optional
@@ -111,20 +112,38 @@ class Dump1090JsonSource:
         self._bus = bus
         self._topic = topic
         self._interval = 1.0 / max(0.1, float(poll_hz))
+
+        # Allow override of total request timeout via env var DUMP1090_TIMEOUT_S
+        _to = os.environ.get("DUMP1090_TIMEOUT_S")
+        if _to is not None:
+            try:
+                timeout_s = float(_to)
+            except ValueError:
+                logger.warning(
+                    "Invalid DUMP1090_TIMEOUT_S=%r (expect float); using default %s",
+                    _to,
+                    timeout_s,
+                )
         self._timeout_s = float(timeout_s)
+
         self._verify_tls = bool(verify_tls)
-        # Optional runtime override via env var: set to 0/false/no to disable
         _vt = os.environ.get("DUMP1090_VERIFY_TLS")
         if _vt is not None:
-            if _vt.strip().lower() in {"0", "false", "no"}:
+            val = _vt.strip().lower()
+            if val in {"0", "false", "no"}:
                 self._verify_tls = False
-            elif _vt.strip().lower() in {"1", "true", "yes"}:
+            elif val in {"1", "true", "yes"}:
                 self._verify_tls = True
+
         self._ext_session = session
         self._session: Optional[aiohttp.ClientSession] = None
         self._running = False
         self._stop_event = asyncio.Event()
         self._cache = _CacheState()
+
+        # Error/backoff bookkeeping
+        self._consec_errors = 0
+        self._last_success_monotonic = time.monotonic()
 
     async def run(self) -> None:
         if self._running:
@@ -146,11 +165,18 @@ class Dump1090JsonSource:
             while not self._stop_event.is_set():
                 try:
                     await self._poll_once()
-                    # Reset backoff on success
+                    # Success bookkeeping
                     backoff = 0.2
+                    if self._consec_errors:
+                        logger.info(
+                            "dump1090 poll recovered after %d consecutive errors",
+                            self._consec_errors,
+                        )
+                    self._consec_errors = 0
+                    self._last_success_monotonic = time.monotonic()
                 except asyncio.CancelledError:
                     raise
-                except Exception:
+                except Exception as e:
                     # Include exception type and stack for easier field
                     # debugging (e.g. TLS, JSON issues)
                     logger.exception(
@@ -158,6 +184,21 @@ class Dump1090JsonSource:
                         self._url,
                         self._verify_tls,
                     )
+                    self._consec_errors += 1
+                    if isinstance(e, asyncio.TimeoutError):
+                        # Emit a concise timeout diagnostic (INFO level) without stack
+                        logger.info(
+                            "dump1090 timeout (%.2fs) after %.2fs idle (consec_errors=%d)",  # noqa: E501
+                            self._timeout_s,
+                            time.monotonic() - self._last_success_monotonic,
+                            self._consec_errors,
+                        )
+                    if self._consec_errors in {10, 30, 60}:
+                        logger.error(
+                            "dump1090 still failing (%d consecutive errors, last exception: %s)",  # noqa: E501
+                            self._consec_errors,
+                            e.__class__.__name__,
+                        )
                     # Exponential backoff up to max_backoff
                     await asyncio.sleep(backoff)
                     backoff = min(max_backoff, backoff * 2.0)
@@ -181,7 +222,7 @@ class Dump1090JsonSource:
             headers["If-None-Match"] = self._cache.etag
         if self._cache.last_modified:
             headers["If-Modified-Since"] = self._cache.last_modified
-
+        start = time.monotonic()
         async with self._session.get(self._url, headers=headers) as resp:
             if resp.status == 304:
                 return False
@@ -196,8 +237,15 @@ class Dump1090JsonSource:
                 self._cache.last_modified = lm
 
             # Parse JSON payload
-            # We read text then json.loads to avoid aiohttp's type ignoring
             text = await resp.text()
+            elapsed = time.monotonic() - start
+            if elapsed > self._timeout_s * 0.8:
+                logger.debug(
+                    "dump1090 poll slow: %.3fs (timeout %.2fs) size=%s bytes",
+                    elapsed,
+                    self._timeout_s,
+                    len(text),
+                )
             data = json.loads(text)
             self._handle_payload(data)
             return True
