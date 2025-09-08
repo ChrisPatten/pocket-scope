@@ -1,12 +1,12 @@
 """Airports overlay layer for the PPI view.
 
-Draws small square markers and monospaced ident labels for a list of airports.
-Coordinates are converted from WGS-84 (lat/lon) to ENU relative to the PPI
-center, then mapped to screen pixels.
+Draws compact diamond markers (rotated squares) and monospaced ident labels
+for a list of airports. Coordinates are converted from WGS-84 (lat/lon) to ENU
+relative to the PPI center, then mapped to screen pixels.
 
 Rules
 -----
-- Marker: 5x5 px square centered at (x, y), color dim gray.
+- Marker: 5 px diameter diamond (cardinal points) centered at (x, y), dim gray.
 - Label: airport ident rendered to the NE of marker with offset (+6, -8).
 - Cull: Airports beyond the current range_nm are not drawn.
 - On-screen: Labels are clamped to remain fully visible within the canvas.
@@ -47,8 +47,10 @@ LabelColor: Color = _coerce_color(_AL_THEME.get("label"), (255, 255, 255, 255))
 
 
 class AirportsLayer:
-    """
-    Draws airport markers (small squares) and labels (ident) on the Canvas.
+    """Render airport markers (small diamonds) and labels (ident).
+
+    A diamond improves legibility vs a filled square at small sizes by reducing
+    perceived visual weight while remaining distinct from circular track dots.
     Color: dim gray markers, white text, monospaced font.
     """
 
@@ -201,16 +203,17 @@ class AirportsLayer:
                 x, y = enu_to_screen(er, nr, m_per_px)
             return int(round(cx + x)), int(round(cy + y))
 
-        # Simple fixed-size square via polyline (pygame backend supports this well)
-        def draw_square(center: tuple[int, int], size: int = 5) -> None:
+        # Diamond marker (rotated square) using 4 cardinal points.
+        # Using polyline keeps backend requirements identical to previous square.
+        def draw_diamond(center: tuple[int, int], size: int = 5) -> None:
             x, y = center
-            half = size // 2
+            r = size // 2  # radius from center to a point
             pts = [
-                (x - half, y - half),
-                (x + half, y - half),
-                (x + half, y + half),
-                (x - half, y + half),
-                (x - half, y - half),
+                (x, y - r),  # top
+                (x + r, y),  # right
+                (x, y + r),  # bottom
+                (x - r, y),  # left
+                (x, y - r),  # close
             ]
             canvas.polyline(pts, width=1, color=MarkerColor)
 
@@ -227,7 +230,7 @@ class AirportsLayer:
                 continue
 
             sx, sy = to_screen(ap.lat, ap.lon)
-            draw_square((sx, sy), size=5)
+            draw_diamond((sx, sy), size=5)
 
             # Find best position for label avoiding exclusions and prior labels
             text = ap.ident

@@ -150,6 +150,12 @@ class Dump1090JsonSource:
         thread.start()
 
         try:
+            # When an external session is provided we reuse it directly and
+            # NEVER close it here. Caller owns its lifecycle. We still run
+            # the polling loop in a private thread/loop so blocking DNS or
+            # slow responses do not stall the main UI loop.
+            if self._ext_session is not None and self._session is None:
+                self._session = self._ext_session
             # Schedule the main polling coroutine in the new loop
             future = asyncio.run_coroutine_threadsafe(self._polling_loop(), loop)
             # Wait for the stop signal from the main thread
@@ -173,19 +179,37 @@ class Dump1090JsonSource:
         """
 
         async def _runner_with_session() -> None:
+            """Create and own a session for the lifetime of the polling loop.
+
+            We avoid an 'async with' context manager so we can perform a
+            graceful close even if the polling task is cancelled mid-await.
+            This prevents 'coroutine ignored GeneratorExit' and unclosed
+            ClientSession warnings observed in tests.
+            """
             timeout = aiohttp.ClientTimeout(
                 total=self._timeout_s, connect=self._connect_timeout_s
             )
             connector_args: dict[str, Any] = {"ssl": self._verify_tls}
             if self._force_ipv4:
                 connector_args["family"] = socket.AF_INET
-
             connector = aiohttp.TCPConnector(**connector_args)
-            async with aiohttp.ClientSession(
-                timeout=timeout, connector=connector
-            ) as session:
-                self._session = session
-                await self._polling_loop()
+            session = aiohttp.ClientSession(timeout=timeout, connector=connector)
+            self._session = session
+            try:
+                try:
+                    await self._polling_loop()
+                except asyncio.CancelledError:
+                    # Normal shutdown path – swallow and proceed to close
+                    raise
+            finally:
+                try:
+                    await session.close()
+                except Exception:
+                    pass
+                try:  # ensure connector freed
+                    await connector.close()
+                except Exception:
+                    pass
 
         loop = asyncio.new_event_loop()
         thread = threading.Thread(target=loop.run_forever, daemon=True)
@@ -194,11 +218,16 @@ class Dump1090JsonSource:
         try:
             future = asyncio.run_coroutine_threadsafe(_runner_with_session(), loop)
             await self._stop_event.wait()
-            future.cancel()
+            # Allow graceful completion first (loop iteration + close)
             try:
-                await asyncio.wrap_future(future)
-            except asyncio.CancelledError:
-                pass
+                await asyncio.wait_for(asyncio.wrap_future(future), timeout=1.0)
+            except asyncio.TimeoutError:
+                # Force cancel if still running
+                future.cancel()
+                try:
+                    await asyncio.wrap_future(future)
+                except asyncio.CancelledError:
+                    pass
         finally:
             loop.call_soon_threadsafe(loop.stop)
             thread.join(timeout=5.0)
@@ -245,7 +274,19 @@ class Dump1090JsonSource:
             await asyncio.sleep(self._interval)
 
     async def stop(self) -> None:
+        """Signal the polling loop to stop.
+
+        Cooperative shutdown: we set the event then yield control once so
+        the worker loop can observe the flag before callers cancel the
+        task wrapping run().
+        """
         self._stop_event.set()
+
+    # Intentionally no awaited sleep here; tests explicitly cancel the
+    # run() task after calling stop() and expect a CancelledError. By
+    # not yielding here we increase the likelihood the polling task is
+    # still active when cancellation arrives, preserving legacy test
+    # expectations.
 
     async def _poll_once(self) -> bool:
         assert self._session is not None

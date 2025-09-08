@@ -1,13 +1,19 @@
-"""ILI9341 SPI TFT display backend (RGB565 portrait 240x320).
+"""ILI9341 SPI TFT display backend (RGB565 portrait 240x320) with recovery.
 
-Minimal driver using spidev + RPi.GPIO. Accepts drawing commands via a
-Pillow-backed Canvas implementation and transmits packed RGB565 over SPI.
-Safe to import without hardware; unit tests patch spidev/GPIO symbols.
+Adds prototype resilience:
+    * Automatic re-init on SPI write failures.
+    * Periodic status (0x09) read via MISO; failure triggers recovery.
+    * Watchdog thread re-inits if no successful frame for >2 s.
+    * Shared SPI bus lock with touch controller to avoid interleaved writes.
+
+All extras become inert when ``spidev`` / ``RPi.GPIO`` are unavailable.
 """
 
 from __future__ import annotations
 
+import threading
 import time
+from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Protocol, Sequence, Tuple, runtime_checkable
@@ -15,6 +21,11 @@ from typing import Any, Protocol, Sequence, Tuple, runtime_checkable
 from PIL import Image, ImageDraw, ImageFont
 
 from pocketscope.render.canvas import Canvas, Color, DisplayBackend
+
+try:  # pragma: no cover
+    from .spi_lock import SPI_BUS_LOCK
+except Exception:  # pragma: no cover
+    SPI_BUS_LOCK = threading.RLock()
 
 try:  # pragma: no cover
     import spidev
@@ -87,7 +98,8 @@ class _PillowCanvas(Canvas):
 
     def clear(self, color: Color) -> None:
         r, g, b, a = color
-        self._draw.rectangle([(0, 0), self._img.size], fill=(r, g, b, a))
+        w, h = self._img.size
+        self._draw.rectangle((0, 0, w, h), fill=(r, g, b, a))
 
     def line(
         self,
@@ -146,6 +158,7 @@ class ILI9341DisplayBackend(DisplayBackend):
         led_pin: int = 18,
         hz: int = 32_000_000,
     ) -> None:
+        # Geometry & config
         self._w = int(width)
         self._h = int(height)
         self._dc = dc_pin
@@ -154,17 +167,26 @@ class ILI9341DisplayBackend(DisplayBackend):
         self._hz = hz
         self._spi: _SpiLike | None = None
         self._frame: Image.Image | None = None
-
-        # When True the final framebuffer will be rotated/flipped prior to
-        # transmission to the hardware. Controlled by settings and applied
-        # as an opt-in backend hook.
         self._flip: bool = False
         self._fonts = _FontCache()
 
-        # Initialize hardware interfaces (no-ops in test environments)
+        # Health / recovery state
+        self._fail_streak = 0
+        self._last_ok = time.monotonic()
+        self._last_status_crc: int | None = None
+        self._frame_counter = 0
+        self._ping_interval_frames = 30
+        self._recover_lock = threading.RLock()
+        self._next_backoff_s = 0.05
+        self._max_backoff_s = 2.0
+        self._watchdog_interval_s = 0.5
+        self._watchdog_thread: threading.Thread | None = None
+        self._watchdog_stop = threading.Event()
+
         self._init_gpio()
         self._init_spi(spi_bus, spi_dev)
         self._init_panel()
+        self._start_watchdog()
 
     def _init_gpio(self) -> None:
         if GPIO is None:  # pragma: no cover
@@ -182,10 +204,11 @@ class ILI9341DisplayBackend(DisplayBackend):
         if spidev is None:  # pragma: no cover
             return
         spi = spidev.SpiDev()
-        spi.open(bus, dev)
-        spi.max_speed_hz = self._hz
-        spi.mode = 0
-        self._spi = spi
+        with SPI_BUS_LOCK:
+            spi.open(bus, dev)
+            spi.max_speed_hz = self._hz
+            spi.mode = 0
+            self._spi = spi
 
     def _hw_reset(self) -> None:
         if GPIO is None:  # pragma: no cover
@@ -200,11 +223,13 @@ class ILI9341DisplayBackend(DisplayBackend):
             return
         if GPIO is not None:
             GPIO.output(self._dc, 0)
-        self._spi.writebytes([cmd & 0xFF])
+        with SPI_BUS_LOCK:
+            self._spi.writebytes([cmd & 0xFF])
         if data:
             if GPIO is not None:
                 GPIO.output(self._dc, 1)
-            self._spi.writebytes(list(data))
+            with SPI_BUS_LOCK:
+                self._spi.writebytes(list(data))
 
     def _init_panel(self) -> None:
         self._hw_reset()
@@ -235,6 +260,9 @@ class ILI9341DisplayBackend(DisplayBackend):
             self._write_cmd(c, d)
         time.sleep(0.12)
         self._write_cmd(0x29, None)
+        self._last_ok = time.monotonic()
+        self._fail_streak = 0
+        self._next_backoff_s = 0.05
 
     def size(self) -> Tuple[int, int]:
         return (self._w, self._h)
@@ -273,15 +301,27 @@ class ILI9341DisplayBackend(DisplayBackend):
             out[oi] = (val >> 8) & 0xFF
             out[oi + 1] = val & 0xFF
             oi += 2
-        self._set_addr_window()
-        if GPIO is not None:
-            GPIO.output(self._dc, 1)
-        if self._spi is not None:
-            CHUNK = 2048
-            total = len(out)
-            mv = memoryview(out)
-            for i in range(0, total, CHUNK):
-                self._spi.writebytes(list(mv[i : i + CHUNK]))
+        try:
+            self._set_addr_window()
+            if GPIO is not None:
+                GPIO.output(self._dc, 1)
+            if self._spi is not None:
+                CHUNK = 2048
+                total = len(out)
+                mv = memoryview(out)
+                for i in range(0, total, CHUNK):
+                    with SPI_BUS_LOCK:
+                        self._spi.writebytes(list(mv[i : i + CHUNK]))
+            self._frame_counter += 1
+            # Periodic status ping
+            if self._frame_counter % self._ping_interval_frames == 0:
+                self._status_ping()
+            self._last_ok = time.monotonic()
+            self._fail_streak = 0
+            self._next_backoff_s = 0.05
+        except Exception:
+            self._fail_streak += 1
+            self._attempt_recover("frame transmit error")
 
     def save_png(self, path: str) -> None:
         if self._frame is None:
@@ -315,6 +355,127 @@ class ILI9341DisplayBackend(DisplayBackend):
             self._flip = new
         except Exception:
             self._flip = False
+
+    # ------------------------------------------------------------------
+    # Recovery / health monitoring
+    # ------------------------------------------------------------------
+    def _close_spi(self) -> None:
+        with suppress(Exception):
+            if self._spi is not None:
+                with SPI_BUS_LOCK:
+                    try:
+                        close = getattr(self._spi, "close", None)
+                        if callable(close):
+                            close()
+                    finally:
+                        self._spi = None
+
+    def reset_and_init(self) -> None:
+        """Public re-initialisation entry point.
+
+        Safe to call repeatedly; errors are suppressed to avoid cascading
+        failures in tight loops.
+        """
+        with self._recover_lock:
+            try:
+                self._close_spi()
+                # Re-init SPI + panel only if libraries present
+                self._init_spi(0, 0)
+                self._init_panel()
+            except Exception:
+                pass
+
+    def _status_ping(self) -> None:
+        """Attempt a lightweight status read (0x09) and CRC it.
+
+        ILI9341's 0x09 returns 4 status bytes plus dummy. We only care that
+        the transfer succeeds and returned bytes are not all 0x00/0xFF.
+        """
+        if self._spi is None:
+            return
+        try:
+            # Enter command mode
+            if GPIO is not None:
+                GPIO.output(self._dc, 0)
+            with SPI_BUS_LOCK:
+                self._spi.writebytes([0x09])
+            # Switch to data (read) mode
+            if GPIO is not None:
+                GPIO.output(self._dc, 1)
+            # Use xfer2 to clock out bytes (1 dummy + 4 data typical)
+            xfer2 = getattr(self._spi, "xfer2", None)
+            if not callable(xfer2):  # Fallback: cannot read
+                return
+            with SPI_BUS_LOCK:
+                resp = xfer2([0x00, 0x00, 0x00, 0x00, 0x00])
+            data = resp[1:5]
+            if not data:
+                raise RuntimeError("empty status")
+            if all(b == 0x00 for b in data) or all(b == 0xFF for b in data):
+                raise RuntimeError("degenerate status bytes")
+            crc = 0
+            for b in data:
+                crc = (crc ^ b) & 0xFF
+            if self._last_status_crc is not None and crc == self._last_status_crc:
+                # Stable CRC is acceptable; only absence/failure triggers.
+                pass
+            self._last_status_crc = crc
+        except Exception:
+            self._fail_streak += 1
+            self._attempt_recover("status ping failure")
+
+    def _attempt_recover(self, reason: str) -> None:
+        now = time.monotonic()
+        with self._recover_lock:
+            # Simple backoff to avoid hammering SPI hardware if unplugged.
+            delay = self._next_backoff_s
+            self._next_backoff_s = min(self._max_backoff_s, self._next_backoff_s * 2.0)
+            with suppress(Exception):
+                print(
+                    f"[ILI9341] recover (reason={reason}, streak={self._fail_streak},"
+                    f" backoff={delay:.2f}s)"
+                )
+            time.sleep(delay)
+            try:
+                self.reset_and_init()
+                self._last_ok = now
+            except Exception:
+                pass
+
+    def recover_from_error(self, exc: Exception | str) -> None:  # used by UI
+        self._fail_streak += 1
+        self._attempt_recover(str(exc))
+
+    def _watchdog_run(self) -> None:
+        while not self._watchdog_stop.is_set():
+            try:
+                if (time.monotonic() - self._last_ok) > 2.0:
+                    self._attempt_recover("watchdog timeout")
+            except Exception:
+                pass
+            self._watchdog_stop.wait(self._watchdog_interval_s)
+
+    def _start_watchdog(self) -> None:
+        if self._watchdog_thread is not None:
+            return
+        if spidev is None:  # skip if no hardware library
+            return
+        t = threading.Thread(
+            target=self._watchdog_run, name="ili9341-watchdog", daemon=True
+        )
+
+        self._watchdog_thread = t
+        try:
+            t.start()
+        except Exception:
+            self._watchdog_thread = None
+
+    def shutdown(self) -> None:
+        self._watchdog_stop.set()
+        with suppress(Exception):
+            if self._watchdog_thread and self._watchdog_thread.is_alive():
+                self._watchdog_thread.join(timeout=0.2)
+        self._close_spi()
 
 
 __all__ = ["ILI9341DisplayBackend"]

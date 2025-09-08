@@ -216,10 +216,53 @@ class DataBlockLayout:
         return (x, y)
 
     def place_blocks(
-        self, items: Sequence[tuple[Tuple[int, int], Tuple[str, str, str], bool]]
+        self,
+        items: Sequence[tuple[Tuple[int, int], Tuple[str, str, str], bool]],
+        *,
+        occlusions: Optional[Sequence[Tuple[int, int, int, int]]] = None,
     ) -> list[BlockPlacement]:
         placements: list[BlockPlacement] = []
+        # Occupied rectangles include previously placed blocks plus any
+        # external occlusions (status/info bars, softkeys) passed by caller.
         occupied: list[Tuple[int, int, int, int]] = []  # x,y,w,h
+        if occlusions:
+            # Trust caller rectangles as-is; treat them as hard exclusions.
+            for ox, oy, ow, oh in occlusions:
+                try:
+                    occupied.append((int(ox), int(oy), int(ow), int(oh)))
+                except Exception:
+                    continue
+
+        # ------------------------------------------------------------------
+        # NEW: Exclude aircraft glyph regions from label placement.
+        # Rationale: Previous behavior only avoided collisions between
+        # data blocks themselves (and UI occlusions). This could allow a
+        # block, when nudged by the spiral search, to overlap the visual
+        # aircraft marker (triangle or circle). We now seed the occupied
+        # set with a small square centered on every anchor point to keep
+        # labels from covering aircraft symbols. Trails are NOT included.
+        # A modest half-extent keeps spacing tight while preventing
+        # overlap. (Empirically a glyph spans ~5 px from center.)
+        # ------------------------------------------------------------------
+        marker_half_extent = 5  # pixels from center in each direction
+        marker_size = marker_half_extent * 2
+        try:
+            seen: set[Tuple[int, int]] = set()
+            for anchor, _lines, _expanded in items:
+                ax, ay = int(anchor[0]), int(anchor[1])
+                if (ax, ay) in seen:
+                    continue
+                seen.add((ax, ay))
+                occupied.append(
+                    (
+                        ax - marker_half_extent,
+                        ay - marker_half_extent,
+                        marker_size,
+                        marker_size,
+                    )
+                )
+        except Exception:
+            pass
 
         # Fixed initial offsets for quadrants
         offsets = [

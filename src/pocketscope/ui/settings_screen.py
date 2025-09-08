@@ -43,8 +43,8 @@ from pocketscope.settings.values import (
     RANGE_LADDER_NM,
     SETTINGS_SCREEN_CONFIG,
     THEME,
-    TRACK_LENGTH_CYCLE_ORDER,
-    TRACK_LENGTH_MODES,
+    TRACK_LENGTH_PRESETS_S,
+    TRACK_SERVICE_DEFAULTS,
     UNITS_ORDER,
 )
 
@@ -56,6 +56,15 @@ LABEL_LINE_GAP_VALUES = tuple(range(-6, 7))  # -6..6
 STATUS_FONT_SIZES = (8, 10, 12, 14, 16)
 # Status pad choices (in pixels). Include None option to use automatic scaling.
 STATUS_PAD_CHOICES = (None, 0, 2, 4, 6, 8)
+
+# Track expiry preset ladder (seconds). Keep small & sensible.
+TRACK_EXPIRY_PRESETS_S = (
+    120,
+    180,
+    300,
+    600,
+    900,
+)
 
 # Resolve themed colors with sensible fallbacks
 _SC_THEME = (
@@ -116,7 +125,11 @@ class SettingsScreen:
                 "cycle",
                 tuple(str(int(r)) for r in RANGE_LADDER_NM),
             ),
-            MenuItem("Track Length", "cycle", tuple(TRACK_LENGTH_CYCLE_ORDER)),
+            MenuItem(
+                "Track Length",
+                "cycle",
+                tuple(str(int(x)) for x in TRACK_LENGTH_PRESETS_S),
+            ),
             MenuItem(
                 "Altitude Filter",
                 "cycle",
@@ -125,6 +138,7 @@ class SettingsScreen:
             MenuItem("Demo Mode", "toggle"),
             MenuItem("North-up Lock", "toggle"),
             MenuItem("Flip Display", "toggle"),
+            MenuItem("Sector Labels", "toggle"),
             # Typography controls (appended so legacy menu indices remain stable)
             MenuItem(
                 "Label Font", "cycle", tuple(str(int(x)) for x in LABEL_FONT_SIZES)
@@ -164,6 +178,13 @@ class SettingsScreen:
                 "Softkeys Pad Y",
                 "cycle",
                 tuple(str(int(x)) for x in (0, 2, 4, 6, 8)),
+            ),
+            # Appended new runtime setting after legacy indices to avoid shifting
+            # existing test expectations (e.g., Demo Mode row index).
+            MenuItem(
+                "Track Expiry",
+                "cycle",
+                tuple(str(int(x)) for x in TRACK_EXPIRY_PRESETS_S),
             ),
         ]
         self._sel: int = 0
@@ -256,7 +277,13 @@ class SettingsScreen:
             controller._cfg.range_nm = cur_range
         elif item.label == "Track Length":
             controller.cycle_track_length(persist=False)
-            self._settings.track_length_mode = controller.track_length_mode
+            self._settings.track_length_s = float(controller.track_length_s)
+        elif item.label == "Track Expiry":
+            controller.cycle_track_expiry(persist=False)
+            try:
+                self._settings.track_expiry_s = float(controller.track_expiry_s)
+            except Exception:
+                pass
         elif item.label == "Label Font":
             # Cycle through explicit font-size choices
             try:
@@ -458,6 +485,21 @@ class SettingsScreen:
                     fn(new)
             except Exception:
                 pass
+        elif item.label == "Sector Labels":
+            # Toggle sector label visibility
+            try:
+                cur = bool(getattr(self._settings, "sector_labels", True))
+            except Exception:
+                cur = True
+            new = not cur
+            self._settings.sector_labels = new
+            # Apply live to controller/view
+            try:
+                controller.sector_labels = new
+                if hasattr(controller._view, "show_sector_labels"):
+                    controller._view.show_sector_labels = bool(new)
+            except Exception:
+                pass
         # Persistence deferred until explicit Save
 
     # --- Rendering ----------------------------------------------------
@@ -541,11 +583,28 @@ class SettingsScreen:
         if item.label == "Range Default":
             return f"{int(self._settings.range_nm):d}nm"
         if item.label == "Track Length":
-            # Derive human-readable seconds from central config
-            secs = TRACK_LENGTH_MODES.get(controller.track_length_mode)
-            if isinstance(secs, (int, float)):
-                return f"{int(secs)}s"
-            return "?"
+            try:
+                val = float(getattr(self._settings, "track_length_s", 45.0))
+            except Exception:
+                val = 45.0
+            # Indicate custom value (not in presets) with '*'
+            presets = set(float(x) for x in TRACK_LENGTH_PRESETS_S)
+            suffix = "" if val in presets else "*"
+            return f"{int(val)}s{suffix}"
+        if item.label == "Track Expiry":
+            try:
+                val = float(
+                    getattr(
+                        self._settings,
+                        "track_expiry_s",
+                        float(TRACK_SERVICE_DEFAULTS.get("expiry_s", 300.0)),
+                    )
+                )
+            except Exception:
+                val = float(TRACK_SERVICE_DEFAULTS.get("expiry_s", 300.0))
+            presets = set(float(x) for x in TRACK_EXPIRY_PRESETS_S)
+            suffix = "" if val in presets else "*"
+            return f"{int(val)}s{suffix}"
         if item.label == "Altitude Filter":
             return getattr(controller, "altitude_filter", "All")
         if item.label == "Demo Mode":

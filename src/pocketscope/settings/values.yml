@@ -47,6 +47,7 @@ theme:
       aircraft: [255, 255, 0, 255]
       labels: [255, 255, 255, 255]
       datablock: [0, 255, 0, 255]
+      datablock_bg: [0, 0, 0, 140]   # translucent background behind data block text
     settings_screen:
       bg: [0, 0, 0, 255]
       hilite: [0, 120, 0, 255]
@@ -70,14 +71,17 @@ zoom:
   max_range_nm: 80.0
 
 tracks:
-  length_modes:
-    short: 15.0    # seconds of trail (default window)
-    medium: 45.0
-    long: 120.0
-  cycle_order: ["short", "medium", "long"]
+  # Preset selectable trail lengths (seconds) for cycling in UI.
+  presets_s: [15.0, 45.0, 120.0]
+  # Service defaults (independent from UI cycling; applied at controller init
+  # if TrackService instance still has library defaults).
   service_defaults:
     trail_len_default_s: 60.0
     trail_len_pinned_s: 180.0
+  # Default expiry window for stale aircraft tracks (seconds). Tracks with
+  # no updates older than this are removed. Tunable via settings screen
+  # (Track Expiry) and persisted in settings.json (track_expiry_s).
+  expiry_s: 300.0
 
 ppi:
   range_ring_label:

@@ -159,7 +159,10 @@ async def main_async(args: argparse.Namespace) -> None:
         # Physical TFT portrait 240x320 (rotate logical view if desired later)
         display = ILI9341DisplayBackend(width=240, height=320)
         if XPT2046Touch is not None:  # pragma: no branch - simple availability
-            touch = XPT2046Touch(width=240, height=320)
+            # Use elevated poll rate for lower latency taps (default overridable
+            # via --touch-hz). Higher Hz reduces chance a very quick tap occurs
+            # entirely between polls and gets missed.
+            touch = XPT2046Touch(width=240, height=320, poll_hz=float(args.touch_hz))
             _run = getattr(touch, "run", None)
             if callable(_run):
                 try:
@@ -274,16 +277,106 @@ async def main_async(args: argparse.Namespace) -> None:
         },
     )
     ui.set_softkeys(bar)
-    # If touch backend active, log basic tap events for diagnostics.
+    # If touch backend active, forward taps into the UI so physical
+    # touches operate the softkeys / settings screen when running on
+    # embedded hardware (ILI9341 + XPT2046). Fall back to a simple
+    # logger when forwarding fails for any reason.
     if touch is not None and hasattr(touch, "get_events"):
 
-        async def _touch_logger() -> None:
+        async def _touch_forwarder() -> None:
+            # Forward only initial "down" events (touch start) to achieve
+            # immediate activation with no toggle-on-release. This mirrors
+            # desktop behavior where activation is on mouse-down. High
+            # poll rate (see --touch-hz) minimizes missed very short taps.
+            # If a very quick tap occurs entirely between polls and only a
+            # synthesized "tap" event is emitted (no preceding "down" seen),
+            # fall back to activating on that tap so the user doesn't have to
+            # hold. We track the last forwarded down to avoid double firing.
+            last_down_ts: float = 0.0
+            last_down_pos: tuple[int, int] | None = None
             while True:
-                for ev in touch.get_events():
-                    print(f"[touch] {ev.type} {ev.x},{ev.y} ts={ev.ts:.3f}")
-                await asyncio.sleep(0.05)
+                try:
+                    for ev in touch.get_events():
+                        try:
+                            print(f"[touch] {ev.type} {ev.x},{ev.y} ts={ev.ts:.3f}")
+                        except Exception:
+                            pass
+                        ix = int(ev.x)
+                        iy = int(ev.y)
 
-        asyncio.create_task(_touch_logger())
+                        # Helper to dispatch a press with synthetic release
+                        def _dispatch_press(x: int, y: int) -> None:
+                            consumed_local = False
+                            if ui._settings_screen.visible:
+                                try:
+                                    consumed_local = ui._settings_screen.on_mouse(
+                                        x, y, ui._display.size(), ui
+                                    )
+                                except Exception:
+                                    consumed_local = False
+                            if consumed_local:
+                                return
+                            if ui._softkeys:
+                                try:
+                                    ui._softkeys.on_mouse(x, y, True)
+                                    # Log which softkey (debug aid for +/-)
+                                    try:
+                                        # _hit may be internal; best-effort call
+                                        lbl = ui._softkeys._hit(x, y)
+                                        if lbl:
+                                            # Split long debug line for lint (ruff E501)
+                                            part1 = f"[touch] softkey '{lbl}' activated"
+                                            part2 = f"at {x},{y}"
+                                            print(part1 + " " + part2)
+                                    except Exception:
+                                        pass
+                                except Exception:
+                                    pass
+                                # Synthetic quick release (pressed=False)
+                                try:
+
+                                    async def _rel() -> None:
+                                        await asyncio.sleep(0.04)
+                                        try:
+                                            if ui._softkeys:
+                                                ui._softkeys.on_mouse(x, y, False)
+                                        except Exception:
+                                            pass
+
+                                    asyncio.create_task(_rel())
+                                except Exception:
+                                    pass
+                            # Sync mapping immediately (Settings may have opened)
+                            try:
+                                ui._sync_softkeys()
+                            except Exception:
+                                pass
+
+                        if ev.type == "down":
+                            _dispatch_press(ix, iy)
+                            last_down_ts = float(ev.ts)
+                            last_down_pos = (ix, iy)
+                        elif ev.type == "tap":
+                            # Fire only if we did not just forward a down for
+                            # the same spatial/temporal sequence.
+                            recent = False
+                            if last_down_pos is not None:
+                                if (float(ev.ts) - last_down_ts) < 0.5:
+                                    dx = abs(last_down_pos[0] - ix)
+                                    dy = abs(last_down_pos[1] - iy)
+                                    if dx <= 8 and dy <= 8:
+                                        recent = True
+                            if not recent:
+                                _dispatch_press(ix, iy)
+                                last_down_ts = float(ev.ts)
+                                last_down_pos = (ix, iy)
+                except Exception:
+                    pass
+                # Tight loop paced lightly; high poll_hz already controls
+                # sampling latency so a very small sleep avoids busy-spin.
+                await asyncio.sleep(0.01)
+
+        asyncio.create_task(_touch_forwarder())
 
     # Start background services
     config_watcher = ConfigWatcher(bus)
@@ -406,6 +499,13 @@ def parse_args() -> argparse.Namespace:
         type=float,
         default=30.0,
         help="Target frames per second for display updates (default: 30.0)",
+    )
+    p.add_argument(
+        "--touch-hz",
+        dest="touch_hz",
+        type=float,
+        default=180.0,
+        help="Touch poll frequency when using --tft (default: 180.0)",
     )
     return p.parse_args()
 

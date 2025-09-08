@@ -57,7 +57,9 @@ class XPT2046Touch:
         self._irq = irq_pin
         self._w = int(width)
         self._h = int(height)
-        self._poll_dt = 1.0 / max(1.0, poll_hz)
+        # Allow requested poll_hz to be > 1.0 (e.g. 60 Hz). Only guard
+        # against zero/negative to avoid division-by-zero.
+        self._poll_dt = 1.0 / max(1e-6, float(poll_hz))
         self._spi: _SpiLike | None = None
         self._cal = _Cal()
         self._events: List[UiEvent] = []
