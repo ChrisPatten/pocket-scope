@@ -444,40 +444,52 @@ class PpiView:
                 block_pad_px=self.label_block_pad_px,
             )
 
-        # Draw tracks deterministically (trails z=5, markers z=6)
+        # Draw tracks deterministically. We now split trails (z=5) and aircraft
+        # glyph markers (z=6) into separate passes so ALL markers render above
+        # ALL trails regardless of per-track ordering. This satisfies the
+        # requirement that aircraft markers are always on top of any tracks.
         _tracks = list(tracks)
         _tracks.sort(key=lambda t: ((t.callsign or ""), t.icao))
+
+        # Precompute screen position and visibility for labels; store geometry
+        from typing import List as _List
+        from typing import TypedDict
+
+        class _Precomp(TypedDict):
+            track: TrackSnapshot
+            gx: int
+            gy: int
+            visible_for_label: bool
+
+        precomp: _List[_Precomp] = []
         for t in _tracks:
             gx, gy = to_screen(t.lat, t.lon)
-
-            # When rendering data blocks we only produce label anchor items
-            # for aircraft whose glyph location is actually visible to the
-            # user. "Visible" means:
-            #   1. Within the circular PPI range (inside radius_px)
-            #   2. Within the framebuffer bounds
-            #   3. Not inside any occlusion rectangle (status overlay, softkeys)
-            # We still draw the glyph/trail regardless (legacy behavior) so
-            # range ring proximity and off-screen clipping remain unchanged.
             visible_for_label = True
             if self.show_data_blocks:
-                # Bounds check
                 if not (0 <= gx < w and 0 <= gy < h):
                     visible_for_label = False
                 else:
-                    # Circular range check using squared distance to avoid sqrt
-                    dx = gx - cx
-                    dy = gy - cy
-                    if (dx * dx + dy * dy) > (radius_px * radius_px):
+                    dx_ = gx - cx
+                    dy_ = gy - cy
+                    if (dx_ * dx_ + dy_ * dy_) > (radius_px * radius_px):
                         visible_for_label = False
-                    else:
-                        # Occlusion rectangles (x,y,w,h) measured from top-left
-                        if occlusions:
-                            for ox, oy, ow, oh in occlusions:
-                                if ox <= gx < ox + ow and oy <= gy < oy + oh:
-                                    visible_for_label = False
-                                    break
+                    elif occlusions:
+                        for ox, oy, ow, oh in occlusions:
+                            if ox <= gx < ox + ow and oy <= gy < oy + oh:
+                                visible_for_label = False
+                                break
+            precomp.append(
+                {
+                    "track": t,
+                    "gx": gx,
+                    "gy": gy,
+                    "visible_for_label": visible_for_label,
+                }
+            )
 
-            # Trail under glyph
+        # Pass 1: trails (z=5)
+        for pc in precomp:
+            t = pc["track"]
             if t.trail_enu:
                 pts: List[Tuple[int, int]] = []
                 for e, n in t.trail_enu:
@@ -486,13 +498,18 @@ class PpiView:
                 if len(pts) >= 2:
                     canvas.polyline(pts, width=2, color=ColorTrails)
 
-            # Glyph
+        # Pass 2: glyphs (z=6) & labels
+        for pc in precomp:
+            t = pc["track"]
+            gx = pc["gx"]
+            gy = pc["gy"]
+            visible_for_label = pc["visible_for_label"]
+
             if t.course_deg is not None:
                 if (self.rotation_deg % 360.0) == 0.0:
                     rad = radians(t.course_deg)
                 else:
                     rad = radians((t.course_deg + self.rotation_deg) % 360.0)
-                # Trig results are float; ensure downstream math uses float
                 dx_f: float = sin(rad)
                 dy_f: float = -cos(rad)
                 size = 5
@@ -513,7 +530,6 @@ class PpiView:
             else:
                 canvas.filled_circle((gx, gy), 3, color=ColorAircraft)
 
-            # Labels
             if (
                 self.show_data_blocks
                 and label_formatter is not None
