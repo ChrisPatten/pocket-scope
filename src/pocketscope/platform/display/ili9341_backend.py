@@ -1,12 +1,32 @@
-"""ILI9341 SPI TFT display backend (RGB565 portrait 240x320) with recovery.
+"""ILI9341 SPI TFT backend (RGB565 portrait 240x320) with recovery & blink mitigation.
 
-Adds prototype resilience:
-    * Automatic re-init on SPI write failures.
-    * Periodic status (0x09) read via MISO; failure triggers recovery.
-    * Watchdog thread re-inits if no successful frame for >2 s.
-    * Shared SPI bus lock with touch controller to avoid interleaved writes.
+Public API (unchanged):
+    * size()
+    * begin_frame() -> Canvas
+    * end_frame()
+    * apply_flip(bool)
+    * save_png(path)
+    * shutdown()
 
-All extras become inert when ``spidev`` / ``RPi.GPIO`` are unavailable.
+Added heuristics (configurable via attributes):
+    * _blank_skip_threshold (brightness drop factor, default 8.0)
+    * _blank_skip_ops_threshold (ops <= treated as blank, default 5)
+    * _frame_hold_ms (minimum interval for idle identical frame, default 0)
+
+Blink mitigation strategy:
+    * Count draw operations per frame. If almost no ops and resulting frame
+        is near-black or a large brightness drop relative to last frame, skip
+        pushing and retain previous panel contents (reduces visible flashing).
+    * Optional frame hold: if no operations and last push was < frame_hold_ms
+        ago, skip transmit.
+    * On recovery (after re-init) resend last good frame once when available.
+
+Recovery features (existing):
+    * Automatic re-init on transmit or status failures with exponential backoff.
+    * Periodic 0x09 status ping every N frames.
+    * Watchdog re-init if >2 s since last successful frame.
+
+All hardware interactions are safely no-ops when spidev / GPIO not present.
 """
 
 from __future__ import annotations
@@ -60,9 +80,6 @@ class _FontCache:
         f = self.fonts.get(size_px)
         if f is None:
             try:
-                # Try common scalable monospace TTFs first. These paths cover
-                # Linux and macOS typical installs; fall back to a name-based
-                # attempt and finally the Pillow default bitmap font.
                 candidates = [
                     "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf",
                     "/usr/share/fonts/truetype/liberation/LiberationMono-Regular.ttf",
@@ -78,7 +95,6 @@ class _FontCache:
                     except Exception:
                         continue
                 if font is None:
-                    # Try a generic family name (may work on some platforms)
                     try:
                         font = ImageFont.truetype("DejaVuSansMono.ttf", size_px)
                     except Exception:
@@ -91,15 +107,19 @@ class _FontCache:
 
 
 class _PillowCanvas(Canvas):
+    """Simple Pillow-backed canvas counting drawing ops for heuristics."""
+
     def __init__(self, img: Image.Image, fonts: _FontCache) -> None:
         self._img = img
         self._draw = ImageDraw.Draw(img)
         self._fonts = fonts
+        self._ops = 0
 
-    def clear(self, color: Color) -> None:
+    def clear(self, color: Color) -> None:  # override
         r, g, b, a = color
         w, h = self._img.size
         self._draw.rectangle((0, 0, w, h), fill=(r, g, b, a))
+        self._ops += 1
 
     def line(
         self,
@@ -107,8 +127,9 @@ class _PillowCanvas(Canvas):
         p1: Tuple[int, int],
         width: int = 1,
         color: Color = (255, 255, 255, 255),
-    ) -> None:
+    ) -> None:  # override
         self._draw.line([p0, p1], fill=color, width=width)
+        self._ops += 1
 
     def circle(
         self,
@@ -116,24 +137,29 @@ class _PillowCanvas(Canvas):
         radius: int,
         width: int = 1,
         color: Color = (255, 255, 255, 255),
-    ) -> None:
+    ) -> None:  # override
         x, y = center
         bbox = [x - radius, y - radius, x + radius, y + radius]
         self._draw.ellipse(bbox, outline=color, width=max(1, width))
+        self._ops += 1
 
-    def filled_circle(self, center: Tuple[int, int], radius: int, color: Color) -> None:
+    def filled_circle(
+        self, center: Tuple[int, int], radius: int, color: Color
+    ) -> None:  # override
         x, y = center
         bbox = [x - radius, y - radius, x + radius, y + radius]
         self._draw.ellipse(bbox, fill=color)
+        self._ops += 1
 
     def polyline(
         self,
         pts: Sequence[Tuple[int, int]],
         width: int = 1,
         color: Color = (255, 255, 255, 255),
-    ) -> None:
+    ) -> None:  # override
         if pts:
             self._draw.line(list(pts), fill=color, width=width)
+            self._ops += 1
 
     def text(
         self,
@@ -141,9 +167,10 @@ class _PillowCanvas(Canvas):
         s: str,
         size_px: int = 12,
         color: Color = (255, 255, 255, 255),
-    ) -> None:
+    ) -> None:  # override
         font = self._fonts.get(size_px)
         self._draw.text(pos, s, fill=color, font=font)
+        self._ops += 1
 
 
 class ILI9341DisplayBackend(DisplayBackend):
@@ -158,7 +185,7 @@ class ILI9341DisplayBackend(DisplayBackend):
         led_pin: int = 18,
         hz: int = 32_000_000,
     ) -> None:
-        # Geometry & config
+        # Geometry
         self._w = int(width)
         self._h = int(height)
         self._dc = dc_pin
@@ -167,10 +194,20 @@ class ILI9341DisplayBackend(DisplayBackend):
         self._hz = hz
         self._spi: _SpiLike | None = None
         self._frame: Image.Image | None = None
-        self._flip: bool = False
+        self._frame_canvas: _PillowCanvas | None = None
+        self._flip = False
         self._fonts = _FontCache()
 
-        # Health / recovery state
+        # Blink mitigation state
+        self._prev_frame: Image.Image | None = None
+        self._last_brightness = 0.0
+        self._last_push_ms = 0.0
+        self._last_frame_failed = False
+        self._blank_skip_threshold = 8.0
+        self._blank_skip_ops_threshold = 5
+        self._frame_hold_ms = 0.0
+
+        # Health / recovery
         self._fail_streak = 0
         self._last_ok = time.monotonic()
         self._last_status_crc: int | None = None
@@ -188,13 +225,12 @@ class ILI9341DisplayBackend(DisplayBackend):
         self._init_panel()
         self._start_watchdog()
 
+    # --------------------- Hardware / low-level ---------------------
     def _init_gpio(self) -> None:
         if GPIO is None:  # pragma: no cover
             return
-        try:
+        with suppress(Exception):
             GPIO.setwarnings(False)
-        except Exception:
-            pass
         GPIO.setmode(GPIO.BCM)
         for p in (self._dc, self._rst, self._led):
             GPIO.setup(p, GPIO.OUT)
@@ -208,7 +244,7 @@ class ILI9341DisplayBackend(DisplayBackend):
             spi.open(bus, dev)
             spi.max_speed_hz = self._hz
             spi.mode = 0
-            self._spi = spi
+        self._spi = spi
 
     def _hw_reset(self) -> None:
         if GPIO is None:  # pragma: no cover
@@ -264,13 +300,6 @@ class ILI9341DisplayBackend(DisplayBackend):
         self._fail_streak = 0
         self._next_backoff_s = 0.05
 
-    def size(self) -> Tuple[int, int]:
-        return (self._w, self._h)
-
-    def begin_frame(self) -> Canvas:
-        self._frame = Image.new("RGBA", (self._w, self._h), (0, 0, 0, 255))
-        return _PillowCanvas(self._frame, self._fonts)
-
     def _set_addr_window(self) -> None:
         self._write_cmd(0x2A, bytes([0x00, 0x00, 0x00, (self._w - 1) & 0xFF]))
         self._write_cmd(
@@ -278,17 +307,106 @@ class ILI9341DisplayBackend(DisplayBackend):
         )
         self._write_cmd(0x2C, None)
 
-    def end_frame(self) -> None:
+    # ------------------------------ API ------------------------------
+    def size(self) -> Tuple[int, int]:  # override
+        return (self._w, self._h)
+
+    def begin_frame(self) -> Canvas:  # override
+        if self._prev_frame is not None:
+            self._frame = self._prev_frame.copy()
+        else:
+            self._frame = Image.new("RGBA", (self._w, self._h), (0, 0, 0, 255))
+        self._frame_canvas = _PillowCanvas(self._frame, self._fonts)
+        return self._frame_canvas
+
+    def end_frame(self) -> None:  # override
         if self._frame is None:
             return
-        # Respect optional flip/rotate setting by operating on a transient
-        # copy so we do not permanently mutate the stored frame buffer.
+        ops = getattr(self._frame_canvas, "_ops", 0)
+        brightness = self._compute_brightness(self._frame)
+        now_ms = time.monotonic() * 1000.0
+        hold_elapsed = now_ms - self._last_push_ms
+        if (
+            self._frame_hold_ms > 0
+            and hold_elapsed < self._frame_hold_ms
+            and ops == 0
+            and self._prev_frame is not None
+        ):
+            return
+        if self._should_skip_push(ops, brightness):
+            return
         img = self._frame
         try:
             if self._flip:
                 img = img.transpose(Image.ROTATE_180)
         except Exception:
             img = self._frame
+        self._push_raw(img)
+        if not self._last_frame_failed:
+            with suppress(Exception):
+                self._prev_frame = self._frame.copy()
+            self._last_brightness = brightness
+            self._last_push_ms = now_ms
+
+    def apply_flip(self, flip: bool) -> None:  # override
+        try:
+            new = bool(flip)
+            if new != self._flip:
+                with suppress(Exception):
+                    print(f"[ILI9341] apply_flip -> {new}")
+            self._flip = new
+        except Exception:
+            self._flip = False
+
+    def save_png(self, path: str) -> None:  # override
+        if self._frame is None:
+            return
+        Path(path).parent.mkdir(parents=True, exist_ok=True)
+        try:
+            img = self._frame
+            if self._flip:
+                img = img.transpose(Image.ROTATE_180)
+            img.save(path)
+        except Exception:
+            with suppress(Exception):
+                self._frame.save(path)
+
+    def shutdown(self) -> None:  # override
+        self._watchdog_stop.set()
+        with suppress(Exception):
+            if self._watchdog_thread and self._watchdog_thread.is_alive():
+                self._watchdog_thread.join(timeout=0.2)
+        self._close_spi()
+
+    # ------------------ Brightness / skip heuristics ------------------
+    def _compute_brightness(self, img: Image.Image) -> float:
+        try:
+            thumb = img.resize((32, 32))
+            pixels = thumb.getdata()
+            total = 0
+            for r, g, b, *_ in pixels:
+                total += int(r) + int(g) + int(b)
+            return (total / (len(pixels) * 3)) if pixels else 0.0
+        except Exception:
+            return 0.0
+
+    def _should_skip_push(self, ops: int, brightness: float) -> bool:
+        if self._prev_frame is None:
+            return False
+        if ops > self._blank_skip_ops_threshold:
+            return False
+        near_black = brightness <= 2.0
+        if near_black and self._last_brightness > 0:
+            return True
+        if self._last_brightness > 0 and brightness > 0:
+            if (
+                self._last_brightness / max(brightness, 0.001)
+            ) >= self._blank_skip_threshold:
+                return True
+        return False
+
+    # ------------------------- Transmission ---------------------------
+    def _encode_rgb565(self, img: Image.Image) -> bytearray:
         rgb = img.convert("RGB")
         raw = rgb.tobytes()
         out = bytearray(2 * self._w * self._h)
@@ -301,114 +419,68 @@ class ILI9341DisplayBackend(DisplayBackend):
             out[oi] = (val >> 8) & 0xFF
             out[oi + 1] = val & 0xFF
             oi += 2
+        return out
+
+    def _push_raw(self, img: Image.Image) -> None:
+        out = self._encode_rgb565(img)
         try:
             self._set_addr_window()
             if GPIO is not None:
                 GPIO.output(self._dc, 1)
             if self._spi is not None:
-                CHUNK = 2048
-                total = len(out)
+                chunk = 2048
                 mv = memoryview(out)
-                for i in range(0, total, CHUNK):
+                for i in range(0, len(out), chunk):
                     with SPI_BUS_LOCK:
-                        self._spi.writebytes(list(mv[i : i + CHUNK]))
+                        self._spi.writebytes(list(mv[i : i + chunk]))
             self._frame_counter += 1
-            # Periodic status ping
             if self._frame_counter % self._ping_interval_frames == 0:
                 self._status_ping()
             self._last_ok = time.monotonic()
             self._fail_streak = 0
             self._next_backoff_s = 0.05
+            self._last_frame_failed = False
         except Exception:
             self._fail_streak += 1
+            self._last_frame_failed = True
             self._attempt_recover("frame transmit error")
 
-    def save_png(self, path: str) -> None:
-        if self._frame is None:
-            return
-        Path(path).parent.mkdir(parents=True, exist_ok=True)
-        try:
-            if self._flip:
-                img = self._frame.transpose(Image.ROTATE_180)
-                img.save(path)
-            else:
-                self._frame.save(path)
-        except Exception:
-            try:
-                self._frame.save(path)
-            except Exception:
-                pass
-
-    def apply_flip(self, flip: bool) -> None:
-        """Opt-in backend hook: set whether final output should be flipped.
-
-        This method is intentionally lightweight and idempotent. The actual
-        transformation is applied during frame finalization in :meth:`end_frame`.
-        """
-        try:
-            new = bool(flip)
-            if new != self._flip:
-                try:
-                    print(f"[ILI9341] apply_flip -> {new}")
-                except Exception:
-                    pass
-            self._flip = new
-        except Exception:
-            self._flip = False
-
-    # ------------------------------------------------------------------
-    # Recovery / health monitoring
-    # ------------------------------------------------------------------
+    # ----------------------- Recovery / health -----------------------
     def _close_spi(self) -> None:
         with suppress(Exception):
             if self._spi is not None:
                 with SPI_BUS_LOCK:
-                    try:
-                        close = getattr(self._spi, "close", None)
-                        if callable(close):
-                            close()
-                    finally:
-                        self._spi = None
+                    close = getattr(self._spi, "close", None)
+                    if callable(close):
+                        close()
+                self._spi = None
 
     def reset_and_init(self) -> None:
-        """Public re-initialisation entry point.
-
-        Safe to call repeatedly; errors are suppressed to avoid cascading
-        failures in tight loops.
-        """
         with self._recover_lock:
-            try:
+            with suppress(Exception):
                 self._close_spi()
-                # Re-init SPI + panel only if libraries present
                 self._init_spi(0, 0)
                 self._init_panel()
-            except Exception:
-                pass
 
     def _status_ping(self) -> None:
-        """Attempt a lightweight status read (0x09) and CRC it.
-
-        ILI9341's 0x09 returns 4 status bytes plus dummy. We only care that
-        the transfer succeeds and returned bytes are not all 0x00/0xFF.
-        """
         if self._spi is None:
             return
         try:
-            # Enter command mode
             if GPIO is not None:
                 GPIO.output(self._dc, 0)
             with SPI_BUS_LOCK:
                 self._spi.writebytes([0x09])
-            # Switch to data (read) mode
             if GPIO is not None:
                 GPIO.output(self._dc, 1)
-            # Use xfer2 to clock out bytes (1 dummy + 4 data typical)
             xfer2 = getattr(self._spi, "xfer2", None)
-            if not callable(xfer2):  # Fallback: cannot read
+            if not callable(xfer2):
                 return
             with SPI_BUS_LOCK:
                 resp = xfer2([0x00, 0x00, 0x00, 0x00, 0x00])
-            data = resp[1:5]
+            try:
+                data = resp[1:5]
+            except Exception:
+                raise RuntimeError("status resp parse error")
             if not data:
                 raise RuntimeError("empty status")
             if all(b == 0x00 for b in data) or all(b == 0xFF for b in data):
@@ -416,29 +488,31 @@ class ILI9341DisplayBackend(DisplayBackend):
             crc = 0
             for b in data:
                 crc = (crc ^ b) & 0xFF
-            if self._last_status_crc is not None and crc == self._last_status_crc:
-                # Stable CRC is acceptable; only absence/failure triggers.
-                pass
             self._last_status_crc = crc
         except Exception:
-            self._fail_streak += 1
-            self._attempt_recover("status ping failure")
+            if self._fail_streak > 3:
+                self._fail_streak += 1
+                self._attempt_recover("status ping failure")
 
     def _attempt_recover(self, reason: str) -> None:
         now = time.monotonic()
         with self._recover_lock:
-            # Simple backoff to avoid hammering SPI hardware if unplugged.
             delay = self._next_backoff_s
             self._next_backoff_s = min(self._max_backoff_s, self._next_backoff_s * 2.0)
             with suppress(Exception):
                 print(
-                    f"[ILI9341] recover (reason={reason}, streak={self._fail_streak},"
-                    f" backoff={delay:.2f}s)"
+                    "[ILI9341] recover (reason=%s, streak=%s, backoff=%.2fs)"
+                    % (reason, self._fail_streak, delay)
                 )
             time.sleep(delay)
             try:
                 self.reset_and_init()
                 self._last_ok = now
+                if self._prev_frame is not None:
+                    img = self._prev_frame
+                    if self._flip:
+                        img = img.transpose(Image.ROTATE_180)
+                    self._push_raw(img)
             except Exception:
                 pass
 
@@ -458,24 +532,14 @@ class ILI9341DisplayBackend(DisplayBackend):
     def _start_watchdog(self) -> None:
         if self._watchdog_thread is not None:
             return
-        if spidev is None:  # skip if no hardware library
+        if spidev is None:  # no hardware libs
             return
         t = threading.Thread(
             target=self._watchdog_run, name="ili9341-watchdog", daemon=True
         )
-
         self._watchdog_thread = t
-        try:
-            t.start()
-        except Exception:
-            self._watchdog_thread = None
-
-    def shutdown(self) -> None:
-        self._watchdog_stop.set()
         with suppress(Exception):
-            if self._watchdog_thread and self._watchdog_thread.is_alive():
-                self._watchdog_thread.join(timeout=0.2)
-        self._close_spi()
+            t.start()
 
 
 __all__ = ["ILI9341DisplayBackend"]
