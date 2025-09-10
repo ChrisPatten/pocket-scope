@@ -883,54 +883,43 @@ async def test_timed_processing():
 ### Live Viewer (Desktop / Web / Embedded TFT)
 Unified viewer supports a desktop window (Pygame), SPI TFT (`--tft`), or Web UI (`--web-ui`).
 
-Module: `src/pocketscope/examples/live_view.py`
+Module: `src/pocketscope/app/live_view.py`
 
 Usage (desktop window):
 
 ```bash
 # Basic: connect to local dump1090 and show a 60 NM PPI centered at 42.0,-71.0
-python -m pocketscope.examples.live_view \
+python -m pocketscope \
     --url http://127.0.0.1:8080/data/aircraft.json \
     --center 42.0,-71.0 \
     --range 60
 
 # Show minimal one-line labels instead of full data blocks
-python -m pocketscope.examples.live_view --simple
+python -m pocketscope --simple
 
 # Tweak data block typography (font size and line gap)
-python -m pocketscope.examples.live_view --font-px 12 --block-line-gap-px -5
+python -m pocketscope --font-px 12 --block-line-gap-px -5
 
 # Enable airports overlay using a bundled sample list (auto-detected if present)
-python -m pocketscope.examples.live_view --airports sample_data/airports.json
+python -m pocketscope --airports sample_data/airports.json
 
 # Enable sector polygon overlays (auto-detected if present)
-python -m pocketscope.examples.live_view --sectors sample_data/artcc.json
+python -m pocketscope --sectors sample_data/artcc.json
 
 # Local JSONL playback (overrides --url) and loops
-python -m pocketscope.examples.live_view --playback tests/data/adsb_trace_airports.jsonl
+python -m pocketscope --playback tests/data/adsb_trace_airports.jsonl
 
 # Run with persistent settings + soft keys + settings screen
-python -m pocketscope.examples.live_view --url http://127.0.0.1:8080/data/aircraft.json --range 20 --center 42.0,-71.0
-        # Interact via soft keys (click/tap or touch) or press 's' for Settings. Settings stored in ~/.pocketscope/settings.json
+python -m pocketscope --url http://127.0.0.1:8080/data/aircraft.json --range 20 --center 42.0,-71.0
+    # Interact via soft keys (click/tap) or press 's' for Settings. Settings stored in ~/.pocketscope/settings.json
 
-# Serve minimal web UI (opens WebSocket server)
-python -m pocketscope.examples.live_view --web-ui --url http://127.0.0.1:8080/data/aircraft.json
-
-# Embedded SPI TFT (ILI9341) + touch (XPT2046)
-python -m pocketscope.examples.live_view --tft --url http://127.0.0.1:8080/data/aircraft.json --range 20 --center 42.0,-71.0 --touch-hz 180
-
-# Local playback looping on TFT
-python -m pocketscope.examples.live_view --tft --playback tests/data/adsb_trace_airports.jsonl --range 20
-
-New flags:
-    --tft        Use SPI TFT (ILI9341) + touch backend
-    --touch-hz   Touch poll frequency (default 180.0)
-    --web-ui     Serve Web UI instead of opening a Pygame window
+# Headless mode (CI/tests): starts a lightweight runner without creating a GUI
+python -m pocketscope --headless --playback sample_data/demo_adsb.jsonl
 ```
 
 Notes:
-- Requires a GUI-capable environment; if the window doesn't appear, check `SDL_VIDEODRIVER` and system display settings.
-- Rendering remains deterministic in headless tests; the viewer explicitly requests a visible window.
+- Requires a GUI-capable environment for normal operation; if the window doesn't appear, check `SDL_VIDEODRIVER` and system display settings.
+- For automated tests and CI, prefer `--headless` with a playback file to avoid requiring a display.
 
 ### Airports Overlay
 

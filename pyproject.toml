@@ -44,7 +44,7 @@ pi = [
 ]
 
 [project.scripts]
-pocketscope = "pocketscope.__main__:main"
+pocketscope = "pocketscope.cli:main"
 
 [tool.black]
 line-length = 88
