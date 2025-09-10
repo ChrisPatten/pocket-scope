@@ -147,6 +147,11 @@ async def main_async(args: argparse.Namespace) -> None:
     src: _Source
     if args.playback:
         src = FilePlaybackSource(args.playback, ts=ts, bus=bus, speed=1.0, loop=True)
+    elif getattr(args, "local_json", None):
+        # Local JSON file polled as data source (refresh every second)
+        from pocketscope.ingest.adsb import LocalJsonFileSource
+
+        src = LocalJsonFileSource(args.local_json, bus=bus, poll_hz=1.0)
     else:
         src = Dump1090JsonSource(
             args.url, bus=bus, poll_hz=1.0, main_loop=asyncio.get_running_loop()
@@ -481,6 +486,13 @@ def parse_args() -> argparse.Namespace:
             "Path to sectors file (simple JSON or GeoJSON FeatureCollection);"
             " defaults to sample_data/artcc.json if present"
         ),
+    )
+    p.add_argument(
+        "--local-json",
+        dest="local_json",
+        type=str,
+        default=None,
+        help=("Path to a local dump1090-style JSON file to poll every second"),
     )
     p.add_argument(
         "--web-ui",

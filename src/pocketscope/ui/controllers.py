@@ -717,6 +717,18 @@ class UiController:
                     _config.update_from_settings(self._settings)
                 except Exception:
                     pass
+                # Apply backlight setting to display backend when present
+                try:
+                    bl = getattr(self._settings, "backlight_pct", None)
+                    if bl is not None:
+                        fn = getattr(self._display, "set_backlight_pct", None)
+                        if callable(fn):
+                            try:
+                                fn(float(bl))
+                            except Exception:
+                                pass
+                except Exception:
+                    pass
                 # Apply typography changes to active view
                 try:
                     if hasattr(self._view, "label_font_px"):

@@ -198,6 +198,10 @@ class ILI9341DisplayBackend(DisplayBackend):
         self._flip = False
         self._fonts = _FontCache()
 
+        # Backlight PWM state (initialized in _init_gpio)
+        self._pwm = None
+        self._backlight_pct = 100.0
+
         # Blink mitigation state
         self._prev_frame: Image.Image | None = None
         self._last_brightness = 0.0
@@ -225,6 +229,15 @@ class ILI9341DisplayBackend(DisplayBackend):
         self._init_panel()
         self._start_watchdog()
 
+        # Apply persisted/default backlight percentage at startup so the
+        # hardware (when present) begins at the requested brightness.
+        try:
+            self.set_backlight_pct(self._backlight_pct)
+        except Exception:
+            pass
+
+    # (backlight state variables are instance attributes set in __init__)
+
     # --------------------- Hardware / low-level ---------------------
     def _init_gpio(self) -> None:
         if GPIO is None:  # pragma: no cover
@@ -234,7 +247,23 @@ class ILI9341DisplayBackend(DisplayBackend):
         GPIO.setmode(GPIO.BCM)
         for p in (self._dc, self._rst, self._led):
             GPIO.setup(p, GPIO.OUT)
-        GPIO.output(self._led, 1)
+        # Default to full on; if led pin supports PWM we will set up PWM
+        # and drive duty cycle instead of a static high/low.
+        try:
+            # Use PWM on the LED pin at 1kHz when possible
+            self._pwm = None
+            GPIO.output(self._led, 1)
+            # Only attempt PWM on pins that typically support hardware PWM
+            # (GPIO18 on Raspberry Pi is commonly used). Create PWM but
+            # don't start until a valid percentage is applied.
+            try:
+                self._pwm = GPIO.PWM(self._led, 1000)
+                # Do not start here; start when set_backlight_pct called
+            except Exception:
+                # Fall back to static on
+                self._pwm = None
+        except Exception:
+            pass
 
     def _init_spi(self, bus: int, dev: int) -> None:
         if spidev is None:  # pragma: no cover
@@ -358,6 +387,39 @@ class ILI9341DisplayBackend(DisplayBackend):
         except Exception:
             self._flip = False
 
+    def set_backlight_pct(self, pct: float) -> None:
+        """Set backlight brightness as percentage (0-100).
+
+        When GPIO PWM is available this starts/updates the PWM duty cycle.
+        Otherwise this falls back to toggling the LED pin on/off.
+        """
+        try:
+            pct_f = float(pct)
+        except Exception:
+            return
+        pct_f = max(0.0, min(100.0, pct_f))
+        self._backlight_pct = pct_f
+        if GPIO is None:  # pragma: no cover
+            return
+        try:
+            if self._pwm is not None:
+                # Start PWM if not already started
+                try:
+                    # PWM.start takes duty cycle (0-100)
+                    self._pwm.start(pct_f)
+                except Exception:
+                    try:
+                        self._pwm.ChangeDutyCycle(pct_f)
+                    except Exception:
+                        pass
+            else:
+                # No PWM support: treat >50% as on, else off but allow
+                # intermediate values by simple duty approximation using
+                # a blocking blink (not desirable) — instead map >0->on
+                GPIO.output(self._led, 1 if pct_f > 0.0 else 0)
+        except Exception:
+            pass
+
     def save_png(self, path: str) -> None:  # override
         if self._frame is None:
             return
@@ -376,6 +438,14 @@ class ILI9341DisplayBackend(DisplayBackend):
         with suppress(Exception):
             if self._watchdog_thread and self._watchdog_thread.is_alive():
                 self._watchdog_thread.join(timeout=0.2)
+        # Stop PWM if active
+        with suppress(Exception):
+            if self._pwm is not None:
+                try:
+                    self._pwm.stop()
+                except Exception:
+                    pass
+                self._pwm = None
         self._close_spi()
 
     # ------------------ Brightness / skip heuristics ------------------

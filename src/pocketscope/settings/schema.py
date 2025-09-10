@@ -57,6 +57,10 @@ class Settings(BaseModel):
     # display hardware that requires the framebuffer orientation to be
     # inverted. This value is persisted to settings.json as ``flip_display``.
     flip_display: bool = Field(default=False)
+    # Display backlight brightness percentage (0-100). Persisted to
+    # settings.json as ``backlight_pct`` and applied to hardware when
+    # supported.
+    backlight_pct: float = Field(default=100.0)
     # Typography controls for PPI data-blocks (editable + persisted)
     label_font_px: int = Field(
         default=int(PPI_CONFIG.get("typography", {}).get("label_font_px", 12))
@@ -139,6 +143,17 @@ class Settings(BaseModel):
             raise ValueError("altitude bounds must be numeric or null") from None
         if v < 0:
             raise ValueError("altitude bounds must be >= 0 ft")
+        return v
+
+    @field_validator("backlight_pct")
+    @classmethod
+    def _chk_backlight_pct(cls, v: float) -> float:  # pragma: no cover - trivial
+        try:
+            v = float(v)
+        except Exception:
+            raise ValueError("backlight_pct must be numeric (0-100)") from None
+        if v < 0 or v > 100:
+            raise ValueError("backlight_pct must be between 0 and 100")
         return v
 
     @model_validator(mode="after")
