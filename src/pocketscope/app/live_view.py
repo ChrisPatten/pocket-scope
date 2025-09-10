@@ -128,11 +128,9 @@ async def main_async(args: argparse.Namespace) -> None:
     if args.airports:
         airports_path = args.airports
     else:
-        # Try workspace sample_data/airports.json automatically
-        try_default1 = (
-            Path(__file__).resolve().parents[3] / "sample_data" / "airports.json"
-        )
-        try_default2 = Path.cwd() / "sample_data" / "airports.json"
+        # Try package assets/airports.json automatically (src/pocketscope/assets)
+        try_default1 = Path(__file__).resolve().parents[1] / "assets" / "airports.json"
+        try_default2 = Path.cwd() / "src" / "pocketscope" / "assets" / "airports.json"
         if try_default1.exists():
             airports_path = str(try_default1)
         elif try_default2.exists():
@@ -150,10 +148,9 @@ async def main_async(args: argparse.Namespace) -> None:
     if args.sectors:
         sectors_path = args.sectors
     else:
-        try_default1 = (
-            Path(__file__).resolve().parents[3] / "sample_data" / "artcc.json"
-        )
-        try_default2 = Path.cwd() / "sample_data" / "artcc.json"
+        # Try package assets/us_states.json automatically (src/pocketscope/assets)
+        try_default1 = Path(__file__).resolve().parents[1] / "assets" / "us_states.json"
+        try_default2 = Path.cwd() / "src" / "pocketscope" / "assets" / "us_states.json"
         if try_default1.exists():
             sectors_path = str(try_default1)
         elif try_default2.exists():
@@ -302,7 +299,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default=None,
         help=(
             "Path to sectors file (simple JSON or GeoJSON FeatureCollection);"
-            " defaults to sample_data/artcc.json if present"
+            " defaults to sample_data/us_states.json if present"
         ),
     )
     p.add_argument(
