@@ -20,16 +20,40 @@ logger = logging.getLogger(__name__)
 
 
 class ConfigWatcher:
-    """Watches the settings file and publishes ``cfg.changed`` events."""
+    """Watches the settings file and publishes ``cfg.changed`` events.
 
-    def __init__(self, bus: EventBus, *, poll_interval_s: float = 0.3) -> None:
+    Backwards compatibility: older callers may pass ``poll_hz``. Prefer
+    ``poll_interval_s`` (seconds). If ``poll_hz`` is provided it will be
+    converted to an interval (1.0 / poll_hz).
+    """
+
+    def __init__(
+        self,
+        bus: EventBus,
+        *,
+        poll_interval_s: float = 0.3,
+        poll_hz: float | None = None,
+    ) -> None:
         self._bus = bus
         self._config_path = SettingsStore.settings_path()
         self._last_mtime: float | None = None
         self._last_config: dict[str, Any] = {}
         self._run_task: asyncio.Task[None] | None = None
         self._poll_task: asyncio.Task[None] | None = None
-        self._poll_interval_s = float(poll_interval_s)
+
+        # Support legacy callers that pass poll_hz (frequency in Hz).
+        if poll_hz is not None:
+            try:
+                hz = float(poll_hz)
+                # Guard against zero or negative hz values
+                if hz <= 0:
+                    raise ValueError("poll_hz must be > 0")
+                self._poll_interval_s = 1.0 / hz
+            except Exception:
+                # Fall back to provided poll_interval_s on any conversion error
+                self._poll_interval_s = float(poll_interval_s)
+        else:
+            self._poll_interval_s = float(poll_interval_s)
 
     async def run(self) -> None:
         if self._run_task:

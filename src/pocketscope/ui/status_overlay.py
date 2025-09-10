@@ -227,22 +227,25 @@ class StatusOverlay:
             lines.append([demo_line])  # third single-cell line
 
         # --- Determine per-line cell counts & widths ------------------
-        # For auto-width we take max of total rendered widths among lines
-        # treating each line's width as sum(cell_width) where cell_width is
-        # the max(measured text width + 2*pad_x) for its cell distribution.
-        # Simpler: choose width = max number of cells * widest cell.
+        # Compute an automatic panel width based on measured text widths so
+        # short info blocks produce narrower translucent backgrounds. For
+        # each line we sum measured cell widths (text + 2*pad_x) and pick
+        # the maximum across lines. Callers can still override with
+        # self.width_px.
         measure = self._measure_fn
-        widest_cell = 1
-        max_cells = 1
+        line_widths: list[int] = []
         for cells in lines:
-            max_cells = max(max_cells, len(cells))
+            total_w = 0
             for text in cells:
                 try:
                     tw, _ = measure(text, self.font_px)
                 except Exception:
                     tw = int(self.font_px * 0.6) * len(text)
-                widest_cell = max(widest_cell, tw + 2 * self.pad_x)
-        width = self.width_px or (max_cells * widest_cell)
+                total_w += tw + 2 * self.pad_x
+            # Ensure at least a tiny width to avoid zero / negative cases
+            line_widths.append(max(1, int(total_w)))
+        computed_width = max(line_widths) if line_widths else 1
+        width = self.width_px or computed_width
         line_height = self.font_px + 2 * self.pad_y
         # Include top/bottom padding in total panel height so the overlay
         # visually separates from content above/below and scales with font.
