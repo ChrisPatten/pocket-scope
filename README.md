@@ -6,7 +6,7 @@
 <!-- Uncomment once published to PyPI: -->
 <!-- [![PyPI](https://img.shields.io/pypi/v/pocketscope)](https://pypi.org/project/pocketscope/) -->
 
-**Current Version:** 0.1.1
+**Current Version:** 0.1.2
 
 
 PocketScope is a handheld Pi-powered ATC-style scope for decoding and displaying ADS-B traffic. Built with Python, it features a modular, event-driven architecture designed for real-time sensor data processing, deterministic testing, and rapid prototyping.
@@ -17,8 +17,8 @@ PocketScope is a handheld Pi-powered ATC-style scope for decoding and displaying
 - **Event-Driven System**: Async EventBus with bounded queues and backpressure handling
 - **Time Abstraction**: Deterministic testing support with SimTimeSource and RealTimeSource
 - **Modular Design**: Clean separation between ingestion, processing, and visualization
-- **Rendering/UI**: Framework-agnostic Canvas API, Pygame display/input backends, ATC-style data blocks, sector polygon overlays, and deterministic golden-frame tests
-- **Persistent UI Settings**: Debounced JSON settings (units, default range, track length preset, demo mode, altitude filter, north-up lock) with soft key bar + settings screen
+- **Rendering/UI**: Canvas API + multiple backends (Pygame, SPI TFT ILI9341, Web) with ATC-style data blocks, sector + airports overlays, deterministic golden-frame tests
+- **Persistent UI Settings**: Debounced JSON settings (units, default range, track length preset, demo mode, altitude filter incl. custom bounds, north-up lock) with soft key bar + settings screen
 
 ### Data Sources
 - **ADS-B**: File-based playback with deterministic timing and live polling of dump1090 `aircraft.json`
@@ -30,9 +30,49 @@ PocketScope is a handheld Pi-powered ATC-style scope for decoding and displaying
 
 ### Infrastructure
 - **Record/Replay System**: JSONL-based event recording and deterministic replay
-- **Platform Abstraction**: Display, input, and I/O abstraction layers
+- **Platform Abstraction**: Display, input, and I/O abstraction layers (now includes SPI TFT + touch & WebSocket/web page backends)
 - **Layered Rendering**: Composable visualization pipeline built on a minimal Canvas API
-- **Comprehensive Testing**: Full test suite with async event testing
+- **Comprehensive Testing**: Full test suite (core, UI, rendering, platform drivers)
+
+### Navigation & Geodesy
+- **WGS‑84 Helpers**: Great‑circle distance (NM), initial bearing, destination point
+- **Frames**: Geodetic⇄ECEF conversion and ECEF→ENU local tangent plane
+- **Mapping**: ENU→screen north‑up mapping and range/bearing convenience APIs
+
+# PocketScope
+
+<!-- Badges -->
+[![Version](https://img.shields.io/github/v/tag/ChrisPatten/pocket-scope?label=version)](https://github.com/ChrisPatten/pocket-scope/tags)
+[![Release](https://img.shields.io/github/v/release/ChrisPatten/pocket-scope)](https://github.com/ChrisPatten/pocket-scope/releases)
+<!-- Uncomment once published to PyPI: -->
+<!-- [![PyPI](https://img.shields.io/pypi/v/pocketscope)](https://pypi.org/project/pocketscope/) -->
+
+**Current Version:** 0.1.1 *(pi-display branch adds embedded SPI TFT + touch + web UI backends)*
+
+PocketScope is a handheld Pi-powered ATC-style scope for decoding and displaying ADS-B traffic. Built with Python, it features a modular, event-driven architecture designed for real-time sensor data processing, deterministic testing, and rapid prototyping.
+
+## Features
+
+### Core Architecture
+- **Event-Driven System**: Async EventBus with bounded queues and backpressure handling
+- **Time Abstraction**: Deterministic testing support with SimTimeSource and RealTimeSource
+- **Modular Design**: Clean separation between ingestion, processing, and visualization
+- **Rendering/UI**: Canvas API + multiple backends (Pygame, SPI TFT ILI9341, Web) with ATC-style data blocks, sector + airports overlays, deterministic golden-frame tests
+- **Persistent UI Settings**: Debounced JSON settings (units, default range, track length preset, demo mode, altitude filter incl. custom bounds, north-up lock) with soft key bar + settings screen
+
+### Data Sources
+- **ADS-B**: File-based playback with deterministic timing and live polling of dump1090 `aircraft.json`
+- **Aircraft Tracking**: Real-time track maintenance with ring-buffer trails, state aggregation, and expiry management
+- **GPS**: Position and navigation data (NMEA serial)
+- **IMU**: Inertial measurement unit integration (9-axis sensors)
+- **Airports**: Static airport reference data from JSON files with identifier, lat/lon positioning
+- **Sector Data**: ARTCC sector polygon overlays (JSON/GeoJSON format)
+
+### Infrastructure
+- **Record/Replay System**: JSONL-based event recording and deterministic replay
+- **Platform Abstraction**: Display, input, and I/O abstraction layers (now includes SPI TFT + touch & WebSocket/web page backends)
+- **Layered Rendering**: Composable visualization pipeline built on a minimal Canvas API
+- **Comprehensive Testing**: Full test suite (core, UI, rendering, platform drivers)
 
 ### Navigation & Geodesy
 - **WGS‑84 Helpers**: Great‑circle distance (NM), initial bearing, destination point
@@ -435,8 +475,15 @@ async def test_track_behavior():
 
 #### Canvas/Display/Input Abstractions
 - `Canvas` and `DisplayBackend` protocols provide a minimal, framework-agnostic rendering contract in `src/pocketscope/render/canvas.py`.
-- Pygame-based backends implement this contract and support both on-screen and fully headless operation via SDL's dummy video driver.
-- Airports overlay: lightweight markers + ident labels rendered via a dedicated layer (`render/airports_layer.py`) with range culling and on-screen clamping.
+- Backends:
+    - **Pygame** (desktop + headless via `SDL_VIDEODRIVER=dummy`)
+    - **ILI9341 SPI TFT** (`platform/display/ili9341_backend.py`): RGB565 conversion, chunked SPI writes (2KB), brightness + draw-op heuristics to skip flicker/blank frames, watchdog + exponential backoff recovery (disable with `enable_watchdog=False`), optional 180° flip, replays last good frame after recovery.
+    - **WebDisplayBackend** (minimal browser view via WebSocket) – optional CLI `--web-ui`.
+  - Input:
+    - Pygame mouse → tap events.
+    - **XPT2046 Touch** (`platform/input/xpt2046_touch.py`): median-of-3 sampling, linear calibration, high-frequency polling (`--touch-hz`, default 180 Hz), synthesized down / drag / tap forwarded into UI (softkeys + settings screen).
+  - Airports & sector overlays: range-aware culling, screen clamping, sample data auto-detect.
+  - Label layout: collision set now seeded with aircraft glyph footprint to prevent labels covering aircraft markers.
 
 #### Persistent Settings & Soft Keys
 
@@ -447,20 +494,20 @@ User-facing configuration is now persisted across runs:
 - `ConfigWatcher` publishes `cfg.changed` when the file mtime changes allowing hot reload (e.g. manual edit in an editor) without restarting.
 - Soft key bar (`ui/softkeys.py`) renders large tap/click targets (Zoom-/+, Units, Tracks, Demo, Settings) with auto font scaling.
 - Settings screen overlay (`ui/settings_screen.py`) toggled by Settings soft key or `s` key; edits are staged and flushed explicitly via Save (Back dismisses without forcing immediate write).
-- Persisted fields: units; default range step (2/5/10/20/40/80 NM); track length preset (short=15s, medium=45s, long=120s); demo mode; altitude filter band (All, 0–5k, 5–10k, 10–20k, >20k); north-up lock.
+- Persisted fields: units; default range step (2/5/10/20/40/80 NM); track length preset (short=15s, medium=45s, long=120s); demo mode; altitude filter band (All, 0–5k, 5–10k, 10–20k, >20k) **plus custom altitude bounds**; north-up lock.
 - Altitude filter excludes aircraft outside selected band (and hides unknown altitude when a band is active).
 - North-up lock enforces rotation 0°; unlock enables arrow-key rotation.
 - Demo mode loops a bundled JSONL trace (`sample_data/demo_adsb.jsonl`), temporarily re-centers on first record and displays a DEMO badge.
 
 Extensive tests in `tests/ui/` assert persistence, hot reload, filter correctness, rotation lock behavior, settings screen mouse interactions, and trail length trimming.
 
-#### Pygame Backends
-- Display backend: `src/pocketscope/platform/display/pygame_backend.py`
-    - Offscreen Surface with per-pixel alpha
-    - Headless-friendly (`SDL_VIDEODRIVER=dummy`)
-    - PNG snapshot export for tests (`save_png`)
-- Input backend: `src/pocketscope/platform/input/pygame_input.py`
-    - Maps mouse interactions to tap-style input events
+#### Display & Input Backends
+- **Pygame** display: `platform/display/pygame_backend.py` (windowed + headless; PNG snapshots for tests)
+- **ILI9341 SPI TFT**: `platform/display/ili9341_backend.py` (RGB565 encode, chunked writes, blink mitigation, watchdog/status ping recovery — pass `enable_watchdog=False` to disable, last-frame resend, optional flip)
+- **Web**: `platform/display/web_backend.py` (optional minimal browser rendering)
+- Input:
+    - Pygame mouse mapping (`platform/input/pygame_input.py`)
+    - XPT2046 touch (`platform/input/xpt2046_touch.py`) high-rate polling & synthesized events
 
 #### North-up PPI View
 - `src/pocketscope/render/view_ppi.py` implements a north-up Plan Position Indicator with:
@@ -489,9 +536,10 @@ The PPI view supports rich ATC-style data blocks backed by `render/labels.py`:
 Defaults:
 - The live viewer shows full data blocks by default; pass `--simple` to enable minimal labels.
 - Leader lines and collision-aware placement are enabled automatically.
- - Airports overlay can be enabled in the live viewer via `--airports PATH`; if omitted, a `sample_data/airports.json` file is auto-detected when present.
+- Airports overlay can be enabled in the live viewer via `--airports PATH`; if omitted, a `sample_data/airports.json` file is auto-detected when present.
     - ENU mapping from geodetic sources
- - Soft key bar + settings screen available in live viewer for quick range, units, track length, demo toggle, altitude filter, and north-up lock adjustments.
+- Range-based culling at current PPI range
+- Soft key bar + settings screen available in live viewer for quick range, units, track length, demo toggle, altitude filter, and north-up lock adjustments.
 
 #### Rendering Tests
 - A lightweight, headless input smoke test validates the pygame backend event flow.
@@ -503,8 +551,7 @@ Defaults:
 ```
 src/pocketscope/
 ├── __main__.py             # CLI entry point
-├── config/                 # Configuration files
-│   └── default.toml        # Default configuration
+├── config.py               # Runtime config module (merges persisted + CLI overrides)
 ├── core/                   # Core event and time systems
 │   ├── events.py           # EventBus implementation
 │   ├── geo.py              # WGS‑84 geodesy helpers (distance, bearings, ECEF/ENU)
@@ -520,9 +567,12 @@ src/pocketscope/
 │   └── imu/                # Inertial measurement data
 ├── platform/               # Hardware abstraction
 │   ├── display/            # Display drivers
-│   │   └── pygame_backend.py   # Pygame display backend (headless-friendly)
+│   │   ├── pygame_backend.py   # Pygame display backend (headless-friendly)
+│   │   ├── ili9341_backend.py  # ILI9341 SPI TFT driver (pi-display)
+│   │   └── spi_lock.py         # SPI locking helper for safe concurrent access
 │   ├── input/              # Input handling
-│   │   └── pygame_input.py     # Pygame input backend (mouse→tap)
+│   │   ├── pygame_input.py     # Pygame input backend (mouse→tap)
+│   │   └── xpt2046_touch.py    # XPT2046 touch driver (pi-display)
 │   └── io/                 # I/O interfaces
 ├── render/                 # Visualization pipeline
 │   ├── canvas.py           # Canvas/DisplayBackend protocols and drawing primitives
@@ -534,7 +584,8 @@ src/pocketscope/
 │   ├── airports.py         # Airports loader + nearest-neighbor selection
 │   └── sectors.py          # ARTCC sector polygons loader (JSON/GeoJSON)
 ├── tools/                  # Development and debugging tools
-│   └── record_replay.py    # Event recording/replay
+│   ├── record_replay.py    # Event recording/replay
+│   └── test_dump1090_fetch.py # Fetch test helper for dump1090/http
 ├── examples/               # Small runnable examples
 │   └── live_view.py        # Minimal on-screen PPI viewer for live ADS-B
 ├── tests/                  # Comprehensive test suite
@@ -543,17 +594,20 @@ src/pocketscope/
 │   │   └── adsb_trace_ppi.jsonl # Golden PPI test trace (auto-created if absent)
 │   ├── ingest/             # Live ingestion tests
 │   │   └── test_dump1090_json_source.py
-│   ├── data/               # Shared fixtures for top-level tests
-│   │   └── aircraft_sample.json
+│   ├── platform/           # Platform/hardware tests (ILI9341, touch, integration)
+│   │   ├── test_ili9341_backend.py
+│   │   ├── test_ili9341_chunking.py
+│   │   ├── test_integration_smoke.py
+│   │   └── test_xpt2046_touch.py
 │   ├── render/             # Rendering tests
 │   │   └── test_golden_ppi.py   # Pygame backend input smoke test
-│   ├── integration/        # Integration tests
-│   ├── tools/              # Tool tests
+│   ├── ui/                 # UI tests (settings, softkeys, altitude filter)
 │   └── unit/               # Unit tests
 └── ui/                     # User interface components
     ├── controllers.py      # UI controllers (keyboard/mouse, frame loop)
     ├── status_overlay.py   # On-screen status HUD (FPS, range, tracks, bus, UTC)
-    └── softkeys.py         # Soft key handling
+    ├── softkeys.py         # Soft key handling
+    └── settings/           # Persistent settings schema & values
 ```
 
 ## Development Setup
@@ -568,8 +622,8 @@ Core runtime dependencies:
 - **pydantic>=2.0**: Data validation and serialization
 - **numpy>=1.24**: Numerical operations and geometry
 - **msgpack>=1.0**: Efficient binary serialization
- - **aiohttp>=3.9**: HTTP client for live dump1090 polling
- - **pygame-ce>=2.5.5** on Python ≥3.13, else **pygame>=2.3.0**: Display/input backend (module import remains `pygame`)
+- **aiohttp>=3.9**: HTTP client for live dump1090 polling
+- **pygame-ce>=2.5.5** on Python ≥3.13, else **pygame>=2.3.0**: Display/input backend (module import remains `pygame`)
   
 Optional data overlay:
 - Airports overlay uses a plain JSON file of airports (identifier, lat, lon); see `sample_data/airports.json` for a ready-to-use subset around MA/NH/RI/CT.
@@ -626,7 +680,7 @@ The project includes comprehensive development tooling configured in `pyproject.
 Additional tools:
 - **pytest-asyncio**: Enhanced async test support
 - **pre-commit**: Git hook management
- - Optional graphics: `pygame`/`pygame-ce` is used by rendering tests and the Pygame backend
+- Optional graphics: `pygame`/`pygame-ce` is used by rendering tests and the Pygame backend
 
 ### Running Tests
 
@@ -655,7 +709,15 @@ pytest src/pocketscope/tests/core/        # Core system tests
 pytest src/pocketscope/tests/render/      # Rendering (golden frame) tests
 ```
 
-New tests for the dump1090 JSON source live ingestion are under `tests/ingest/`:
+New platform and hardware tests are included under `tests/platform/` for the ILI9341 backend and XPT2046 touch driver; see:
+
+```bash
+pytest tests/platform/test_ili9341_backend.py
+pytest tests/platform/test_ili9341_chunking.py
+pytest tests/platform/test_xpt2046_touch.py
+```
+
+New tests for the dump1090 JSON source live ingestion remain under `tests/ingest/`:
 
 ```bash
 # Run the dump1090 JSON source tests
@@ -671,7 +733,6 @@ pytest tests/ingest/test_dump1090_json_source.py -q
 - **Rendering/Golden Frame Tests** (`tests/render/`, `tests/golden_frames/`): Deterministic visual regression tests (headless)
     - Airports overlay golden: `tests/render/test_airports_golden.py`
     - Golden render smoke updated to ensure soft key / settings overlay do not regress drawing
-- **Test Data** (`tests/data/`): Sample data files for testing
  - **UI / Settings Tests** (`tests/ui/`): Soft keys, settings persistence, altitude filter, north-up lock, settings screen mouse, track length trimming.
 
 ### Code Quality
@@ -696,7 +757,7 @@ pre-commit run --all-files
 PocketScope uses TOML configuration files for settings:
 
 - **`pyproject.toml`**: Main project configuration, dependencies, and tool settings
-- **`src/pocketscope/config/default.toml`**: Runtime application configuration
+- **`src/pocketscope/config.py`**: Runtime application configuration and merging of persisted settings + CLI overrides
 - **`.pre-commit-config.yaml`**: Git hook configuration for code quality
 
 Key configuration sections:
@@ -819,12 +880,12 @@ async def test_timed_processing():
     assert received_times == [1.0, 2.5]
 ```
 
-### Live Desktop Viewer (PPI)
-Minimal on-screen viewer that wires the live dump1090 JSON source into the PPI renderer.
+### Live Viewer (Desktop / Web / Embedded TFT)
+Unified viewer supports a desktop window (Pygame), SPI TFT (`--tft`), or Web UI (`--web-ui`).
 
 Module: `src/pocketscope/app/live_view.py`
 
-Usage:
+Usage (desktop window):
 
 ```bash
 # Basic: connect to local dump1090 and show a 60 NM PPI centered at 42.0,-71.0
@@ -901,12 +962,12 @@ Notes:
 |-------|-------------|-------------|
 | Units | Cycle nm/ft/kt → mi/ft/mph → km/m/kmh | Debounced save |
 | Range Default | Default zoom ladder step (2–80 NM) | Debounced save |
-| Track Length | Trail retention preset (15s / 45s / 120s; pinned = next tier) | Debounced save (immediate retrim) |
+| Track Length | Trail retention preset (15s / 45s / 120s; pinned = next tier) | Debounced save |
 | Altitude Filter | Visibility band (All, 0–5k, 5–10k, 10–20k, >20k) | Debounced save |
 | Demo Mode | Loop JSONL trace + DEMO badge + temporary recenter | Debounced save |
 | North-up Lock | Enforce rotation 0°; unlock enables arrow rotation | Debounced save |
 
-Save soft key immediately flushes; Back dismisses without forcing immediate write.
+Custom altitude filter bounds (user-defined min/max) are supported and tested (`tests/ui/test_altitude_filter_custom_bounds.py`).
 
 ## File Formats
 
@@ -996,7 +1057,7 @@ MIT License - see LICENSE file for details.
 - ✅ ADS-B file playback with deterministic timing
 - ✅ Live ADS-B source polling dump1090 `aircraft.json` with backoff and conditional requests
 - ✅ WGS‑84 geodesy helpers with deterministic unit and property tests
-- ✅ Rendering/UI foundation: Canvas API, Pygame display/input backends
+- ✅ Rendering/UI foundation: Canvas API, Pygame + SPI TFT + Web display/input backends
 - ✅ PPI view with rings, ownship, trails, and labels
 - ✅ ATC-style data blocks with leader lines and collision avoidance
 - ✅ Airports overlay with range-based culling and auto-detection
@@ -1011,17 +1072,19 @@ MIT License - see LICENSE file for details.
 - ✅ Deterministic golden-frame rendering test (headless, pinned SHA-256)
 - ✅ Comprehensive test suite
 - ✅ Development tooling and quality checks
-- ✅ Minimal live desktop viewer to visualize real traffic
+- ✅ Live viewer (desktop/web/embedded) to visualize real traffic
+- ✅ Embedded hardware drivers (ILI9341 display + XPT2046 touch) with tests
+- ✅ Label layout prevents overlap with aircraft glyphs
+- ✅ Runtime config module (`config.py`) merges persisted settings + CLI overrides
 
 **Next Steps**:
 - Additional live ADS-B formats (SBS, Beast)
 - GPS/IMU integration
-- Display rendering pipeline
-- Hardware platform drivers
-- User interface components
+- Further web UI expansion (controls, overlays)
+- Enhanced theme customization & night mode
 
 ## Notes on Environment and Determinism
 
-- For Python 3.13+, install `pygame-ce` (imported as `pygame`); for older versions, install `pygame`.
+- For Python 3.13+, install `pygame-ce` (imported as `pygame`); for older versions, install `pygame`. SPI TFT + touch drivers are optional and safely no-op on systems without `spidev`/`RPi.GPIO`.
 - Headless tests use `SDL_VIDEODRIVER=dummy` set before importing the Pygame backend.
 - Type checking: MyPy is in strict mode; missing `pygame.*` stubs are ignored via a project override to keep CI green.

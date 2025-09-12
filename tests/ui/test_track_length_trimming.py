@@ -55,13 +55,13 @@ async def test_track_length_cycle_retrim(tmp_path, monkeypatch):
     await pub_points(100)
     tr = tracks.get("abc123")
     assert tr is not None
-    # Default mode medium -> 45s window (approx 45 points due to 1Hz)
+    # Default length ~45s window (approx 45 points due to 1Hz)
     medium_len = len(tr.history)
     assert 30 <= medium_len <= 50
 
-    # Cycle to long (120s) -> more points retained as new ones added
-    ui.cycle_track_length(persist=False)  # medium -> long
-    assert ui.track_length_mode == "long"
+    # Cycle to 120s -> more points retained as new ones added
+    ui.cycle_track_length(persist=False)
+    assert int(ui.track_length_s) == 120
     await pub_points(30, start_lat=50.0)  # extend another 30s
     tr = tracks.get("abc123")
     assert tr is not None
@@ -69,9 +69,9 @@ async def test_track_length_cycle_retrim(tmp_path, monkeypatch):
     assert long_len >= medium_len  # should not shrink
     assert long_len <= 130  # sanity upper bound
 
-    # Cycle twice: long -> short -> medium
-    ui.cycle_track_length(persist=False)  # long -> short
-    assert ui.track_length_mode == "short"
+    # Cycle twice: 120 -> 15 -> 45
+    ui.cycle_track_length(persist=False)  # 120 -> 15
+    assert int(ui.track_length_s) == 15
     tr = tracks.get("abc123")
     assert tr is not None
     # After immediate retrim expect about 15 points

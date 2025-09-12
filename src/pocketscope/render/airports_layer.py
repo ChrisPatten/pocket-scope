@@ -1,12 +1,12 @@
 """Airports overlay layer for the PPI view.
 
-Draws small square markers and monospaced ident labels for a list of airports.
-Coordinates are converted from WGS-84 (lat/lon) to ENU relative to the PPI
-center, then mapped to screen pixels.
+Draws compact diamond markers (rotated squares) and monospaced ident labels
+for a list of airports. Coordinates are converted from WGS-84 (lat/lon) to ENU
+relative to the PPI center, then mapped to screen pixels.
 
 Rules
 -----
-- Marker: 5x5 px square centered at (x, y), color dim gray.
+- Marker: 5 px diameter diamond (cardinal points) centered at (x, y), dim gray.
 - Label: airport ident rendered to the NE of marker with offset (+6, -8).
 - Cull: Airports beyond the current range_nm are not drawn.
 - On-screen: Labels are clamped to remain fully visible within the canvas.
@@ -14,6 +14,7 @@ Rules
 
 from __future__ import annotations
 
+import os
 from typing import Sequence
 
 from pocketscope.core.geo import (
@@ -23,6 +24,8 @@ from pocketscope.core.geo import (
     haversine_nm,
 )
 from pocketscope.data.airports import Airport
+from pocketscope.data.runways_store import get_runways_for_airport
+from pocketscope.render.airport_icon import AirportIconRenderer
 from pocketscope.render.canvas import Canvas, Color
 from pocketscope.settings.values import THEME
 
@@ -47,8 +50,10 @@ LabelColor: Color = _coerce_color(_AL_THEME.get("label"), (255, 255, 255, 255))
 
 
 class AirportsLayer:
-    """
-    Draws airport markers (small squares) and labels (ident) on the Canvas.
+    """Render airport markers (small diamonds) and labels (ident).
+
+    A diamond improves legibility vs a filled square at small sizes by reducing
+    perceived visual weight while remaining distinct from circular track dots.
     Color: dim gray markers, white text, monospaced font.
     """
 
@@ -161,6 +166,8 @@ class AirportsLayer:
         screen_size: tuple[int, int],
         rotation_deg: float = 0.0,
         range_ring_exclusions: list[tuple[int, int, int, int]] | None = None,
+        runway_sqlite: str | None = None,
+        runway_icons: bool = False,
     ) -> None:
         """Render airport markers and labels.
 
@@ -201,16 +208,17 @@ class AirportsLayer:
                 x, y = enu_to_screen(er, nr, m_per_px)
             return int(round(cx + x)), int(round(cy + y))
 
-        # Simple fixed-size square via polyline (pygame backend supports this well)
-        def draw_square(center: tuple[int, int], size: int = 5) -> None:
+        # Diamond marker (rotated square) using 4 cardinal points.
+        # Using polyline keeps backend requirements identical to previous square.
+        def draw_diamond(center: tuple[int, int], size: int = 5) -> None:
             x, y = center
-            half = size // 2
+            r = size // 2  # radius from center to a point
             pts = [
-                (x - half, y - half),
-                (x + half, y - half),
-                (x + half, y + half),
-                (x - half, y + half),
-                (x - half, y - half),
+                (x, y - r),  # top
+                (x + r, y),  # right
+                (x, y + r),  # bottom
+                (x - r, y),  # left
+                (x, y - r),  # close
             ]
             canvas.polyline(pts, width=1, color=MarkerColor)
 
@@ -227,7 +235,23 @@ class AirportsLayer:
                 continue
 
             sx, sy = to_screen(ap.lat, ap.lon)
-            draw_square((sx, sy), size=5)
+            # Prefer runway icon rendering when a sqlite cache file exists.
+            # Do NOT attempt to connect/create sqlite unless the file is present
+            # to avoid accidental DB creation. Fall back to diamond otherwise.
+            if runway_sqlite and os.path.exists(os.path.expanduser(runway_sqlite)):
+                try:
+                    rw = get_runways_for_airport(runway_sqlite, ap.ident)
+                    renderer = AirportIconRenderer(canvas)
+                    # estimate pixels_per_meter from m_per_px
+                    radius_px = max(10, min(W, H) // 2 - 6)
+                    meters_per_nm = 1852.0
+                    m_per_px = (range_nm * meters_per_nm) / float(radius_px)
+                    ppm = 1.0 / m_per_px
+                    renderer.draw((sx, sy), rw, ppm)
+                except Exception:
+                    draw_diamond((sx, sy), size=5)
+            else:
+                draw_diamond((sx, sy), size=5)
 
             # Find best position for label avoiding exclusions and prior labels
             text = ap.ident

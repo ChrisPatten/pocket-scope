@@ -15,12 +15,13 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable, Optional, Sequence, cast
 
+from pocketscope import config as _config
 from pocketscope.core.events import EventBus, Subscription, unpack
 from pocketscope.core.geo import ecef_to_enu, geodetic_to_ecef
 from pocketscope.core.time import TimeSource
 from pocketscope.core.tracks import TrackService
 from pocketscope.ingest.adsb.playback_source import FilePlaybackSource
-from pocketscope.platform.display.pygame_backend import PygameDisplayBackend
+from pocketscope.render.canvas import DisplayBackend
 from pocketscope.render.view_ppi import PpiView, TrackSnapshot
 from pocketscope.settings.schema import Settings
 from pocketscope.settings.store import SettingsStore
@@ -29,8 +30,7 @@ from pocketscope.settings.values import (
     ALTITUDE_FILTER_CYCLE_ORDER,
     RANGE_LADDER_NM,
     SETTINGS_SCREEN_CONFIG,
-    TRACK_LENGTH_CYCLE_ORDER,
-    TRACK_LENGTH_MODES,
+    TRACK_LENGTH_PRESETS_S,
     TRACK_SERVICE_DEFAULTS,
     UNITS_ORDER,
     ZOOM_LIMITS,
@@ -54,7 +54,6 @@ except Exception:  # pragma: no cover
 @dataclass(slots=True)
 class UiConfig:
     range_nm: float = 10.0
-    # min/max zoom sourced from configuration (still mutable at runtime)
     min_range_nm: float = float(ZOOM_LIMITS.get("min_range_nm", 2.0))
     max_range_nm: float = float(ZOOM_LIMITS.get("max_range_nm", 80.0))
     target_fps: float = 30.0
@@ -62,31 +61,12 @@ class UiConfig:
 
 
 class UiController:
-    """
-    Owns the frame-tick loop and user input to control range.
-    Renders PPI + overlay every frame.
-
-    run() timing
-    ------------
-    - Targets cfg.target_fps by awaiting ts.sleep(max(0, 1/fps - frame_time)).
-    - Each frame builds a TrackService snapshot and calls View.draw, then
-      draws the overlay when enabled.
-
-    Range updates propagate by writing view.range_nm each frame.
-
-    Key bindings (pygame)
-    ---------------------
-    - '[' or '-'  : zoom out
-    - ']' or '='  : zoom in
-    - 'o'         : toggle overlay
-    - 'q' or ESC  : quit (graceful stop)
-    - Mouse wheel up/down: zoom in/out
-    """
+    """Owns frame loop, input handling, and composite rendering for PPI UI."""
 
     def __init__(
         self,
         *,
-        display: PygameDisplayBackend,
+        display: DisplayBackend,
         view: PpiView,
         bus: EventBus,
         ts: TimeSource,
@@ -97,6 +77,8 @@ class UiController:
         airports: Optional[list[tuple[float, float, str]]] = None,
         sectors: Optional[object] = None,
         font_px: int = 12,
+        runways_sqlite: str | None = None,
+        runway_icons: bool = False,
     ) -> None:
         # Core references
         self._display = display
@@ -126,21 +108,72 @@ class UiController:
         self._running: bool = False
         self._task: asyncio.Task[None] | None = None
 
+        # Persistent settings load & field mirrors
+        # Load persisted settings early so overlay can pick up padding/font
+        # values from the store instead of falling back to defaults.
+        self._settings: Settings = SettingsStore.load()
         # Overlay (diagnostics / status)
         try:  # width may raise if backend not fully initialized in tests
             disp_w, _disp_h = self._display.size()
         except Exception:
             disp_w = 300  # pragmatic fallback for headless environments
-        self._overlay = StatusOverlay(font_px=font_px, width_px=disp_w)
-
-        # Persistent settings load & field mirrors
-        self._settings: Settings = SettingsStore.load()
+        # Use persisted status font size when available
+        try:
+            status_px = int(getattr(self._settings, "status_font_px", font_px))
+        except Exception:
+            status_px = font_px
+        # Optional explicit top/bottom pads
+        try:
+            st = getattr(self._settings, "status_pad_top_px", None)
+            sb = getattr(self._settings, "status_pad_bottom_px", None)
+            if st is not None:
+                st = int(st)
+            if sb is not None:
+                sb = int(sb)
+        except Exception:
+            st = None
+            sb = None
+        self._overlay = StatusOverlay(
+            font_px=status_px, pad_top=st, pad_bottom=sb, width_px=disp_w
+        )
         self._cfg.range_nm = float(self._settings.range_nm)
-        self.units: str = self._settings.units
-        self.track_length_mode: str = self._settings.track_length_mode
-        self.demo_mode: bool = self._settings.demo_mode
-        self.altitude_filter: str = getattr(self._settings, "altitude_filter", "All")
-        self.north_up_lock: bool = getattr(self._settings, "north_up_lock", True)
+        self.units = self._settings.units
+        self.track_length_s = float(getattr(self._settings, "track_length_s", 45.0))
+        # Track expiry window (seconds) persisted; fallback to service defaults
+        try:
+            self.track_expiry_s = float(
+                getattr(
+                    self._settings,
+                    "track_expiry_s",
+                    float(TRACK_SERVICE_DEFAULTS.get("expiry_s", 300.0)),
+                )
+            )
+        except Exception:
+            self.track_expiry_s = float(TRACK_SERVICE_DEFAULTS.get("expiry_s", 300.0))
+        self.demo_mode = self._settings.demo_mode
+        self.altitude_filter = getattr(self._settings, "altitude_filter", "All")
+        self.north_up_lock = getattr(self._settings, "north_up_lock", True)
+        # Sector label visibility (persisted)
+        self.sector_labels = bool(getattr(self._settings, "sector_labels", True))
+        # Apply persisted trail length immediately so TrackService windows
+        # reflect a user-provided custom value on startup (previously only
+        # applied when cycling or after a cfg.changed hot‑reload event).
+        try:
+            self._apply_track_windows()
+        except Exception:
+            pass
+
+        # Whether the final framebuffer should be flipped/rotated for the
+        # display hardware. Mirrors persisted setting but does not force a
+        # disk write; persistence is controlled by the settings screen Save.
+        self._flip_display = bool(getattr(self._settings, "flip_display", False))
+
+        # Apply persisted flip state to backend immediately if supported.
+        try:
+            self.apply_display_flip(self._flip_display)
+        except Exception:
+            # Best-effort; do not break initialization if backend missing hook
+            pass
 
         # Settings screen overlay (multiplier from configuration)
         settings_font_px = int(
@@ -150,6 +183,18 @@ class UiController:
             self._settings, font_px=settings_font_px, pad_px=6
         )
         self._apply_track_windows()
+        # Apply persisted typography settings to active view if available
+        try:
+            if hasattr(self._view, "label_font_px"):
+                self._view.label_font_px = int(self._settings.label_font_px)
+            if hasattr(self._view, "label_line_gap_px"):
+                self._view.label_line_gap_px = int(self._settings.label_line_gap_px)
+            if hasattr(self._view, "label_block_pad_px"):
+                self._view.label_block_pad_px = int(self._settings.label_block_pad_px)
+            if hasattr(self._view, "show_sector_labels"):
+                self._view.show_sector_labels = bool(self.sector_labels)
+        except Exception:
+            pass
 
         # Softkeys (late-bound via set_softkeys)
         self._softkeys: SoftKeyBar | None = None
@@ -182,6 +227,24 @@ class UiController:
         )
         self._sectors = sectors  # typed only when TYPE_CHECKING
 
+        # Internal prefetch state to avoid scheduling IO every frame.
+        # Key is a tuple: (range_nm_rounded, rotation_deg_rounded, idents)
+        self._last_runway_prefetch_key: Optional[
+            tuple[float, float, tuple[str, ...]]
+        ] = None
+
+        # Runway DB path and flags for icon rendering and prefetching
+        self._runways_sqlite = runways_sqlite
+        self._runway_icons = bool(runway_icons)
+        self._runway_prefetcher = None
+        try:
+            if self._runways_sqlite and self._runway_icons:
+                from pocketscope.data.runways_store import RunwayPrefetcher
+
+                self._runway_prefetcher = RunwayPrefetcher(self._runways_sqlite)
+        except Exception:
+            self._runway_prefetcher = None
+
         # FPS tracking (EMA) + orientation
         self._prev_frame_t: Optional[float] = None
         self._fps_avg: float = float(cfg.target_fps)
@@ -191,6 +254,27 @@ class UiController:
             self._rotation_deg = 0.0
 
     def set_softkeys(self, bar: SoftKeyBar) -> None:
+        # Apply persisted softkey typography/padding when available
+        try:
+            bar._requested_font_px = int(
+                getattr(self._settings, "softkeys_font_px", bar._requested_font_px)
+            )
+        except Exception:
+            pass
+        try:
+            bar.pad_x = int(getattr(self._settings, "softkeys_pad_x", bar.pad_x))
+        except Exception:
+            pass
+        try:
+            bar.pad_y = int(getattr(self._settings, "softkeys_pad_y", bar.pad_y))
+        except Exception:
+            pass
+        # Allow runtime settings to control height: clear any explicit height
+        # so layout will derive bar height from requested font + pad_y.
+        try:
+            bar.bar_height = None
+        except Exception:
+            pass
         self._softkeys = bar
 
         # Ensure Settings button is wired
@@ -228,6 +312,36 @@ class UiController:
                     if self.north_up_lock:
                         self._rotation_deg = 0.0  # enforce lock each frame
                     self._view.rotation_deg = float(self._rotation_deg) % 360.0
+                # Draw PPI view with occlusion rectangles
+                # Prefetch runways for visible airports when PPI state changes
+                try:
+                    if self._runway_prefetcher and self._airports:
+                        from pocketscope.core.geo import haversine_nm
+
+                        idents_to_prefetch: list[str] = []
+                        for lat, lon, ident in self._airports:
+                            if (
+                                haversine_nm(
+                                    self._center_lat, self._center_lon, lat, lon
+                                )
+                                <= self._cfg.range_nm
+                            ):
+                                idents_to_prefetch.append(str(ident).upper())
+
+                        # Create a compact prefetch key and keep each component on
+                        # its own line to satisfy line-length limits.
+                        range_key = round(float(self._cfg.range_nm), 3)
+                        rot_key = round(float(self._rotation_deg), 2)
+                        idents_key = tuple(sorted(idents_to_prefetch))
+                        key = (range_key, rot_key, idents_key)
+                        if key != self._last_runway_prefetch_key:
+                            if idents_to_prefetch:
+                                self._runway_prefetcher.prefetch(idents_to_prefetch)
+                            self._last_runway_prefetch_key = key
+                except Exception:
+                    # Do not allow prefetch failures to break the render loop
+                    pass
+
                 self._view.draw(
                     canvas,
                     size_px=self._display.size(),
@@ -236,6 +350,9 @@ class UiController:
                     tracks=snaps,
                     airports=self._airports,
                     sectors=cast("Optional[Sequence[Sector]]", self._sectors),
+                    occlusions=self._compute_occlusions(),
+                    runway_sqlite=self._runways_sqlite,
+                    runway_icons=self._runway_icons,
                 )
 
                 # Diagnostics overlay
@@ -267,6 +384,10 @@ class UiController:
                 if self._softkeys:
                     self._softkeys.draw(canvas)
 
+                # No per-frame flip call here — flips are applied when the
+                # setting changes or at controller initialization to avoid
+                # repeatedly invoking backend hooks every frame.
+
                 self._display.end_frame()
 
                 # Frame pacing
@@ -281,6 +402,40 @@ class UiController:
             pass
         finally:
             self._running = False
+
+    # ------------------------------------------------------------------
+    def _compute_occlusions(self) -> list[tuple[int, int, int, int]]:
+        """Return rectangles obscuring the PPI for label visibility filtering.
+
+        Rectangles are (x, y, w, h) in display coordinates. Covers:
+        - Status overlay (top band) when enabled
+        - SoftKeyBar (bottom band) when present
+        """
+        occ: list[tuple[int, int, int, int]] = []
+        try:
+            w, _h = self._display.size()
+        except Exception:
+            return occ
+        # Status overlay band
+        try:
+            if self._cfg.overlay:
+                so = self._overlay
+                lines = 2 + (1 if self.demo_mode else 0)
+                line_h = so.font_px + 2 * so.pad_y
+                panel_h = so.pad_top + so.pad_bottom + line_h * lines
+                occ.append((0, 0, w, panel_h))
+        except Exception:
+            pass
+        # Softkeys band
+        try:
+            if self._softkeys and getattr(self._softkeys, "_rects", None):
+                r0 = self._softkeys._rects[0]
+                y0 = r0[1]
+                h_bar = r0[3]
+                occ.append((0, y0, w, h_bar))
+        except Exception:
+            pass
+        return occ
 
     async def stop(self) -> None:
         self._running = False
@@ -319,10 +474,34 @@ class UiController:
             SettingsStore.save_debounced(self._settings)
 
     def cycle_track_length(self, *, persist: bool = True) -> None:
-        order = list(TRACK_LENGTH_CYCLE_ORDER)
-        i = order.index(self.track_length_mode)
-        self.track_length_mode = order[(i + 1) % len(order)]
-        self._settings.track_length_mode = self.track_length_mode
+        presets = list(TRACK_LENGTH_PRESETS_S)
+        cur = float(getattr(self, "track_length_s", presets[0]))
+        if cur in presets:
+            idx = presets.index(cur)
+            cur = presets[(idx + 1) % len(presets)]
+        else:
+            # Custom value -> reset to first preset
+            cur = presets[0]
+        self.track_length_s = float(cur)
+        self._settings.track_length_s = float(cur)
+        self._apply_track_windows()
+        if persist:
+            SettingsStore.save_debounced(self._settings)
+
+    def cycle_track_expiry(self, *, persist: bool = True) -> None:
+        # Small sensible preset ladder; mirror settings_screen constant
+        presets = [120.0, 180.0, 300.0, 600.0, 900.0]
+        cur = float(getattr(self, "track_expiry_s", presets[2]))
+        if cur in presets:
+            idx = presets.index(cur)
+            cur = presets[(idx + 1) % len(presets)]
+        else:
+            cur = presets[0]
+        self.track_expiry_s = float(cur)
+        try:
+            self._settings.track_expiry_s = float(cur)
+        except Exception:
+            pass
         self._apply_track_windows()
         if persist:
             SettingsStore.save_debounced(self._settings)
@@ -331,7 +510,18 @@ class UiController:
         self.demo_mode = not self.demo_mode
         self._settings.demo_mode = self.demo_mode
         if persist:
-            SettingsStore.save_debounced(self._settings)
+            # Save immediately to avoid race where the file watcher may read
+            # an older file version and publish a stale config that resets
+            # the in-memory demo flag. Debounce is used elsewhere, but demo
+            # toggles are explicit user actions that should persist promptly.
+            try:
+                SettingsStore.save(self._settings)
+            except Exception:
+                # Fall back to debounced save if direct save fails
+                try:
+                    SettingsStore.save_debounced(self._settings)
+                except Exception:
+                    pass
         try:
             if self.demo_mode:
                 self._start_demo_mode()
@@ -355,23 +545,38 @@ class UiController:
             SettingsStore.save_debounced(self._settings)
 
     def _apply_track_windows(self) -> None:
-        mapping = TRACK_LENGTH_MODES
-        # Default trail length for active tracks
-        default = mapping.get(self.track_length_mode, list(mapping.values())[0])
-        # Pinned length chooses the next longer mode or clamps to longest
+        presets = list(TRACK_LENGTH_PRESETS_S)
+        val = float(getattr(self, "track_length_s", presets[0]))
+        self._tracks._trail_len_default_s = val
+        # Pinned length: next larger preset if exists else max(val, largest preset)
+        pinned = val
         try:
-            order = list(TRACK_LENGTH_CYCLE_ORDER)
-            idx = order.index(self.track_length_mode)
-            next_idx = min(idx + 1, len(order) - 1)
-            pinned_mode = order[next_idx]
-            pinned = mapping.get(pinned_mode, default)
-        except Exception:  # pragma: no cover - defensive fallback
-            pinned = default
-        self._tracks._trail_len_default_s = default
-        self._tracks._trail_len_pinned_s = pinned
+            if val in presets:
+                idx = presets.index(val)
+                if idx < len(presets) - 1:
+                    pinned = presets[idx + 1]
+                else:
+                    pinned = max(val, presets[-1])
+            else:
+                pinned = max(val, presets[-1])
+        except Exception:
+            pinned = max(val, presets[-1]) if presets else val
+        self._tracks._trail_len_pinned_s = float(pinned)
         # Re-trim existing active tracks immediately so UI reflects change
         try:
             self._tracks.retrim_all()
+        except Exception:
+            pass
+        # Apply expiry window live
+        try:
+            if hasattr(self._tracks, "_expiry_s"):
+                self._tracks._expiry_s = float(
+                    getattr(
+                        self,
+                        "track_expiry_s",
+                        float(TRACK_SERVICE_DEFAULTS.get("expiry_s", 300.0)),
+                    )
+                )
         except Exception:
             pass
 
@@ -522,13 +727,105 @@ class UiController:
                 self._settings = new
                 self._cfg.range_nm = float(new.range_nm)
                 self.units = new.units
-                self.track_length_mode = new.track_length_mode
+                self.track_length_s = float(
+                    getattr(new, "track_length_s", self.track_length_s)
+                )
+                # Track expiry window (seconds)
+                try:
+                    self.track_expiry_s = float(
+                        getattr(
+                            new,
+                            "track_expiry_s",
+                            getattr(
+                                self,
+                                "track_expiry_s",
+                                float(TRACK_SERVICE_DEFAULTS.get("expiry_s", 300.0)),
+                            ),
+                        )
+                    )
+                except Exception:
+                    pass
                 self.demo_mode = new.demo_mode
                 self.altitude_filter = getattr(new, "altitude_filter", "All")
                 self.north_up_lock = getattr(new, "north_up_lock", True)
+                # Mirror flip_display runtime state and notify backend
+                try:
+                    self._flip_display = bool(getattr(new, "flip_display", False))
+                    fn = getattr(self._display, "apply_flip", None)
+                    if callable(fn):
+                        fn(self._flip_display)
+                except Exception:
+                    pass
                 self._apply_track_windows()
                 # Refresh visible settings screen with external changes
                 self._settings_screen.refresh_from_controller(self._settings)
+                # Update central runtime config and notify listeners so
+                # renderers and other components can react to external
+                # settings changes dynamically. Notifications are deferred
+                # to the event loop inside the config module to avoid
+                # synchronous timing hazards.
+                try:
+                    _config.update_from_settings(self._settings)
+                except Exception:
+                    pass
+                # Apply backlight setting to display backend when present
+                try:
+                    bl = getattr(self._settings, "backlight_pct", None)
+                    if bl is not None:
+                        fn = getattr(self._display, "set_backlight_pct", None)
+                        if callable(fn):
+                            try:
+                                fn(float(bl))
+                            except Exception:
+                                pass
+                except Exception:
+                    pass
+                # Apply typography changes to active view
+                try:
+                    if hasattr(self._view, "label_font_px"):
+                        self._view.label_font_px = int(self._settings.label_font_px)
+                    if hasattr(self._view, "label_line_gap_px"):
+                        self._view.label_line_gap_px = int(
+                            self._settings.label_line_gap_px
+                        )
+                    if hasattr(self._view, "label_block_pad_px"):
+                        self._view.label_block_pad_px = int(
+                            self._settings.label_block_pad_px
+                        )
+                    # Apply status overlay font size as well
+                    try:
+                        self._overlay.font_px = int(self._settings.status_font_px)
+                    except Exception:
+                        pass
+                    # Apply softkey typography/padding
+                    try:
+                        if self._softkeys:
+                            # Set requested font so layout uses it
+                            self._softkeys._requested_font_px = int(
+                                self._settings.softkeys_font_px
+                            )
+                            self._softkeys.pad_x = int(self._settings.softkeys_pad_x)
+                            self._softkeys.pad_y = int(self._settings.softkeys_pad_y)
+                            # Allow automatic height computation based on font/pad
+                            try:
+                                self._softkeys.bar_height = None
+                            except Exception:
+                                pass
+                            self._softkeys.layout()
+                    except Exception:
+                        pass
+                    # Apply explicit top/bottom padding when present
+                    try:
+                        spt = getattr(self._settings, "status_pad_top_px", None)
+                        spb = getattr(self._settings, "status_pad_bottom_px", None)
+                        if spt is not None:
+                            self._overlay.pad_top = int(spt)
+                        if spb is not None:
+                            self._overlay.pad_bottom = int(spb)
+                    except Exception:
+                        pass
+                except Exception:
+                    pass
                 # Respond to external demo_mode changes
                 try:
                     if self.demo_mode and self._demo_task is None:
@@ -543,7 +840,16 @@ class UiController:
     def _build_snapshots(self) -> list[TrackSnapshot]:
         tracks = self._tracks.list_active()
         band = self.altitude_filter
-        lo, hi = ALTITUDE_FILTER_BANDS.get(band, (None, None))
+        # Allow explicit min/max altitude override when present in settings
+        try:
+            custom_lo = getattr(self._settings, "altitude_min_ft", None)
+            custom_hi = getattr(self._settings, "altitude_max_ft", None)
+        except Exception:
+            custom_lo = custom_hi = None
+        if custom_lo is not None or custom_hi is not None:
+            lo, hi = custom_lo, custom_hi
+        else:
+            lo, hi = ALTITUDE_FILTER_BANDS.get(band, (None, None))
         out: list[TrackSnapshot] = []
         # Precompute center ECEF once per frame (avoid repetition inside loop)
         _ox, _oy, _oz = geodetic_to_ecef(self._center_lat, self._center_lon, 0.0)
@@ -567,7 +873,7 @@ class UiController:
                         alt_for_filter = float(last[3])
                 except Exception:
                     pass
-            if band != "All":
+            if (custom_lo is not None or custom_hi is not None) or band != "All":
                 if alt_for_filter is None:
                     # Exclude tracks lacking altitude when filtering active
                     continue
@@ -580,15 +886,70 @@ class UiController:
             v = tr.state.get("track_deg")
             if isinstance(v, (int, float)):
                 course = float(v)
-            # Trail (last ~60 samples) converted to ENU
-            pts = tr.history[-60:]
+            # Dynamic trail window & thinning ---------------------------------
+            # We render up to *track_length_s* seconds of trail, selecting
+            # points by timestamp (not just count) so custom long lengths
+            # (e.g. 600s) display correctly. When the resulting window has
+            # more than MAX_POINTS we thin the *older* portion while keeping
+            # a dense recent tail for visual fidelity of current motion.
+            try:
+                window_s = float(getattr(self, "track_length_s", 60.0))
+            except Exception:
+                window_s = 60.0
+            # Compute cutoff timestamp
+            try:
+                end_ts = last[0].timestamp()
+            except Exception:
+                # Fallback: skip dynamic behaviour if timestamp missing
+                end_ts = None
+            hist = tr.history
+            if end_ts is not None:
+                cutoff = end_ts - window_s
+                # Find first index >= cutoff (linear scan; history lengths are modest)
+                start_idx = 0
+                for i, pt in enumerate(hist):
+                    try:
+                        if pt[0].timestamp() >= cutoff:
+                            start_idx = i
+                            break
+                    except Exception:
+                        continue
+                window_pts = hist[start_idx:]
+            else:
+                window_pts = hist[-int(window_s) :]
+
+            MAX_POINTS = 600  # hard cap for rendering performance
+            RECENT_DENSE = 300  # keep this many newest points unthinned when thinning
+            pts_sel = window_pts
+            if len(pts_sel) > MAX_POINTS:
+                # Keep last RECENT_DENSE verbatim; thin older portion uniformly.
+                dense = pts_sel[-RECENT_DENSE:]
+                older = pts_sel[:-RECENT_DENSE]
+                if older:
+                    target_old = MAX_POINTS - RECENT_DENSE
+                    if target_old < 1:
+                        target_old = 1
+                    step = max(1, int(len(older) / target_old))
+                    thinned_old = older[::step]
+                    # Ensure we don't exceed MAX_POINTS (trim oldest if necessary)
+                    combined = thinned_old + dense
+                    if len(combined) > MAX_POINTS:
+                        combined = combined[-MAX_POINTS:]
+                    pts_sel = combined
+                else:
+                    pts_sel = dense  # degenerate case
+
+            # Convert selected points to ENU
             trail_enu: list[tuple[float, float]] = []
-            for _, la, lon_pt, _alt in pts:
-                tx, ty, tz = geodetic_to_ecef(float(la), float(lon_pt), 0.0)
-                e, n, _ = ecef_to_enu(
-                    tx, ty, tz, self._center_lat, self._center_lon, 0.0
-                )
-                trail_enu.append((e, n))
+            for _, la, lon_pt, _alt in pts_sel:
+                try:
+                    tx, ty, tz = geodetic_to_ecef(float(la), float(lon_pt), 0.0)
+                    e, n, _ = ecef_to_enu(
+                        tx, ty, tz, self._center_lat, self._center_lon, 0.0
+                    )
+                    trail_enu.append((e, n))
+                except Exception:
+                    continue
             # Optional kinematics
             geo_alt = tr.state.get("geo_alt")
             baro_alt = tr.state.get("baro_alt")
@@ -602,16 +963,16 @@ class UiController:
                     callsign=tr.callsign,
                     course_deg=course,
                     trail_enu=trail_enu if len(trail_enu) >= 2 else None,
-                    geo_alt_ft=float(geo_alt)
-                    if isinstance(geo_alt, (int, float))
-                    else None,
-                    baro_alt_ft=float(baro_alt)
-                    if isinstance(baro_alt, (int, float))
-                    else None,
+                    geo_alt_ft=(
+                        float(geo_alt) if isinstance(geo_alt, (int, float)) else None
+                    ),
+                    baro_alt_ft=(
+                        float(baro_alt) if isinstance(baro_alt, (int, float)) else None
+                    ),
                     ground_speed_kt=float(gs) if isinstance(gs, (int, float)) else None,
-                    vertical_rate_fpm=float(vr)
-                    if isinstance(vr, (int, float))
-                    else None,
+                    vertical_rate_fpm=(
+                        float(vr) if isinstance(vr, (int, float)) else None
+                    ),
                 )
             )
         return out
@@ -628,6 +989,35 @@ class UiController:
         self._fps_avg = (1.0 - alpha) * self._fps_avg + alpha * fps_inst
         self._prev_frame_t = t1
         return (fps_inst, self._fps_avg)
+
+    def apply_display_flip(self, flip: bool) -> None:
+        """Set runtime flip flag and notify backend if it supports the hook.
+
+        This method provides a single callable used by the settings screen so
+        toggles can be applied immediately and consistently.
+        """
+        try:
+            new = bool(flip)
+        except Exception:
+            new = False
+        try:
+            if new != getattr(self, "_flip_display", None):
+                try:
+                    print(f"[UiController] apply_display_flip -> {new}")
+                except Exception:
+                    pass
+            self._flip_display = new
+        except Exception:
+            self._flip_display = False
+        try:
+            fn = getattr(self._display, "apply_flip", None)
+            if callable(fn):
+                try:
+                    fn(self._flip_display)
+                except Exception:
+                    pass
+        except Exception:
+            pass
 
     def _bus_summary(self) -> str:
         m = self._bus.metrics()

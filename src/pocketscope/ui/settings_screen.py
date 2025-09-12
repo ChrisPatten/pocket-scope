@@ -43,9 +43,27 @@ from pocketscope.settings.values import (
     RANGE_LADDER_NM,
     SETTINGS_SCREEN_CONFIG,
     THEME,
-    TRACK_LENGTH_CYCLE_ORDER,
-    TRACK_LENGTH_MODES,
+    TRACK_LENGTH_PRESETS_S,
+    TRACK_SERVICE_DEFAULTS,
     UNITS_ORDER,
+)
+
+# Explicit choices for typography controls (kept small and sensible for Pi)
+LABEL_FONT_SIZES = (8, 10, 12, 14, 16, 18, 20, 24, 28, 32, 36, 40, 48)
+# Line gap choices in pixels (relative offset between data-block lines)
+LABEL_LINE_GAP_VALUES = tuple(range(-6, 7))  # -6..6
+# Status overlay font sizes (small set)
+STATUS_FONT_SIZES = (8, 10, 12, 14, 16)
+# Status pad choices (in pixels). Include None option to use automatic scaling.
+STATUS_PAD_CHOICES = (None, 0, 2, 4, 6, 8)
+
+# Track expiry preset ladder (seconds). Keep small & sensible.
+TRACK_EXPIRY_PRESETS_S = (
+    120,
+    180,
+    300,
+    600,
+    900,
 )
 
 # Resolve themed colors with sensible fallbacks
@@ -107,7 +125,11 @@ class SettingsScreen:
                 "cycle",
                 tuple(str(int(r)) for r in RANGE_LADDER_NM),
             ),
-            MenuItem("Track Length", "cycle", tuple(TRACK_LENGTH_CYCLE_ORDER)),
+            MenuItem(
+                "Track Length",
+                "cycle",
+                tuple(str(int(x)) for x in TRACK_LENGTH_PRESETS_S),
+            ),
             MenuItem(
                 "Altitude Filter",
                 "cycle",
@@ -115,6 +137,55 @@ class SettingsScreen:
             ),
             MenuItem("Demo Mode", "toggle"),
             MenuItem("North-up Lock", "toggle"),
+            MenuItem("Flip Display", "toggle"),
+            MenuItem("Sector Labels", "toggle"),
+            # Typography controls (appended so legacy menu indices remain stable)
+            MenuItem(
+                "Label Font", "cycle", tuple(str(int(x)) for x in LABEL_FONT_SIZES)
+            ),
+            MenuItem(
+                "Label Line Gap",
+                "cycle",
+                tuple(str(int(x)) for x in LABEL_LINE_GAP_VALUES),
+            ),
+            MenuItem(
+                "Status Font",
+                "cycle",
+                tuple(str(int(x)) for x in STATUS_FONT_SIZES),
+            ),
+            MenuItem(
+                "Status Pad Top",
+                "cycle",
+                tuple(str(x) if x is not None else "auto" for x in STATUS_PAD_CHOICES),
+            ),
+            MenuItem(
+                "Status Pad Bottom",
+                "cycle",
+                tuple(str(x) if x is not None else "auto" for x in STATUS_PAD_CHOICES),
+            ),
+            # Softkeys controls
+            MenuItem(
+                "Softkeys Font",
+                "cycle",
+                tuple(str(int(x)) for x in STATUS_FONT_SIZES),
+            ),
+            MenuItem(
+                "Softkeys Pad X",
+                "cycle",
+                tuple(str(int(x)) for x in (0, 2, 4, 6, 8)),
+            ),
+            MenuItem(
+                "Softkeys Pad Y",
+                "cycle",
+                tuple(str(int(x)) for x in (0, 2, 4, 6, 8)),
+            ),
+            # Appended new runtime setting after legacy indices to avoid shifting
+            # existing test expectations (e.g., Demo Mode row index).
+            MenuItem(
+                "Track Expiry",
+                "cycle",
+                tuple(str(int(x)) for x in TRACK_EXPIRY_PRESETS_S),
+            ),
         ]
         self._sel: int = 0
 
@@ -195,18 +266,197 @@ class SettingsScreen:
             self._settings.units = controller.units
         elif item.label == "Range Default":
             ladder = list(RANGE_LADDER_NM)
-            cur = float(self._settings.range_nm)
+            cur_range = float(self._settings.range_nm)
             try:
-                idx = ladder.index(cur)
+                idx = ladder.index(cur_range)
             except ValueError:
                 # Fallback to first if out of ladder
                 idx = 0
-            cur = ladder[(idx + 1) % len(ladder)]
-            self._settings.range_nm = cur
-            controller._cfg.range_nm = cur
+            cur_range = ladder[(idx + 1) % len(ladder)]
+            self._settings.range_nm = cur_range
+            controller._cfg.range_nm = cur_range
         elif item.label == "Track Length":
             controller.cycle_track_length(persist=False)
-            self._settings.track_length_mode = controller.track_length_mode
+            self._settings.track_length_s = float(controller.track_length_s)
+        elif item.label == "Track Expiry":
+            controller.cycle_track_expiry(persist=False)
+            try:
+                self._settings.track_expiry_s = float(controller.track_expiry_s)
+            except Exception:
+                pass
+        elif item.label == "Label Font":
+            # Cycle through explicit font-size choices
+            try:
+                cur_label_font = int(
+                    getattr(self._settings, "label_font_px", self.font_px)
+                )
+            except Exception:
+                cur_label_font = int(self.font_px)
+            # Find current index in canonical list or fallback to nearest
+            sizes = list(LABEL_FONT_SIZES)
+            # Find current index robustly without relying on .index to avoid
+            # narrow Literal typing on the tuple which causes mypy to complain.
+            idx = next((i for i, s in enumerate(sizes) if s == cur_label_font), -1)
+            if idx == -1:
+                # choose closest larger or fallback to first
+                idx = 0
+                for i, s in enumerate(sizes):
+                    if s >= cur_label_font:
+                        idx = i
+                        break
+            idx = (idx + 1) % len(sizes)
+            new = int(sizes[idx])
+            self._settings.label_font_px = new
+            # Apply immediately to controller/view
+            try:
+                controller._view.label_font_px = int(new)
+            except Exception:
+                pass
+        elif item.label == "Label Line Gap":
+            try:
+                cur_label_line_gap = int(
+                    getattr(self._settings, "label_line_gap_px", 0)
+                )
+            except Exception:
+                cur_label_line_gap = 0
+            gaps = list(LABEL_LINE_GAP_VALUES)
+            # Use enumerate-based search to avoid Literal typing issues
+            idx = next((i for i, g in enumerate(gaps) if g == cur_label_line_gap), -1)
+            if idx == -1:
+                idx = 0
+            idx = (idx + 1) % len(gaps)
+            new = int(gaps[idx])
+            self._settings.label_line_gap_px = new
+            try:
+                controller._view.label_line_gap_px = int(new)
+            except Exception:
+                pass
+        elif item.label == "Status Font":
+            try:
+                cur_status_font = int(
+                    getattr(self._settings, "status_font_px", self.font_px)
+                )
+            except Exception:
+                cur_status_font = int(self.font_px)
+            sizes = list(STATUS_FONT_SIZES)
+            idx = next((i for i, s in enumerate(sizes) if s == cur_status_font), -1)
+            if idx == -1:
+                idx = 0
+                for i, s in enumerate(sizes):
+                    if s >= cur_status_font:
+                        idx = i
+                        break
+            idx = (idx + 1) % len(sizes)
+            new = int(sizes[idx])
+            self._settings.status_font_px = new
+            try:
+                controller._overlay.font_px = int(new)
+            except Exception:
+                pass
+        elif item.label == "Status Pad Top":
+            try:
+                cur_status_pad_top = getattr(self._settings, "status_pad_top_px", None)
+            except Exception:
+                cur_status_pad_top = None
+            choices = list(STATUS_PAD_CHOICES)
+            idx = next(
+                (i for i, s in enumerate(choices) if s == cur_status_pad_top), -1
+            )
+            if idx == -1:
+                idx = 0
+            idx = (idx + 1) % len(choices)
+            new_status_pad_top: int | None = choices[idx]
+            self._settings.status_pad_top_px = new_status_pad_top
+            try:
+                if new_status_pad_top is not None:
+                    controller._overlay.pad_top = int(new_status_pad_top)
+            except Exception:
+                pass
+        elif item.label == "Status Pad Bottom":
+            try:
+                cur_status_pad_bottom = getattr(
+                    self._settings, "status_pad_bottom_px", None
+                )
+            except Exception:
+                cur_status_pad_bottom = None
+            choices = list(STATUS_PAD_CHOICES)
+            idx = next(
+                (i for i, s in enumerate(choices) if s == cur_status_pad_bottom), -1
+            )
+            if idx == -1:
+                idx = 0
+            idx = (idx + 1) % len(choices)
+            new_status_pad_bottom: int | None = choices[idx]
+            self._settings.status_pad_bottom_px = new_status_pad_bottom
+            try:
+                if new_status_pad_bottom is not None:
+                    controller._overlay.pad_bottom = int(new_status_pad_bottom)
+            except Exception:
+                pass
+        elif item.label == "Softkeys Font":
+            try:
+                cur_softkeys_font = int(
+                    getattr(self._settings, "softkeys_font_px", self.font_px)
+                )
+            except Exception:
+                cur_softkeys_font = int(self.font_px)
+            sizes = list(STATUS_FONT_SIZES)
+            idx = next((i for i, s in enumerate(sizes) if s == cur_softkeys_font), -1)
+            if idx == -1:
+                idx = 0
+                for i, s in enumerate(sizes):
+                    if s >= cur_softkeys_font:
+                        idx = i
+                        break
+            idx = (idx + 1) % len(sizes)
+            new = int(sizes[idx])
+            self._settings.softkeys_font_px = new
+            try:
+                if controller._softkeys:
+                    controller._softkeys._requested_font_px = int(new)
+                    controller._softkeys.layout()
+            except Exception:
+                pass
+        elif item.label == "Softkeys Pad X":
+            try:
+                cur_softkeys_pad_x = int(getattr(self._settings, "softkeys_pad_x", 4))
+            except Exception:
+                cur_softkeys_pad_x = 4
+            choices_pad = [0, 2, 4, 6, 8]
+            idx = next(
+                (i for i, s in enumerate(choices_pad) if s == cur_softkeys_pad_x), -1
+            )
+            if idx == -1:
+                idx = 0
+            idx = (idx + 1) % len(choices_pad)
+            new_softkeys_pad_x: int = choices_pad[idx]
+            self._settings.softkeys_pad_x = new_softkeys_pad_x
+            try:
+                if controller._softkeys:
+                    controller._softkeys.pad_x = int(new_softkeys_pad_x)
+                    controller._softkeys.layout()
+            except Exception:
+                pass
+        elif item.label == "Softkeys Pad Y":
+            try:
+                cur_softkeys_pad_y = int(getattr(self._settings, "softkeys_pad_y", 2))
+            except Exception:
+                cur_softkeys_pad_y = 2
+            choices_pad = [0, 2, 4, 6, 8]
+            idx = next(
+                (i for i, s in enumerate(choices_pad) if s == cur_softkeys_pad_y), -1
+            )
+            if idx == -1:
+                idx = 0
+            idx = (idx + 1) % len(choices_pad)
+            new_softkeys_pad_y: int = choices_pad[idx]
+            self._settings.softkeys_pad_y = new_softkeys_pad_y
+            try:
+                if controller._softkeys:
+                    controller._softkeys.pad_y = int(new_softkeys_pad_y)
+                    controller._softkeys.layout()
+            except Exception:
+                pass
         elif item.label == "Altitude Filter":
             controller.cycle_altitude_filter(persist=False)
             # Mirror into settings model
@@ -217,6 +467,39 @@ class SettingsScreen:
         elif item.label == "North-up Lock":
             controller.toggle_north_up_lock(persist=False)
             self._settings.north_up_lock = controller.north_up_lock
+        elif item.label == "Flip Display":
+            # Toggle a setting that instructs display backends to rotate/flip
+            # the final framebuffer before sending to hardware. This is a
+            # staged change until the user presses Save.
+            try:
+                cur = bool(getattr(self._settings, "flip_display", False))
+            except Exception:
+                cur = False
+            new = not cur
+            self._settings.flip_display = new
+            # If controller exposes an interface for the display backend, try
+            # to apply immediately so the UI preview matches the setting.
+            try:
+                fn = getattr(controller, "apply_display_flip", None)
+                if callable(fn):
+                    fn(new)
+            except Exception:
+                pass
+        elif item.label == "Sector Labels":
+            # Toggle sector label visibility
+            try:
+                cur = bool(getattr(self._settings, "sector_labels", True))
+            except Exception:
+                cur = True
+            new = not cur
+            self._settings.sector_labels = new
+            # Apply live to controller/view
+            try:
+                controller.sector_labels = new
+                if hasattr(controller._view, "show_sector_labels"):
+                    controller._view.show_sector_labels = bool(new)
+            except Exception:
+                pass
         # Persistence deferred until explicit Save
 
     # --- Rendering ----------------------------------------------------
@@ -300,15 +583,44 @@ class SettingsScreen:
         if item.label == "Range Default":
             return f"{int(self._settings.range_nm):d}nm"
         if item.label == "Track Length":
-            # Derive human-readable seconds from central config
-            secs = TRACK_LENGTH_MODES.get(controller.track_length_mode)
-            if isinstance(secs, (int, float)):
-                return f"{int(secs)}s"
-            return "?"
+            try:
+                val = float(getattr(self._settings, "track_length_s", 45.0))
+            except Exception:
+                val = 45.0
+            # Indicate custom value (not in presets) with '*'
+            presets = set(float(x) for x in TRACK_LENGTH_PRESETS_S)
+            suffix = "" if val in presets else "*"
+            return f"{int(val)}s{suffix}"
+        if item.label == "Track Expiry":
+            try:
+                val = float(
+                    getattr(
+                        self._settings,
+                        "track_expiry_s",
+                        float(TRACK_SERVICE_DEFAULTS.get("expiry_s", 300.0)),
+                    )
+                )
+            except Exception:
+                val = float(TRACK_SERVICE_DEFAULTS.get("expiry_s", 300.0))
+            presets = set(float(x) for x in TRACK_EXPIRY_PRESETS_S)
+            suffix = "" if val in presets else "*"
+            return f"{int(val)}s{suffix}"
         if item.label == "Altitude Filter":
             return getattr(controller, "altitude_filter", "All")
         if item.label == "Demo Mode":
             return "ON" if controller.demo_mode else "OFF"
         if item.label == "North-up Lock":
             return "ON" if getattr(controller, "north_up_lock", True) else "OFF"
+        if item.label == "Flip Display":
+            return "ON" if getattr(self._settings, "flip_display", False) else "OFF"
+        if item.label == "Label Font":
+            return f"{int(getattr(self._settings, 'label_font_px', self.font_px))}px"
+        if item.label == "Label Line Gap":
+            return f"{int(getattr(self._settings, 'label_line_gap_px', 0))}px"
+        if item.label == "Softkeys Font":
+            return f"{int(getattr(self._settings, 'softkeys_font_px', self.font_px))}px"
+        if item.label == "Softkeys Pad X":
+            return f"{int(getattr(self._settings, 'softkeys_pad_x', 4))}px"
+        if item.label == "Softkeys Pad Y":
+            return f"{int(getattr(self._settings, 'softkeys_pad_y', 2))}px"
         return None

@@ -2,8 +2,7 @@
   "python.analysis.extraPaths": [
     "src"
   ],
-  "python.testing.pytestArgs": [
-    "src/pocketscope/tests",
-    "tests"
-  ]
+  "python.testing.pytestArgs": [],
+  "python.testing.unittestEnabled": false,
+  "python.testing.pytestEnabled": true
 }

@@ -98,48 +98,73 @@ class SoftKeyBar:
     def layout(self) -> None:
         """Compute button rectangles."""
         w, h = self.size
-        # Use explicit bar height if provided, else derive from current font.
-        bar_h = self.bar_height or (self.font_px + self.pad_y * 2)
-        y = h - bar_h
+        # Labels and counts (needed for measurements below)
         labels = list(self.actions.keys())
         n = len(labels)
-        btn_w = w // max(1, n)
-        rects: List[Tuple[int, int, int, int]] = []
-        for i in range(n):
-            rects.append((i * btn_w, y, btn_w, bar_h))
-        self._rects = rects
 
-        # --- Resolve font size (auto-scale) ---------------------------------
-        # Determine vertical limit.
+        # Use explicit bar height if provided, else derive from measured text
+        # height using the requested font size and the vertical padding.
         if self.bar_height is not None:
-            vertical_limit = max(1, bar_h - 2 * self.pad_y)
+            bar_h = self.bar_height
         else:
-            vertical_limit = self._requested_font_px
+            # Measure text heights for all labels at the requested font size
+            measure = self.measure_fn
+            max_text_h = 0
+            for lbl in labels:
+                try:
+                    _w, th = measure(lbl, int(self._requested_font_px))
+                except Exception:
+                    th = int(self._requested_font_px)
+                if th > max_text_h:
+                    max_text_h = th
+            # Fallback to requested font_px if measurement failed
+            if max_text_h <= 0:
+                max_text_h = int(self._requested_font_px)
+            bar_h = max(1, int(max_text_h + 2 * self.pad_y))
+        y = h - bar_h
+        # Respect requested font size exactly (no autoscaling)
+        self.font_px = max(1, int(self._requested_font_px))
 
-        usable_w = max(1, btn_w - 2 * self.pad_x)
+        # Initial equal division
+        btn_w = w // max(1, n)
+        widths = [btn_w] * n
 
-        # Measurement path (exact if pygame available, else approximation)
-        upper = vertical_limit
-        if self.bar_height is None:
-            upper = min(upper, self._requested_font_px)
-        candidate = upper
-        measure = self.measure_fn  # local for speed/type clarity
-        # Simple decrement search is acceptable for small font sizes; fall
-        # back gracefully if measurement fails.
-        while candidate > 1:
+        # Auto-expand center button (if odd number of buttons) to fit its label
+        # Measure using the requested font size so layout matches drawing.
+        if n >= 3 and n % 2 == 1:
+            center_idx = n // 2
+            center_label = labels[center_idx]
             try:
-                if all(measure(lbl, candidate)[0] <= usable_w for lbl in labels):
-                    break
+                center_w, _ = self.measure_fn(center_label, self.font_px)
             except Exception:
-                # On failure, drop to approximation for remaining labels.
-                def _approx(s: str, sz: int) -> Tuple[int, int]:
-                    return (int(sz * 0.6) * len(s), sz)
+                center_w = int(self.font_px * 0.6) * len(center_label)
+            center_needed = max(1, center_w + 2 * self.pad_x)
+            if center_needed > btn_w:
+                extra = center_needed - btn_w
+                # Available pixels to steal: total width minus 1 px per other button
+                available = max(0, w - btn_w - (n - 1) * 1)
+                take = min(extra, available)
+                if take > 0:
+                    per = take // (n - 1)
+                    rem = take - per * (n - 1)
+                    for i in range(n):
+                        if i == center_idx:
+                            continue
+                        dec = per + (1 if rem > 0 else 0)
+                        if rem > 0:
+                            rem -= 1
+                        widths[i] = max(1, widths[i] - dec)
+                    widths[center_idx] = w - sum(
+                        widths[i] for i in range(n) if i != center_idx
+                    )
 
-                self.measure_fn = _approx
-                # Restart sizing with approximation path.
-                return self.layout()
-            candidate -= 1
-        self.font_px = max(1, candidate)
+        # Build rects from final widths
+        rects: List[Tuple[int, int, int, int]] = []
+        x = 0
+        for i in range(n):
+            rects.append((x, y, widths[i], bar_h))
+            x += widths[i]
+        self._rects = rects
 
     # Drawing -------------------------------------------------------------
     def draw(self, canvas: Canvas) -> None:

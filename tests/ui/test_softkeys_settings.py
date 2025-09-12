@@ -53,7 +53,7 @@ async def test_softkeys_and_hot_reload(
     )
     ui.set_softkeys(bar)
 
-    watcher = ConfigWatcher(bus, poll_hz=10.0)
+    watcher = ConfigWatcher(bus)
     watcher_task = asyncio.create_task(watcher.run())
 
     task = asyncio.create_task(ui.run())
@@ -69,10 +69,10 @@ async def test_softkeys_and_hot_reload(
     data = json.loads(SettingsStore.settings_path().read_text())
     assert data["units"] != "nm_ft_kt"
 
-    # Cycle Tracks to long
+    # Cycle Tracks to next preset (120s)
     rect = bar._rects[2]
     bar.on_mouse(rect[0] + 1, rect[1] + 1, True)
-    assert ui.track_length_mode == "long"
+    assert int(ui.track_length_s) == 120
 
     # Demo toggle persists
     rect = bar._rects[3]

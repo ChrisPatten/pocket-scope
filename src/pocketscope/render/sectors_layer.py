@@ -14,10 +14,14 @@ from pocketscope.render.canvas import Canvas
 
 class SectorsLayer:
     def __init__(
-        self, color: tuple[int, int, int, int] = (80, 120, 200, 100), width_px: int = 1
+        self,
+        color: tuple[int, int, int, int] = (80, 120, 200, 100),
+        width_px: int = 1,
+        show_labels: bool = True,
     ) -> None:
         self.color = (int(color[0]), int(color[1]), int(color[2]), int(color[3]))
         self.width_px = int(width_px)
+        self.show_labels = bool(show_labels)
 
     def draw(
         self,
@@ -82,10 +86,22 @@ class SectorsLayer:
             # Outline
             canvas.polyline(pts, width=self.width_px, color=self.color)
 
-            # Label at simple centroid (average of vertices) projected to screen
-            lat_c = sum(p[0] for p in s.points) / float(len(s.points))
-            lon_c = sum(p[1] for p in s.points) / float(len(s.points))
-            lx, ly = to_screen(lat_c, lon_c)
-            canvas.text(
-                (lx + 2, ly + 2), s.name, size_px=10, color=(255, 255, 255, 255)
-            )
+            # Label: simple centroid of screen points
+            # (excluding duplicate last point)
+            if self.show_labels:
+                try:
+                    core_pts = (
+                        pts[:-1] if (len(pts) >= 2 and pts[0] == pts[-1]) else pts
+                    )
+                    if core_pts:
+                        sx = sum(p[0] for p in core_pts) / float(len(core_pts))
+                        sy = sum(p[1] for p in core_pts) / float(len(core_pts))
+                        canvas.text(
+                            (int(round(sx)), int(round(sy))),
+                            s.name,
+                            size_px=10,
+                            color=(255, 255, 255, 220),
+                        )  # label centroid
+                except Exception:
+                    # Non-critical; skip label if any math/render issue
+                    pass

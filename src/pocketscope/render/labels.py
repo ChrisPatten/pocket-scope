@@ -216,10 +216,55 @@ class DataBlockLayout:
         return (x, y)
 
     def place_blocks(
-        self, items: Sequence[tuple[Tuple[int, int], Tuple[str, str, str], bool]]
+        self,
+        items: Sequence[tuple[Tuple[int, int], Tuple[str, str, str], bool]],
+        *,
+        occlusions: Optional[Sequence[Tuple[int, int, int, int]]] = None,
     ) -> list[BlockPlacement]:
         placements: list[BlockPlacement] = []
+        # Occupied rectangles include previously placed blocks plus any
+        # external occlusions (status/info bars, softkeys) passed by caller.
         occupied: list[Tuple[int, int, int, int]] = []  # x,y,w,h
+        # Track only previously placed block rectangles (exclude occlusions & markers)
+        block_bboxes: list[Tuple[int, int, int, int]] = []
+        if occlusions:
+            # Trust caller rectangles as-is; treat them as hard exclusions.
+            for ox, oy, ow, oh in occlusions:
+                try:
+                    occupied.append((int(ox), int(oy), int(ow), int(oh)))
+                except Exception:
+                    continue
+
+        # ------------------------------------------------------------------
+        # NEW: Exclude aircraft glyph regions from label placement.
+        # Rationale: Previous behavior only avoided collisions between
+        # data blocks themselves (and UI occlusions). This could allow a
+        # block, when nudged by the spiral search, to overlap the visual
+        # aircraft marker (triangle or circle). We now seed the occupied
+        # set with a small square centered on every anchor point to keep
+        # labels from covering aircraft symbols. Trails are NOT included.
+        # A modest half-extent keeps spacing tight while preventing
+        # overlap. (Empirically a glyph spans ~5 px from center.)
+        # ------------------------------------------------------------------
+        marker_half_extent = 5  # pixels from center in each direction
+        marker_size = marker_half_extent * 2
+        try:
+            seen: set[Tuple[int, int]] = set()
+            for anchor, _lines, _expanded in items:
+                ax, ay = int(anchor[0]), int(anchor[1])
+                if (ax, ay) in seen:
+                    continue
+                seen.add((ax, ay))
+                occupied.append(
+                    (
+                        ax - marker_half_extent,
+                        ay - marker_half_extent,
+                        marker_size,
+                        marker_size,
+                    )
+                )
+        except Exception:
+            pass
 
         # Fixed initial offsets for quadrants
         offsets = [
@@ -255,8 +300,108 @@ class DataBlockLayout:
                 # Try initial clamped pos
                 x, y = self._clamp_bbox(x, y, bw, bh)
                 box = bbox_at(x, y)
+
                 # Check collision
+                def _segment_intersects_rect(
+                    x1: int,
+                    y1: int,
+                    x2: int,
+                    y2: int,
+                    rx: int,
+                    ry: int,
+                    rw: int,
+                    rh: int,
+                ) -> bool:
+                    """Return True if line segment (x1,y1)-(x2,y2) intersects rect.
+
+                    We use a simple approach:
+                      * Trivial reject via bounding boxes
+                      * Endpoint inside test
+                      * Check intersection with each rectangle edge.
+                    """
+                    # Bounding box reject
+                    minx, maxx = (x1, x2) if x1 <= x2 else (x2, x1)
+                    miny, maxy = (y1, y2) if y1 <= y2 else (y2, y1)
+                    if maxx < rx or minx > rx + rw or maxy < ry or miny > ry + rh:
+                        return False
+
+                    # Point inside helper
+                    def inside(px: int, py: int) -> bool:
+                        return rx <= px <= rx + rw and ry <= py <= ry + rh
+
+                    if inside(x1, y1) or inside(x2, y2):
+                        return True
+
+                    # Edge intersection helper (segment-segment)
+                    def seg_inter(
+                        a1x: int,
+                        a1y: int,
+                        a2x: int,
+                        a2y: int,
+                        b1x: int,
+                        b1y: int,
+                        b2x: int,
+                        b2y: int,
+                    ) -> bool:
+                        def orient(
+                            px: int, py: int, qx: int, qy: int, rx_: int, ry_: int
+                        ) -> int:
+                            return (qx - px) * (ry_ - py) - (qy - py) * (rx_ - px)
+
+                        o1: int = orient(a1x, a1y, a2x, a2y, b1x, b1y)
+                        o2: int = orient(a1x, a1y, a2x, a2y, b2x, b2y)
+                        o3: int = orient(b1x, b1y, b2x, b2y, a1x, a1y)
+                        o4: int = orient(b1x, b1y, b2x, b2y, a2x, a2y)
+                        if o1 == 0 and o2 == 0 and o3 == 0 and o4 == 0:
+                            # Colinear: treat as intersect only if projections overlap
+                            def overlap(p1: int, p2: int, q1: int, q2: int) -> bool:
+                                if p1 > p2:
+                                    p1, p2 = p2, p1
+                                if q1 > q2:
+                                    q1, q2 = q2, q1
+                                return not (p2 < q1 or q2 < p1)
+
+                            return overlap(a1x, a2x, b1x, b2x) and overlap(
+                                a1y, a2y, b1y, b2y
+                            )
+                        return (o1 > 0) != (o2 > 0) and (o3 > 0) != (o4 > 0)
+
+                    # Rectangle edges
+                    edges = [
+                        (rx, ry, rx + rw, ry),  # top
+                        (rx + rw, ry, rx + rw, ry + rh),  # right
+                        (rx + rw, ry + rh, rx, ry + rh),  # bottom
+                        (rx, ry + rh, rx, ry),  # left
+                    ]
+                    for ex1, ey1, ex2, ey2 in edges:
+                        if seg_inter(x1, y1, x2, y2, ex1, ey1, ex2, ey2):
+                            return True
+                    return False
+
+                def leader_attach(px: int, py: int) -> Tuple[int, int]:
+                    # Reproduce selection done during rendering (nearest side midpoint)
+                    w_b, h_b = bw, bh
+                    candidates = [
+                        (px, py + h_b // 2),
+                        (px + w_b, py + h_b // 2),
+                        (px + w_b // 2, py),
+                        (px + w_b // 2, py + h_b),
+                    ]
+                    cx2, cy2 = min(
+                        candidates,
+                        key=lambda q: (q[0] - ax) * (q[0] - ax)
+                        + (q[1] - ay) * (q[1] - ay),
+                    )
+                    return int(cx2), int(cy2)
+
                 collides = any(self._intersects(box, b) for b in occupied)
+                if not collides and block_bboxes:
+                    # Leader line collision test: only against previously placed blocks
+                    lx, ly = leader_attach(x, y)
+                    for bx, by, bw_, bh_ in block_bboxes:
+                        if _segment_intersects_rect(ax, ay, lx, ly, bx, by, bw_, bh_):
+                            collides = True
+                            break
 
                 while collides and attempts < max_attempts:
                     # Spiral: move outward in a square spiral pattern
@@ -270,6 +415,14 @@ class DataBlockLayout:
                     x, y = self._clamp_bbox(x, y, bw, bh)
                     box = bbox_at(x, y)
                     collides = any(self._intersects(box, b) for b in occupied)
+                    if not collides and block_bboxes:
+                        lx, ly = leader_attach(x, y)
+                        for bx, by, bw_, bh_ in block_bboxes:
+                            if _segment_intersects_rect(
+                                ax, ay, lx, ly, bx, by, bw_, bh_
+                            ):
+                                collides = True
+                                break
                     attempts += 1
 
                 if not collides:
@@ -289,5 +442,6 @@ class DataBlockLayout:
                 )
             )
             occupied.append((int(best_x), int(best_y), bw, bh))
+            block_bboxes.append((int(best_x), int(best_y), bw, bh))
 
         return placements

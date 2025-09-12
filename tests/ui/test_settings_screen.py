@@ -39,7 +39,7 @@ async def test_settings_screen_full_flow(
         cfg=UiConfig(target_fps=10.0, range_nm=10.0),
     )
 
-    watcher = ConfigWatcher(bus, poll_hz=10.0)
+    watcher = ConfigWatcher(bus)
     watcher_task = asyncio.create_task(watcher.run())
     task = asyncio.create_task(ui.run())
 
@@ -116,12 +116,12 @@ async def test_settings_screen_full_flow(
     ts.advance(0.05)
     await asyncio.sleep(0)
 
-    # External modification: set track_length_mode to long
+    # External modification: set track_length_s to 120
     s = SettingsStore.load()
-    s.track_length_mode = "long"
+    s.track_length_s = 120.0
     SettingsStore.save(s)
     await asyncio.sleep(0.4)
-    assert ui.track_length_mode == "long"
+    assert int(ui.track_length_s) == 120
 
     # Re-open and snapshot
     pg.event.post(pg.event.Event(pg.KEYDOWN, key=pg.K_s))

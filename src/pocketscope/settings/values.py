@@ -9,6 +9,7 @@ defensive hard-coded defaults so the application can still run. These
 fallbacks intentionally mirror the historical literals to retain test
 stability if the YAML is missing or corrupt.
 """
+
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -26,8 +27,7 @@ _YAML_PATH = _PKG_DIR / "values.yml"
 # --- Fallback literals (legacy behavior) ---------------------------------
 _FALLBACK_UNITS_ORDER = ["nm_ft_kt", "mi_ft_mph", "km_m_kmh"]
 _FALLBACK_RANGE_LADDER = [2.0, 5.0, 10.0, 20.0, 40.0, 80.0]
-_FALLBACK_TRACK_LENGTH_MODES = {"short": 15.0, "medium": 45.0, "long": 120.0}
-_FALLBACK_TRACK_LENGTH_ORDER = ["short", "medium", "long"]
+_FALLBACK_TRACK_PRESETS_S = [15.0, 45.0, 120.0]
 _FALLBACK_ALT_FILTER_ORDER = ["All", "0–5k", "5–10k", "10–20k", ">20k"]
 _FALLBACK_ALT_FILTER_BANDS = {
     "All": (None, None),
@@ -80,7 +80,11 @@ _FALLBACK_THEME = {
     }
 }
 _FALLBACK_ZOOM_LIMITS = {"min_range_nm": 2.0, "max_range_nm": 80.0}
-_FALLBACK_TRACK_SERVICE = {"trail_len_default_s": 60.0, "trail_len_pinned_s": 180.0}
+_FALLBACK_TRACK_SERVICE = {
+    "trail_len_default_s": 60.0,
+    "trail_len_pinned_s": 180.0,
+    "expiry_s": 300.0,
+}
 _FALLBACK_PPI_FMT = {
     "range_ring_label": {
         "offset_x_px": 4,
@@ -117,8 +121,7 @@ class AltitudeBand:
 # --- Load YAML -----------------------------------------------------------
 _units_order: List[str] = list(_FALLBACK_UNITS_ORDER)
 _range_ladder: List[float] = list(_FALLBACK_RANGE_LADDER)
-_track_length_modes: Dict[str, float] = dict(_FALLBACK_TRACK_LENGTH_MODES)
-_track_length_order: List[str] = list(_FALLBACK_TRACK_LENGTH_ORDER)
+_track_length_presets_s: List[float] = list(_FALLBACK_TRACK_PRESETS_S)
 _altitude_bands: Dict[str, Tuple[float | None, float | None]] = dict(
     _FALLBACK_ALT_FILTER_BANDS
 )
@@ -153,19 +156,16 @@ if yaml is not None and _YAML_PATH.exists():  # pragma: no branch - simple path
             _auto_ring_cfg.update(auto_cfg)
         # Tracks
         tracks = raw.get("tracks", {})
-        modes = tracks.get("length_modes", {})
-        if isinstance(modes, dict):
-            cleaned: Dict[str, float] = {}
-            for k, v in modes.items():
+        presets = tracks.get("presets_s")
+        if isinstance(presets, list):
+            cleaned_p: List[float] = []
+            for v in presets:
                 try:
-                    cleaned[str(k)] = float(v)
+                    cleaned_p.append(float(v))
                 except Exception:
                     continue
-            if cleaned:
-                _track_length_modes = cleaned
-        order = tracks.get("cycle_order")
-        if isinstance(order, list) and all(isinstance(x, str) for x in order):
-            _track_length_order = list(order)
+            if cleaned_p:
+                _track_length_presets_s = cleaned_p
         # Altitude filters
         af = raw.get("altitude_filters", {})
         bands = af.get("bands")
@@ -220,7 +220,7 @@ if yaml is not None and _YAML_PATH.exists():  # pragma: no branch - simple path
         if isinstance(trk, dict):
             svc = trk.get("service_defaults")
             if isinstance(svc, dict):
-                for k in ("trail_len_default_s", "trail_len_pinned_s"):
+                for k in ("trail_len_default_s", "trail_len_pinned_s", "expiry_s"):
                     v = svc.get(k)
                     if isinstance(v, (int, float)):
                         _track_service_defaults[k] = float(v)
@@ -264,8 +264,7 @@ if yaml is not None and _YAML_PATH.exists():  # pragma: no branch - simple path
 # --- Public accessors ----------------------------------------------------
 UNITS_ORDER: Sequence[str] = tuple(_units_order)
 RANGE_LADDER_NM: Sequence[float] = tuple(_range_ladder)
-TRACK_LENGTH_MODES: Dict[str, float] = dict(_track_length_modes)
-TRACK_LENGTH_CYCLE_ORDER: Sequence[str] = tuple(_track_length_order)
+TRACK_LENGTH_PRESETS_S: Sequence[float] = tuple(_track_length_presets_s)
 ALTITUDE_FILTER_BANDS: Dict[str, Tuple[float | None, float | None]] = dict(
     _altitude_bands
 )
@@ -281,8 +280,7 @@ STATUS_OVERLAY_CONFIG: Dict[str, Any] = dict(_status_overlay_cfg)
 __all__ = [
     "UNITS_ORDER",
     "RANGE_LADDER_NM",
-    "TRACK_LENGTH_MODES",
-    "TRACK_LENGTH_CYCLE_ORDER",
+    "TRACK_LENGTH_PRESETS_S",
     "ALTITUDE_FILTER_BANDS",
     "ALTITUDE_FILTER_CYCLE_ORDER",
     "AUTO_RING_CONFIG",

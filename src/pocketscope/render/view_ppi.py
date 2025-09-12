@@ -23,8 +23,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from math import cos, radians, sin
-from typing import TYPE_CHECKING, Iterable, List, Optional, Sequence, Tuple
+from typing import TYPE_CHECKING, Any, Iterable, List, Optional, Sequence, Tuple
 
+from pocketscope import config as _config
 from pocketscope.core.geo import ecef_to_enu, enu_to_screen, geodetic_to_ecef
 from pocketscope.render.airports_layer import AirportsLayer
 from pocketscope.render.canvas import Canvas, Color
@@ -57,6 +58,43 @@ ColorTrails: Color = _col(_PPI_THEME.get("trails"), (0, 180, 255, 180))
 ColorAircraft: Color = _col(_PPI_THEME.get("aircraft"), (255, 255, 0, 255))
 ColorLabels: Color = _col(_PPI_THEME.get("labels"), (255, 255, 255, 255))
 ColorDataBlock: Color = _col(_PPI_THEME.get("datablock"), (0, 255, 0, 255))
+ColorDataBlockBG: Color = _col(_PPI_THEME.get("datablock_bg"), (0, 0, 0, 140))
+
+
+def _on_runtime_update(rc: Any) -> None:
+    """Update module-level color constants when runtime theme changes.
+
+    This callback is scheduled via the event loop by config.update_from_settings
+    so it must be quick and idempotent.
+    """
+    try:
+        if isinstance(rc, dict):
+            theme = rc
+        else:
+            theme = getattr(rc, "theme", {}) or {}
+        ppi_theme = (
+            theme.get("colors", {}).get("ppi", {}) if isinstance(theme, dict) else {}
+        )
+        # Update colors in-place
+        global ColorBG, ColorRings, ColorOwnship, ColorTrails
+        global ColorAircraft, ColorLabels, ColorDataBlock, ColorDataBlockBG
+        ColorBG = _col(ppi_theme.get("background"), ColorBG)
+        ColorRings = _col(ppi_theme.get("rings"), ColorRings)
+        ColorOwnship = _col(ppi_theme.get("ownship"), ColorOwnship)
+        ColorTrails = _col(ppi_theme.get("trails"), ColorTrails)
+        ColorAircraft = _col(ppi_theme.get("aircraft"), ColorAircraft)
+        ColorLabels = _col(ppi_theme.get("labels"), ColorLabels)
+        ColorDataBlock = _col(ppi_theme.get("datablock"), ColorDataBlock)
+        ColorDataBlockBG = _col(ppi_theme.get("datablock_bg"), ColorDataBlockBG)
+    except Exception:
+        pass
+
+
+# Register listener (no-op if already registered elsewhere)
+try:
+    _config.register_listener(_on_runtime_update)
+except Exception:
+    pass
 
 
 @dataclass(slots=True)
@@ -95,21 +133,21 @@ class PpiView:
         show_simple_labels: bool = True,
         show_text_annotations: bool = True,
         show_airports: bool = True,
+        show_sector_labels: bool = True,
         label_font_px: int = 12,
         label_line_gap_px: int = 2,
         label_block_pad_px: int = 2,
         range_rings: Optional[Sequence[float]] = None,
     ) -> None:
         self.range_nm = float(range_nm)
-        # Optional view rotation used only for the north tick; 0 keeps legacy behavior
         if rotation_deg == 0.0 and isinstance(PPI_CONFIG, dict):
-            # no explicit rotation; keep 0 but note configured step
             pass
         self.rotation_deg = float(rotation_deg) % 360.0
         self.show_data_blocks = bool(show_data_blocks)
         self.show_simple_labels = bool(show_simple_labels)
         self.show_text_annotations = bool(show_text_annotations)
         self.show_airports = bool(show_airports)
+        self.show_sector_labels = bool(show_sector_labels)
         # Data-block typography (allow config overrides when not explicitly passed)
         ty_cfg = (
             PPI_CONFIG.get("typography", {}) if isinstance(PPI_CONFIG, dict) else {}
@@ -203,6 +241,9 @@ class PpiView:
         tracks: Iterable[TrackSnapshot],
         airports: Optional[Sequence[Tuple[float, float, str]]] = None,
         sectors: Optional[Sequence["Sector"]] = None,
+        occlusions: Optional[Sequence[Tuple[int, int, int, int]]] = None,
+        runway_sqlite: str | None = None,
+        runway_icons: bool = False,
     ) -> None:
         """Draw the PPI view contents.
         - Deterministic: draws tracks sorted by (callsign, icao), optional text
@@ -223,49 +264,105 @@ class PpiView:
         # Clear background
         canvas.clear(ColorBG)
 
-        # Track range ring label positions to avoid airport label conflicts
+        # Precompute range ring geometry and label bounding boxes so airports
+        # (z-index 1) can avoid them even though rings (2) and their labels (3)
+        # are drawn later.
         range_ring_exclusions: list[tuple[int, int, int, int]] = []
-
-        # Range rings (explicit or auto-derived)
         ring_ticks = (
             list(self._explicit_rings)
             if self._explicit_rings is not None
             else self._auto_range_rings()
         )
-        for nm in ring_ticks:
-            if nm > self.range_nm:
-                continue
-            r_px = int((nm * meters_per_nm) / m_per_px)
-            canvas.circle((cx, cy), r_px, width=1, color=ColorRings)
-            if self.show_text_annotations:
-                label_text = f"{int(nm)} nm"
-                rr_cfg = (
-                    PPI_CONFIG.get("range_ring_label", {})
-                    if isinstance(PPI_CONFIG, dict)
-                    else {}
+        ring_radii: list[int] = []  # circles to draw at z-index 2
+        ring_label_specs: list[tuple[int, int, str]] = []  # (x,y,text) for z-index 3
+        if ring_ticks:
+            for nm in ring_ticks:
+                if nm > self.range_nm:
+                    continue
+                r_px = int((nm * meters_per_nm) / m_per_px)
+                ring_radii.append(r_px)
+                if self.show_text_annotations:
+                    label_text = f"{int(nm)}nm"
+                    rr_cfg = (
+                        PPI_CONFIG.get("range_ring_label", {})
+                        if isinstance(PPI_CONFIG, dict)
+                        else {}
+                    )
+                    label_x = cx + r_px + int(rr_cfg.get("offset_x_px", 4))
+                    label_y = cy + int(rr_cfg.get("offset_y_px", -8))
+                    ring_label_specs.append((label_x, label_y, label_text))
+                    # Add exclusion for airport labels
+                    char_w = max(6, int(round(self.label_font_px * 0.6)))
+                    label_w = len(label_text) * char_w
+                    label_h = self.label_font_px
+                    padding = int(rr_cfg.get("padding_px", 4))
+                    range_ring_exclusions.append(
+                        (
+                            label_x - padding,
+                            label_y - padding,
+                            label_w + 2 * padding,
+                            label_h + 2 * padding,
+                        )
+                    )
+
+        # z-index 0: Sectors
+        if sectors:
+            try:
+                from pocketscope.data.sectors import Sector as _Sector
+                from pocketscope.render.sectors_layer import SectorsLayer
+
+                _secs: list[_Sector] = list(sectors)
+                SectorsLayer(show_labels=self.show_sector_labels).draw(
+                    canvas,
+                    center_lat=center_lat,
+                    center_lon=center_lon,
+                    range_nm=self.range_nm,
+                    sectors=_secs,
+                    screen_size=(w, h),
+                    rotation_deg=self.rotation_deg,
                 )
-                label_x = cx + r_px + int(rr_cfg.get("offset_x_px", 4))
-                label_y = cy + int(rr_cfg.get("offset_y_px", -8))
+            except Exception:
+                pass
+
+        # z-index 1: Airports
+        if self.show_airports and airports:
+            try:
+                from pocketscope.data.airports import Airport
+
+                aps: list[Airport] = []
+                for lat, lon, ident in airports:
+                    aps.append(
+                        Airport(
+                            ident=str(ident).upper(), lat=float(lat), lon=float(lon)
+                        )
+                    )
+                AirportsLayer(font_px=self.label_font_px).draw(
+                    canvas,
+                    center_lat=center_lat,
+                    center_lon=center_lon,
+                    range_nm=self.range_nm,
+                    airports=aps,
+                    screen_size=(w, h),
+                    rotation_deg=self.rotation_deg,
+                    range_ring_exclusions=range_ring_exclusions,
+                    runway_sqlite=runway_sqlite,
+                    runway_icons=runway_icons,
+                )
+            except Exception:
+                pass
+
+        # z-index 2: Range rings (circles only)
+        for r_px in ring_radii:
+            canvas.circle((cx, cy), r_px, width=1, color=ColorRings)
+
+        # z-index 3: Range ring labels
+        if ring_label_specs:
+            for label_x, label_y, label_text in ring_label_specs:
                 canvas.text(
                     (label_x, label_y),
                     label_text,
                     size_px=self.label_font_px,
                     color=ColorLabels,
-                )
-                # Add exclusion zone around this label
-                # Estimate label dimensions (conservative monospace assumption)
-                char_w = max(6, int(round(self.label_font_px * 0.6)))
-                label_w = len(label_text) * char_w
-                label_h = self.label_font_px
-                # Add some padding around the label
-                padding = int(rr_cfg.get("padding_px", 4))
-                range_ring_exclusions.append(
-                    (
-                        label_x - padding,
-                        label_y - padding,
-                        label_w + 2 * padding,
-                        label_h + 2 * padding,
-                    )
                 )
 
         # Cardinal ticks and labels: draw short pips at N/E/S/W bearings
@@ -310,42 +407,20 @@ class PpiView:
                     )
                 )
 
+        # z-index 4: Cardinal direction labels & ticks
         _draw_cardinal(0.0, "N")
         _draw_cardinal(90.0, "E")
         _draw_cardinal(180.0, "S")
         _draw_cardinal(270.0, "W")
 
-        # Optional sectors overlay: draw beneath ownship/tracks but above background.
-        if sectors:
-            try:
-                from pocketscope.data.sectors import Sector as _Sector
-                from pocketscope.render.sectors_layer import SectorsLayer
-
-                _secs: list[_Sector] = list(sectors)
-                SectorsLayer().draw(
-                    canvas,
-                    center_lat=center_lat,
-                    center_lon=center_lon,
-                    range_nm=self.range_nm,
-                    sectors=_secs,
-                    screen_size=(w, h),
-                    rotation_deg=self.rotation_deg,
-                )
-            except Exception:
-                # Defensive: ignore any rendering issues to keep PPI robust
-                pass
-
-        # Ownship
+        # z-index 5/6: ownship base marker (below trails/markers for consistency)
         canvas.filled_circle((cx, cy), 4, color=ColorOwnship)
 
         # Origin for ENU conversion
         _ox, _oy, _oz = geodetic_to_ecef(center_lat, center_lon, 0.0)
 
         def _enu_to_screen_rot(e: float, n: float) -> Tuple[float, float]:
-            """Rotate ENU by rotation_deg (clockwise positive) and map to screen.
-
-            When rotation is 0, this is identical to enu_to_screen for golden stability.
-            """
+            """Rotate ENU by rotation_deg (clockwise positive) and map to screen."""
             if (self.rotation_deg % 360.0) == 0.0:
                 return enu_to_screen(e, n, m_per_px)
             phi = -radians(self.rotation_deg)
@@ -373,38 +448,52 @@ class PpiView:
                 block_pad_px=self.label_block_pad_px,
             )
 
-        # Airports layer first (so tracks render on top as before)
-        if self.show_airports and airports:
-            try:
-                from pocketscope.data.airports import Airport
-
-                aps: list[Airport] = []
-                for lat, lon, ident in airports:
-                    aps.append(
-                        Airport(
-                            ident=str(ident).upper(), lat=float(lat), lon=float(lon)
-                        )
-                    )
-                AirportsLayer(font_px=self.label_font_px).draw(
-                    canvas,
-                    center_lat=center_lat,
-                    center_lon=center_lon,
-                    range_nm=self.range_nm,
-                    airports=aps,
-                    screen_size=(w, h),
-                    rotation_deg=self.rotation_deg,
-                    range_ring_exclusions=range_ring_exclusions,
-                )
-            except Exception:
-                pass
-
-        # Draw tracks deterministically
+        # Draw tracks deterministically. We now split trails (z=5) and aircraft
+        # glyph markers (z=6) into separate passes so ALL markers render above
+        # ALL trails regardless of per-track ordering. This satisfies the
+        # requirement that aircraft markers are always on top of any tracks.
         _tracks = list(tracks)
         _tracks.sort(key=lambda t: ((t.callsign or ""), t.icao))
+
+        # Precompute screen position and visibility for labels; store geometry
+        from typing import List as _List
+        from typing import TypedDict
+
+        class _Precomp(TypedDict):
+            track: TrackSnapshot
+            gx: int
+            gy: int
+            visible_for_label: bool
+
+        precomp: _List[_Precomp] = []
         for t in _tracks:
             gx, gy = to_screen(t.lat, t.lon)
+            visible_for_label = True
+            if self.show_data_blocks:
+                if not (0 <= gx < w and 0 <= gy < h):
+                    visible_for_label = False
+                else:
+                    dx_ = gx - cx
+                    dy_ = gy - cy
+                    if (dx_ * dx_ + dy_ * dy_) > (radius_px * radius_px):
+                        visible_for_label = False
+                    elif occlusions:
+                        for ox, oy, ow, oh in occlusions:
+                            if ox <= gx < ox + ow and oy <= gy < oy + oh:
+                                visible_for_label = False
+                                break
+            precomp.append(
+                {
+                    "track": t,
+                    "gx": gx,
+                    "gy": gy,
+                    "visible_for_label": visible_for_label,
+                }
+            )
 
-            # Trail under glyph
+        # Pass 1: trails (z=5)
+        for pc in precomp:
+            t = pc["track"]
             if t.trail_enu:
                 pts: List[Tuple[int, int]] = []
                 for e, n in t.trail_enu:
@@ -413,20 +502,26 @@ class PpiView:
                 if len(pts) >= 2:
                     canvas.polyline(pts, width=2, color=ColorTrails)
 
-            # Glyph
+        # Pass 2: glyphs (z=6) & labels
+        for pc in precomp:
+            t = pc["track"]
+            gx = pc["gx"]
+            gy = pc["gy"]
+            visible_for_label = pc["visible_for_label"]
+
             if t.course_deg is not None:
                 if (self.rotation_deg % 360.0) == 0.0:
                     rad = radians(t.course_deg)
                 else:
                     rad = radians((t.course_deg + self.rotation_deg) % 360.0)
-                dx = sin(rad)
-                dy = -cos(rad)
-                size = 8
-                tip = (gx + int(round(dx * size)), gy + int(round(dy * size)))
-                base_len = 6
-                base_w = 5
-                bx, by = -dx * base_len, -dy * base_len
-                px, py = -dy, dx
+                dx_f: float = sin(rad)
+                dy_f: float = -cos(rad)
+                size = 5
+                tip = (gx + int(round(dx_f * size)), gy + int(round(dy_f * size)))
+                base_len = 4
+                base_w = 3
+                bx, by = -dx_f * base_len, -dy_f * base_len
+                px, py = -dy_f, dx_f
                 p1 = (
                     gx + int(round(bx + px * base_w)),
                     gy + int(round(by + py * base_w)),
@@ -439,8 +534,11 @@ class PpiView:
             else:
                 canvas.filled_circle((gx, gy), 3, color=ColorAircraft)
 
-            # Labels
-            if self.show_data_blocks and label_formatter is not None:
+            if (
+                self.show_data_blocks
+                and label_formatter is not None
+                and visible_for_label
+            ):
                 ls = LabelTrack(
                     icao24=t.icao,
                     callsign=t.callsign,
@@ -466,12 +564,33 @@ class PpiView:
                         color=ColorLabels,
                     )
 
-        # Draw data blocks last
+        # Draw data blocks last (leader lines z=7, blocks z=8)
         if self.show_data_blocks and label_layout is not None:
-            placements = label_layout.place_blocks(label_items)
+            # Ensure labels avoid overlapping a small radius around ownship.
+            # Represent the circular exclusion as a conservative bounding box
+            # so the existing rectangular occlusion API can be reused.
+            ownship_excl_px = 20  # radius in pixels to avoid around ownship
+            ow = ownship_excl_px * 2
+            oh = ownship_excl_px * 2
+            ox = int(cx - ownship_excl_px)
+            oy = int(cy - ownship_excl_px)
+            occl: list[tuple[int, int, int, int]] = []
+            if occlusions:
+                try:
+                    occl.extend(
+                        [
+                            (int(x), int(y), int(w_), int(h_))
+                            for (x, y, w_, h_) in occlusions
+                        ]
+                    )
+                except Exception:
+                    occl.extend(list(occlusions))
+            occl.append((ox, oy, ow, oh))
+            placements = label_layout.place_blocks(label_items, occlusions=occl)
             for p in placements:
                 ax, ay = p.anchor_px
                 w_b, h_b = label_layout.measure(p.lines)
+                # Leader line (z=7)
                 candidates = [
                     (p.x, p.y + h_b // 2),
                     (p.x + w_b, p.y + h_b // 2),
@@ -485,6 +604,18 @@ class PpiView:
                 canvas.line(
                     (ax, ay), (int(cx2), int(cy2)), width=1, color=ColorDataBlock
                 )
+                # Background (z=8) drawn after leader line (z=7) and before text (z=8+)
+                try:
+                    for dy in range(h_b):
+                        y_row = p.y + dy
+                        canvas.line(
+                            (p.x, y_row),
+                            (p.x + w_b - 1, y_row),
+                            width=1,
+                            color=ColorDataBlockBG,
+                        )
+                except Exception:
+                    pass
                 for i, s in enumerate(p.lines):
                     y = p.y + i * (self.label_font_px + self.label_line_gap_px)
                     canvas.text(
