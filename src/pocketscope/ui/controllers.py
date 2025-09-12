@@ -77,6 +77,8 @@ class UiController:
         airports: Optional[list[tuple[float, float, str]]] = None,
         sectors: Optional[object] = None,
         font_px: int = 12,
+        runways_sqlite: str | None = None,
+        runway_icons: bool = False,
     ) -> None:
         # Core references
         self._display = display
@@ -225,6 +227,24 @@ class UiController:
         )
         self._sectors = sectors  # typed only when TYPE_CHECKING
 
+        # Internal prefetch state to avoid scheduling IO every frame.
+        # Key is a tuple: (range_nm_rounded, rotation_deg_rounded, idents)
+        self._last_runway_prefetch_key: Optional[
+            tuple[float, float, tuple[str, ...]]
+        ] = None
+
+        # Runway DB path and flags for icon rendering and prefetching
+        self._runways_sqlite = runways_sqlite
+        self._runway_icons = bool(runway_icons)
+        self._runway_prefetcher = None
+        try:
+            if self._runways_sqlite and self._runway_icons:
+                from pocketscope.data.runways_store import RunwayPrefetcher
+
+                self._runway_prefetcher = RunwayPrefetcher(self._runways_sqlite)
+        except Exception:
+            self._runway_prefetcher = None
+
         # FPS tracking (EMA) + orientation
         self._prev_frame_t: Optional[float] = None
         self._fps_avg: float = float(cfg.target_fps)
@@ -293,6 +313,35 @@ class UiController:
                         self._rotation_deg = 0.0  # enforce lock each frame
                     self._view.rotation_deg = float(self._rotation_deg) % 360.0
                 # Draw PPI view with occlusion rectangles
+                # Prefetch runways for visible airports when PPI state changes
+                try:
+                    if self._runway_prefetcher and self._airports:
+                        from pocketscope.core.geo import haversine_nm
+
+                        idents_to_prefetch: list[str] = []
+                        for lat, lon, ident in self._airports:
+                            if (
+                                haversine_nm(
+                                    self._center_lat, self._center_lon, lat, lon
+                                )
+                                <= self._cfg.range_nm
+                            ):
+                                idents_to_prefetch.append(str(ident).upper())
+
+                        # Create a compact prefetch key and keep each component on
+                        # its own line to satisfy line-length limits.
+                        range_key = round(float(self._cfg.range_nm), 3)
+                        rot_key = round(float(self._rotation_deg), 2)
+                        idents_key = tuple(sorted(idents_to_prefetch))
+                        key = (range_key, rot_key, idents_key)
+                        if key != self._last_runway_prefetch_key:
+                            if idents_to_prefetch:
+                                self._runway_prefetcher.prefetch(idents_to_prefetch)
+                            self._last_runway_prefetch_key = key
+                except Exception:
+                    # Do not allow prefetch failures to break the render loop
+                    pass
+
                 self._view.draw(
                     canvas,
                     size_px=self._display.size(),
@@ -302,6 +351,8 @@ class UiController:
                     airports=self._airports,
                     sectors=cast("Optional[Sequence[Sector]]", self._sectors),
                     occlusions=self._compute_occlusions(),
+                    runway_sqlite=self._runways_sqlite,
+                    runway_icons=self._runway_icons,
                 )
 
                 # Diagnostics overlay

@@ -180,10 +180,13 @@ class ILI9341DisplayBackend(DisplayBackend):
         height: int = 320,
         spi_bus: int = 0,
         spi_dev: int = 0,
-        dc_pin: int = 25,
-        rst_pin: int = 24,
-        led_pin: int = 18,
+        # Default GPIO (BCM) pins updated to match physical wiring on Pi
+        dc_pin: int = 22,
+        rst_pin: int = 18,
+        led_pin: int = 12,
         hz: int = 32_000_000,
+        *,
+        enable_watchdog: bool = True,
     ) -> None:
         # Geometry
         self._w = int(width)
@@ -223,11 +226,15 @@ class ILI9341DisplayBackend(DisplayBackend):
         self._watchdog_interval_s = 0.5
         self._watchdog_thread: threading.Thread | None = None
         self._watchdog_stop = threading.Event()
+        # User-configurable: whether to run the background watchdog thread.
+        self._enable_watchdog = bool(enable_watchdog)
 
         self._init_gpio()
         self._init_spi(spi_bus, spi_dev)
         self._init_panel()
-        self._start_watchdog()
+        # Start watchdog only when enabled and hardware libs present.
+        if self._enable_watchdog:
+            self._start_watchdog()
 
         # Apply persisted/default backlight percentage at startup so the
         # hardware (when present) begins at the requested brightness.

@@ -20,6 +20,31 @@ Example:
 from __future__ import annotations
 
 import os
+import pwd
+
+# Ensure a usable XDG_RUNTIME_DIR exists before importing SDL/pygame.
+# Some platforms (or libraries linked to GLib) will emit:
+#   "XDG_RUNTIME_DIR is invalid or not set in the environment"
+# when the environment variable is missing. Set a safe fallback in /tmp
+# owned by the current user and ensure it has 0700 permissions. We only
+# set this when the variable is not already present.
+if "XDG_RUNTIME_DIR" not in os.environ:
+    try:
+        # Prefer a per-user directory to avoid permission collisions.
+        uid = os.getuid()
+        user = pwd.getpwuid(uid).pw_name
+        _xdg = f"/tmp/xdg-runtime-{user}-{uid}"
+    except Exception:
+        _xdg = "/tmp/xdg-runtime"
+    try:
+        os.makedirs(_xdg, exist_ok=True)
+        # Ensure strict permissions so libraries accept it as a runtime dir
+        os.chmod(_xdg, 0o700)
+        os.environ["XDG_RUNTIME_DIR"] = _xdg
+    except Exception:
+        # If we can't create or chmod the dir, don't fail import; it's only
+        # a best-effort diagnostics/workaround for headless environments.
+        pass
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, Sequence, Tuple

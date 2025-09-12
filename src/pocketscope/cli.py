@@ -44,6 +44,7 @@ def main(argv: list[str] | None = None) -> None:
 
     # Run the async runner using asyncio.run when not already in an event loop
     try:
+        print(f"[cli] Starting with args: {args}")
         asyncio.run(run_async(argv))
     except KeyboardInterrupt:
         # Allow graceful cancellation via Ctrl+C

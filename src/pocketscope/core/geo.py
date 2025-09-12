@@ -52,6 +52,16 @@ def _normalize_lon(lon_deg: float) -> float:
     return round(lon, 12)
 
 
+def _normalize_lon_raw(lon_deg: float) -> float:
+    """Normalize longitude to [-180, 180) without rounding.
+
+    This variant is useful for internal numeric calculations where we must
+    avoid discontinuities caused by rounding when longitudes differ only by
+    multiples of 360 degrees.
+    """
+    return (lon_deg + 180.0) % 360.0 - 180.0
+
+
 def _normalize_bearing(brg_deg: float) -> float:
     """Normalize bearing/azimuth to [0, 360)."""
     return brg_deg % 360.0
@@ -77,7 +87,8 @@ def haversine_nm(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
     phi1 = radians(lat1)
     phi2 = radians(lat2)
     dphi = phi2 - phi1
-    dlambda = radians(_normalize_lon(lon2) - _normalize_lon(lon1))
+    # Use the non-rounding normalizer for math to preserve wrap invariance.
+    dlambda = radians(_normalize_lon_raw(lon2) - _normalize_lon_raw(lon1))
 
     # haversine(a) = sin^2(dphi/2) + cos(phi1)cos(phi2)sin^2(dlambda/2)
     sdphi = sin(dphi * 0.5)
@@ -100,10 +111,23 @@ def initial_bearing_deg(lat1: float, lon1: float, lat2: float, lon2: float) -> f
 
     phi1 = radians(lat1)
     phi2 = radians(lat2)
-    # Compute longitudes in radians separately to reduce cancellation error
-    lam1 = radians(_normalize_lon(lon1))
-    lam2 = radians(_normalize_lon(lon2))
-    dlambda = lam2 - lam1
+    # Compute a canonical longitude difference (lon2 - lon1) normalized to
+    # [-180, 180). This is robust to adding/subtracting multiples of 360 to
+    # either longitude and avoids tiny inconsistencies from separate
+    # normalization/rounding of the two longitudes.
+    norm_lon1 = _normalize_lon(lon1)
+    norm_lon2 = _normalize_lon(lon2)
+    # Remove integer 360-degree offsets so wrapped/unwrapped inputs map to
+    # the same local representatives. For example lon and lon+360 become
+    # numerically close and produce identical small deltas.
+    k = round((lon2 - lon1) / 360.0)
+    lon1c = lon1
+    lon2c = lon2 - k * 360.0
+    # Compute canonical delta lon in degrees in [-180, 180)
+    dlon = (lon2c - lon1c + 180.0) % 360.0 - 180.0
+    # Round to the same precision as _normalize_lon to avoid tiny float noise
+    dlon = round(dlon, 12)
+    dlambda = radians(dlon)
 
     # Degenerate antipodal case: same latitude and ~180 deg longitude separation
     # yields an undefined initial bearing (any great circle through the points
@@ -115,8 +139,6 @@ def initial_bearing_deg(lat1: float, lon1: float, lat2: float, lon2: float) -> f
     # near-antipodal cases surfaced by property tests (e.g. |dlat|≈1e-9 deg)
     # where floating noise produces unstable 0 vs 360 bearings after wraps.
     dlat = abs(lat1 - lat2)
-    norm_lon1 = _normalize_lon(lon1)
-    norm_lon2 = _normalize_lon(lon2)
     if dlat < 1e-8:
         if abs(abs(norm_lon2 - norm_lon1) - 180.0) < 1e-9:
             return 90.0

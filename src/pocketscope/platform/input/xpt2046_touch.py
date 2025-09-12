@@ -49,7 +49,7 @@ class XPT2046Touch:
         self,
         spi_bus: int = 0,
         spi_dev: int = 1,
-        irq_pin: int = 22,
+        irq_pin: int = 13,
         width: int = 240,
         height: int = 320,
         poll_hz: float = 60.0,
@@ -78,7 +78,29 @@ class XPT2046Touch:
         if spidev is None:  # pragma: no cover
             return
         spi = spidev.SpiDev()
-        spi.open(bus, dev)
+        try:
+            spi.open(bus, dev)
+        except FileNotFoundError:
+            # No spidev device present on this system (e.g. running on a
+            # non-Raspberry Pi or SPI not enabled). Don't raise: leave
+            # touch disabled and continue running the application.
+            print(
+                f"[XPT2046Touch] SPI device /dev/spidev{bus}.{dev} not found; "
+                "touch disabled"
+            )
+            return
+        except PermissionError:
+            print(
+                f"[XPT2046Touch] Permission denied opening /dev/spidev{bus}.{dev}; "
+                "touch disabled"
+            )
+            return
+        except OSError as e:
+            # Generic OS-level errors (e.g. bus not present)
+            print(f"[XPT2046Touch] Failed to open SPI device: {e}; touch disabled")
+            return
+
+        # Configure SPI device if opened successfully
         spi.max_speed_hz = 2_000_000
         spi.mode = 0
         self._spi = spi

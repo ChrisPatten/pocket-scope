@@ -14,6 +14,7 @@ Rules
 
 from __future__ import annotations
 
+import os
 from typing import Sequence
 
 from pocketscope.core.geo import (
@@ -23,6 +24,8 @@ from pocketscope.core.geo import (
     haversine_nm,
 )
 from pocketscope.data.airports import Airport
+from pocketscope.data.runways_store import get_runways_for_airport
+from pocketscope.render.airport_icon import AirportIconRenderer
 from pocketscope.render.canvas import Canvas, Color
 from pocketscope.settings.values import THEME
 
@@ -163,6 +166,8 @@ class AirportsLayer:
         screen_size: tuple[int, int],
         rotation_deg: float = 0.0,
         range_ring_exclusions: list[tuple[int, int, int, int]] | None = None,
+        runway_sqlite: str | None = None,
+        runway_icons: bool = False,
     ) -> None:
         """Render airport markers and labels.
 
@@ -230,7 +235,23 @@ class AirportsLayer:
                 continue
 
             sx, sy = to_screen(ap.lat, ap.lon)
-            draw_diamond((sx, sy), size=5)
+            # Prefer runway icon rendering when a sqlite cache file exists.
+            # Do NOT attempt to connect/create sqlite unless the file is present
+            # to avoid accidental DB creation. Fall back to diamond otherwise.
+            if runway_sqlite and os.path.exists(os.path.expanduser(runway_sqlite)):
+                try:
+                    rw = get_runways_for_airport(runway_sqlite, ap.ident)
+                    renderer = AirportIconRenderer(canvas)
+                    # estimate pixels_per_meter from m_per_px
+                    radius_px = max(10, min(W, H) // 2 - 6)
+                    meters_per_nm = 1852.0
+                    m_per_px = (range_nm * meters_per_nm) / float(radius_px)
+                    ppm = 1.0 / m_per_px
+                    renderer.draw((sx, sy), rw, ppm)
+                except Exception:
+                    draw_diamond((sx, sy), size=5)
+            else:
+                draw_diamond((sx, sy), size=5)
 
             # Find best position for label avoiding exclusions and prior labels
             text = ap.ident

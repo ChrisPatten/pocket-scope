@@ -6,7 +6,7 @@
 <!-- Uncomment once published to PyPI: -->
 <!-- [![PyPI](https://img.shields.io/pypi/v/pocketscope)](https://pypi.org/project/pocketscope/) -->
 
-**Current Version:** 0.1.1 *(pi-display branch adds embedded SPI TFT + touch + web UI backends)*
+**Current Version:** 0.1.2
 
 
 PocketScope is a handheld Pi-powered ATC-style scope for decoding and displaying ADS-B traffic. Built with Python, it features a modular, event-driven architecture designed for real-time sensor data processing, deterministic testing, and rapid prototyping.
@@ -477,7 +477,7 @@ async def test_track_behavior():
 - `Canvas` and `DisplayBackend` protocols provide a minimal, framework-agnostic rendering contract in `src/pocketscope/render/canvas.py`.
 - Backends:
     - **Pygame** (desktop + headless via `SDL_VIDEODRIVER=dummy`)
-    - **ILI9341 SPI TFT** (`platform/display/ili9341_backend.py`): RGB565 conversion, chunked SPI writes (2KB), brightness + draw-op heuristics to skip flicker/blank frames, watchdog + exponential backoff recovery, optional 180° flip, replays last good frame after recovery.
+    - **ILI9341 SPI TFT** (`platform/display/ili9341_backend.py`): RGB565 conversion, chunked SPI writes (2KB), brightness + draw-op heuristics to skip flicker/blank frames, watchdog + exponential backoff recovery (disable with `enable_watchdog=False`), optional 180° flip, replays last good frame after recovery.
     - **WebDisplayBackend** (minimal browser view via WebSocket) – optional CLI `--web-ui`.
   - Input:
     - Pygame mouse → tap events.
@@ -503,7 +503,7 @@ Extensive tests in `tests/ui/` assert persistence, hot reload, filter correctnes
 
 #### Display & Input Backends
 - **Pygame** display: `platform/display/pygame_backend.py` (windowed + headless; PNG snapshots for tests)
-- **ILI9341 SPI TFT**: `platform/display/ili9341_backend.py` (RGB565 encode, chunked writes, blink mitigation, watchdog/status ping recovery, last-frame resend, optional flip)
+- **ILI9341 SPI TFT**: `platform/display/ili9341_backend.py` (RGB565 encode, chunked writes, blink mitigation, watchdog/status ping recovery — pass `enable_watchdog=False` to disable, last-frame resend, optional flip)
 - **Web**: `platform/display/web_backend.py` (optional minimal browser rendering)
 - Input:
     - Pygame mouse mapping (`platform/input/pygame_input.py`)
@@ -757,7 +757,7 @@ pre-commit run --all-files
 PocketScope uses TOML configuration files for settings:
 
 - **`pyproject.toml`**: Main project configuration, dependencies, and tool settings
-- **`src/pocketscope/config/default.toml`**: Runtime application configuration
+- **`src/pocketscope/config.py`**: Runtime application configuration and merging of persisted settings + CLI overrides
 - **`.pre-commit-config.yaml`**: Git hook configuration for code quality
 
 Key configuration sections:

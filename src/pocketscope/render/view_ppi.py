@@ -242,6 +242,8 @@ class PpiView:
         airports: Optional[Sequence[Tuple[float, float, str]]] = None,
         sectors: Optional[Sequence["Sector"]] = None,
         occlusions: Optional[Sequence[Tuple[int, int, int, int]]] = None,
+        runway_sqlite: str | None = None,
+        runway_icons: bool = False,
     ) -> None:
         """Draw the PPI view contents.
         - Deterministic: draws tracks sorted by (callsign, icao), optional text
@@ -343,6 +345,8 @@ class PpiView:
                     screen_size=(w, h),
                     rotation_deg=self.rotation_deg,
                     range_ring_exclusions=range_ring_exclusions,
+                    runway_sqlite=runway_sqlite,
+                    runway_icons=runway_icons,
                 )
             except Exception:
                 pass
@@ -562,7 +566,27 @@ class PpiView:
 
         # Draw data blocks last (leader lines z=7, blocks z=8)
         if self.show_data_blocks and label_layout is not None:
-            placements = label_layout.place_blocks(label_items, occlusions=occlusions)
+            # Ensure labels avoid overlapping a small radius around ownship.
+            # Represent the circular exclusion as a conservative bounding box
+            # so the existing rectangular occlusion API can be reused.
+            ownship_excl_px = 20  # radius in pixels to avoid around ownship
+            ow = ownship_excl_px * 2
+            oh = ownship_excl_px * 2
+            ox = int(cx - ownship_excl_px)
+            oy = int(cy - ownship_excl_px)
+            occl: list[tuple[int, int, int, int]] = []
+            if occlusions:
+                try:
+                    occl.extend(
+                        [
+                            (int(x), int(y), int(w_), int(h_))
+                            for (x, y, w_, h_) in occlusions
+                        ]
+                    )
+                except Exception:
+                    occl.extend(list(occlusions))
+            occl.append((ox, oy, ow, oh))
+            placements = label_layout.place_blocks(label_items, occlusions=occl)
             for p in placements:
                 ax, ay = p.anchor_px
                 w_b, h_b = label_layout.measure(p.lines)
