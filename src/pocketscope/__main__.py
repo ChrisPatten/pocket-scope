@@ -1,16 +1,18 @@
-import argparse
+"""Console entrypoint for the pocketscope application.
+
+This module delegates to :mod:`pocketscope.cli` so that running
+``python -m pocketscope`` or the installed ``pocketscope`` console script
+executes the same application code.
+"""
+
+from __future__ import annotations
+
+from pocketscope.cli import main as cli_main
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(
-        prog="pocketscope",
-        description=(
-            "PocketScope: Modular sensor ingest, processing, and " "visualization."
-        ),
-    )
-    parser.add_argument("--version", action="version", version="PocketScope 0.1.0")
-    parser.parse_args()
-    # Add CLI logic here
+    """Application entrypoint (delegates to :func:`pocketscope.cli.main`)."""
+    cli_main()
 
 
 if __name__ == "__main__":

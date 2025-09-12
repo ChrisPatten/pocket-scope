@@ -65,26 +65,24 @@ class TrackService:
         *,
         trail_len_default_s: float = 60.0,
         trail_len_pinned_s: float = 180.0,
-        expiry_s: float = 12.0,
+        expiry_s: float = 300.0,
+        sweep_interval_s: float = 1.0,
         topic_in: str = "adsb.msg",
         topic_out: str = "tracks.updated",
     ) -> None:
-        """Initialize the TrackService.
-
-        Args:
-            bus: EventBus for subscribing to messages and publishing updates
-            ts: TimeSource for time operations
-            trail_len_default_s: Default trail length in seconds for unpinned tracks
-            trail_len_pinned_s: Trail length in seconds for pinned tracks
-            expiry_s: Expiry time in seconds for inactive tracks
-            topic_in: Topic to subscribe to for incoming AdsbMessage events
-            topic_out: Topic to publish track updates to
-        """
         self._bus = bus
         self._ts = ts
         self._trail_len_default_s = trail_len_default_s
         self._trail_len_pinned_s = trail_len_pinned_s
         self._expiry_s = expiry_s
+        # Auto-adjust sweep interval if caller supplies interval larger than
+        # expiry window so that small-expiry tests (e.g. expiry_s=2.0) do not
+        # wait the full original interval before the first sweep. This keeps
+        # production defaults (1s) responsive while ensuring tests advance
+        # simulated time deterministically.
+        if expiry_s > 0 and sweep_interval_s > expiry_s:
+            sweep_interval_s = min(sweep_interval_s, max(0.5, expiry_s / 2.0))
+        self._sweep_interval_s = sweep_interval_s
         self._topic_in = topic_in
         self._topic_out = topic_out
 
@@ -270,7 +268,7 @@ class TrackService:
         """Background loop to expire stale tracks."""
         try:
             while self._running:
-                await self._ts.sleep(1.0)  # Check expiry every second
+                await self._ts.sleep(self._sweep_interval_s)
                 if not self._running:
                     break
 
@@ -345,3 +343,31 @@ class TrackService:
             # Use the track's latest message time as reference for re-trimming
             current_time = track.last_ts.timestamp()
             self._trim_trail(track, current_time)
+
+    # Maintenance helpers -------------------------------------------------
+    def retrim_all(self) -> None:
+        """Force re-trimming of all active track histories.
+
+        Invoked when the global trail length settings change (e.g. user
+        cycles Track Length in the settings menu) so the visual trails
+        shrink immediately instead of waiting for the next position
+        update per track. Uses each track's latest timestamp as the
+        reference time which matches the semantics in :meth:`pin`.
+        """
+        for track in self._tracks.values():
+            try:
+                self._trim_trail(track, track.last_ts.timestamp())
+            except Exception:
+                # Defensive: never let a single bad track block others
+                continue
+
+    # Demo / maintenance utilities ------------------------------------
+    def clear(self) -> None:
+        """Remove all active tracks and reset internal state.
+
+        Used when toggling demo playback on/off so previously ingested
+        tracks (live or demo) do not mix. Intentionally silent and fast.
+        """
+        self._tracks.clear()
+        self._pinned.clear()
+        self._last_position_ts.clear()

@@ -1,0 +1,3 @@
+{"t_mono": 0.0, "msg": {"icao24": "abc123", "callsign": "JBU123", "lat": 42.21, "lon": -71.0, "baro_alt": 5000, "ground_speed": 250, "track_deg": 90}}
+{"t_mono": 0.5, "msg": {"icao24": "def456", "callsign": "DAL456", "lat": 42.35, "lon": -71.1, "baro_alt": 7000, "ground_speed": 280, "track_deg": 45}}
+{"t_mono": 1.0, "msg": {"icao24": "abc123", "callsign": "JBU123", "lat": 42.22, "lon": -70.99, "baro_alt": 5100, "ground_speed": 255, "track_deg": 95}}

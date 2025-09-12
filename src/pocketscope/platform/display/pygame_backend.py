@@ -20,7 +20,33 @@ Example:
 from __future__ import annotations
 
 import os
+import pwd
+
+# Ensure a usable XDG_RUNTIME_DIR exists before importing SDL/pygame.
+# Some platforms (or libraries linked to GLib) will emit:
+#   "XDG_RUNTIME_DIR is invalid or not set in the environment"
+# when the environment variable is missing. Set a safe fallback in /tmp
+# owned by the current user and ensure it has 0700 permissions. We only
+# set this when the variable is not already present.
+if "XDG_RUNTIME_DIR" not in os.environ:
+    try:
+        # Prefer a per-user directory to avoid permission collisions.
+        uid = os.getuid()
+        user = pwd.getpwuid(uid).pw_name
+        _xdg = f"/tmp/xdg-runtime-{user}-{uid}"
+    except Exception:
+        _xdg = "/tmp/xdg-runtime"
+    try:
+        os.makedirs(_xdg, exist_ok=True)
+        # Ensure strict permissions so libraries accept it as a runtime dir
+        os.chmod(_xdg, 0o700)
+        os.environ["XDG_RUNTIME_DIR"] = _xdg
+    except Exception:
+        # If we can't create or chmod the dir, don't fail import; it's only
+        # a best-effort diagnostics/workaround for headless environments.
+        pass
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Dict, Sequence, Tuple
 
 from pocketscope.render.canvas import Canvas, Color, DisplayBackend
@@ -117,6 +143,11 @@ class _PygameCanvas(Canvas):
         surf = font.render(s, True, _pygame_color(color))
         self._surface.blit(surf, pos)
 
+    def text_size(self, s: str, size_px: int = 12) -> Tuple[int, int]:
+        font = self._font_cache.get(size_px)
+        w, h = font.size(s)
+        return int(w), int(h)
+
 
 class PygameDisplayBackend(DisplayBackend):
     """Pygame implementation of DisplayBackend with offscreen surface.
@@ -189,4 +220,5 @@ class PygameDisplayBackend(DisplayBackend):
         local_pg = pg
         if local_pg is None:  # pragma: no cover - should not happen at runtime
             raise RuntimeError("pygame is not available")
+        Path(path).parent.mkdir(parents=True, exist_ok=True)
         local_pg.image.save(self._surface, path)

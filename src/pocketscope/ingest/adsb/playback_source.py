@@ -9,17 +9,17 @@ Usage example:
     from pocketscope.core.events import EventBus
     from pocketscope.core.time import SimTimeSource
     from pocketscope.ingest.adsb.playback_source import FilePlaybackSource
-    
+
     bus = EventBus()
     ts = SimTimeSource()
     src = FilePlaybackSource("trace.jsonl", ts=ts, bus=bus, speed=2.0)
-    
+
     # Start playback in background
     task = asyncio.create_task(src.run())
-    
+
     # Advance simulation time to trigger events
     ts.advance(1.0)
-    
+
     # Stop playback
     await src.stop()
     await task
@@ -29,7 +29,7 @@ Input trace format (JSONL, one object per line):
   "t_mono": 0.00,
   "msg": {
     "icao24": "abc123",
-    "callsign": "TEST1", 
+    "callsign": "TEST1",
     "lat": 40.0,
     "lon": -74.0,
     "baro_alt": 32000,

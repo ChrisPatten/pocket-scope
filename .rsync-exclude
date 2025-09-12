@@ -1,0 +1,6 @@
+__pycache__
+*/__pycache__
+# exclude any directory whose name starts with a dot (e.g. .git, .venv)
+# matches at any depth (requires rsync with '**' support; rsync 3.1+)
+**/.*/
+pocketscope.egg-info

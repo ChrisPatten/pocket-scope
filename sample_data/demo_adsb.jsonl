@@ -1,0 +1,6 @@
+{"t_mono": 0.0, "msg": {"icao24": "abc123", "callsign": "DEMO1", "lat": 42.0000, "lon": -71.0000, "baro_alt": 12000, "ground_speed": 250, "track_deg": 90}}
+{"t_mono": 2.0, "msg": {"icao24": "abc123", "callsign": "DEMO1", "lat": 42.0005, "lon": -70.9900, "baro_alt": 12100, "ground_speed": 255, "track_deg": 95}}
+{"t_mono": 4.0, "msg": {"icao24": "abc123", "callsign": "DEMO1", "lat": 42.0010, "lon": -70.9800, "baro_alt": 12200, "ground_speed": 260, "track_deg": 100}}
+{"t_mono": 0.5, "msg": {"icao24": "def456", "callsign": "DEMO2", "lat": 41.9950, "lon": -71.0100, "baro_alt": 8000, "ground_speed": 300, "track_deg": 45}}
+{"t_mono": 2.5, "msg": {"icao24": "def456", "callsign": "DEMO2", "lat": 41.9960, "lon": -71.0000, "baro_alt": 8050, "ground_speed": 305, "track_deg": 50}}
+{"t_mono": 4.5, "msg": {"icao24": "def456", "callsign": "DEMO2", "lat": 41.9970, "lon": -70.9900, "baro_alt": 8100, "ground_speed": 310, "track_deg": 55}}
