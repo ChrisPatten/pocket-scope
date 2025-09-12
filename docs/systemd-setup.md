@@ -12,10 +12,9 @@ Store runtime arguments here so you can tweak them without editing the service u
 sudo tee /etc/default/pocketscope-live-view >/dev/null <<'EOF'
 POCKETSCOPE_URL="https://adsb.chrispatten.dev/data/aircraft.json"
 POCKETSCOPE_CENTER="42.00748,-71.20899"
-POCKETSCOPE_SECTORS="./sample_data/us_states.json"
-POCKETSCOPE_FPS="15"
-POCKETSCOPE_TFT="1"
 POCKETSCOPE_HOME="/home/pocketscope/.pocketscope"
+POCKETSCOPE_RUNWAYS_FILE="/home/pocketscope/pocket-scope/src/pocketscope/assets/runways.json"
+POCKETSCOPE_RUNWAYS_SQLITE="/home/pocketscope/.pocketscope/runways.sqlite"
 EOF
 ````
 
@@ -29,6 +28,8 @@ sudo tee /etc/systemd/system/pocketscope.service >/dev/null <<'EOF'
 Description=PocketScope live view (TFT)
 Wants=network-online.target
 After=network-online.target
+StartLimitBurst=10
+StartLimitIntervalSec=60
 
 [Service]
 Type=simple
@@ -40,19 +41,18 @@ Environment=PYTHONUNBUFFERED=1
 # Environment=SDL_VIDEODRIVER=fbcon
 # Environment=SDL_FBDEV=/dev/fb0
 
-ExecStart=/home/pocketscope/pocket-scope/.venv/bin/python -m pocketscope.examples.live_view \
+ExecStart=/home/pocketscope/pocket-scope/.venv/bin/python -m pocketscope \
   --url ${POCKETSCOPE_URL} \
   --center ${POCKETSCOPE_CENTER} \
-  --sectors ${POCKETSCOPE_SECTORS} \
   --tft \
-  --fps ${POCKETSCOPE_FPS} \
+  --runways-geojson ${POCKETSCOPE_RUNWAYS_FILE} \
+  --runways-sqlite ${POCKETSCOPE_RUNWAYS_SQLITE} \
+  --runway-icons
 
 KillSignal=SIGINT
 TimeoutStopSec=15
 Restart=always
 RestartSec=3
-StartLimitBurst=10
-StartLimitIntervalSec=60
 
 # Uncomment if you need additional device access:
 # SupplementaryGroups=gpio,spi,video
@@ -109,10 +109,8 @@ Good for debugging before relying on systemd:
 ```bash
 cd /home/pocketscope/pocket-scope
 . .venv/bin/activate
-python -m pocketscope.examples.live_view \
+python -m pocketscope \
   --url "https://adsb.chrispatten.dev/data/aircraft.json" \
-  --center "42.00748,-71.20899" \
-  --sectors "./sample_data/us_states.json" \
-  --tft --fps 15 --range 30
-```
+  --center "42.00748,-71.20899" 
+````
 
