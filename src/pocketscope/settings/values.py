@@ -108,6 +108,29 @@ _FALLBACK_STATUS_OVERLAY = {
     },
     "enabled": True,
 }
+_FALLBACK_AUTOSCALE = {
+    "enabled": True,
+    "target_count": 12,
+    "deadband_low_ratio": 0.8,
+    "deadband_high_ratio": 1.2,
+    "ema_alpha": 0.4,
+    "confirm_ticks": 2,
+    "radius_nm_min": 3.0,
+    "radius_nm_max": 60.0,
+    "zoom_step_factor_in": 0.8696,
+    "zoom_step_factor_out": 1.15,
+    "alt_min_floor_ft": 0,
+    "alt_max_ceiling_ft": 45000,
+    "alt_step_expand_ft": 2000,
+    "alt_margin_ft": 500,
+    "alt_min_band_ft": 1500,
+    "zoom_cooldown_s": 2.0,
+    "alt_cooldown_s": 2.5,
+    "max_changes_per_5s": 2,
+    "prefer_zoom_bias": 0.7,
+    "protect_focused": True,
+    "include_high_when_quiet": True,
+}
 
 
 # --- Dataclasses ---------------------------------------------------------
@@ -133,6 +156,7 @@ _track_service_defaults: Dict[str, float] = dict(_FALLBACK_TRACK_SERVICE)
 _ppi_cfg: Dict[str, Any] = dict(_FALLBACK_PPI_FMT)
 _settings_screen_cfg: Dict[str, Any] = dict(_FALLBACK_SETTINGS_SCREEN)
 _status_overlay_cfg: Dict[str, Any] = dict(_FALLBACK_STATUS_OVERLAY)
+_autoscale_cfg: Dict[str, Any] = dict(_FALLBACK_AUTOSCALE)
 
 if yaml is not None and _YAML_PATH.exists():  # pragma: no branch - simple path
     try:
@@ -258,6 +282,12 @@ if yaml is not None and _YAML_PATH.exists():  # pragma: no branch - simple path
             en = so.get("enabled")
             if isinstance(en, bool):
                 _status_overlay_cfg["enabled"] = en
+        # Autoscale
+        as_ = raw.get("autoscale")
+        if isinstance(as_, dict):
+            _autoscale_cfg.update(
+                {k: v for k, v in as_.items() if k in _FALLBACK_AUTOSCALE}
+            )
     except Exception:  # pragma: no cover - defensive parse guard
         pass
 
@@ -276,6 +306,7 @@ TRACK_SERVICE_DEFAULTS: Dict[str, float] = dict(_track_service_defaults)
 PPI_CONFIG: Dict[str, Any] = dict(_ppi_cfg)
 SETTINGS_SCREEN_CONFIG: Dict[str, Any] = dict(_settings_screen_cfg)
 STATUS_OVERLAY_CONFIG: Dict[str, Any] = dict(_status_overlay_cfg)
+AUTOSCALE_CONFIG: Dict[str, Any] = dict(_autoscale_cfg)
 
 __all__ = [
     "UNITS_ORDER",

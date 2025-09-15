@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import Any
+
 from pydantic import BaseModel, Field, field_validator, model_validator
 
 from .values import (
@@ -11,6 +13,62 @@ from .values import (
     TRACK_SERVICE_DEFAULTS,
     UNITS_ORDER,
 )
+
+
+class Autoscale(BaseModel):
+    """Optional autoscale block persisted to settings.json.
+
+    Mirrors the tunables used by the AutoScale controller. Keeping this
+    typed on the Settings model ensures unknown top-level keys like
+    ``autoscale`` are preserved when the Settings model is written back
+    to disk.
+    """
+
+    enabled: bool = Field(default=True)
+    target_count: int = Field(default=12)
+    deadband_low_ratio: float = Field(default=0.8)
+    deadband_high_ratio: float = Field(default=1.2)
+
+    ema_alpha: float = Field(default=0.4)
+    confirm_ticks: int = Field(default=2)
+
+    radius_nm_min: float = Field(default=3.0)
+    radius_nm_max: float = Field(default=60.0)
+    zoom_step_factor_in: float = Field(default=0.8696)
+    zoom_step_factor_out: float = Field(default=1.15)
+
+    alt_min_floor_ft: int = Field(default=0)
+    alt_max_ceiling_ft: int = Field(default=45000)
+    alt_step_expand_ft: int = Field(default=2000)
+    alt_margin_ft: int = Field(default=500)
+    alt_min_band_ft: int = Field(default=1500)
+
+    zoom_cooldown_s: float = Field(default=2.0)
+    alt_cooldown_s: float = Field(default=2.5)
+    max_changes_per_5s: int = Field(default=2)
+
+    prefer_zoom_bias: float = Field(default=0.7)
+    protect_focused: bool = Field(default=True)
+    include_high_when_quiet: bool = Field(default=True)
+
+    @field_validator("*")
+    @classmethod
+    def _coerce_numeric(cls, v: Any) -> Any:
+        # coerce numeric-like fields to the expected type where sensible
+        try:
+            if isinstance(v, (int, float, bool, type(None))):
+                return v
+            if isinstance(v, str):
+                # allow numeric strings
+                try:
+                    if "." in v:
+                        return float(v)
+                    return int(v)
+                except Exception:
+                    return v
+        except Exception:
+            pass
+        return v
 
 
 class Settings(BaseModel):
@@ -89,6 +147,11 @@ class Settings(BaseModel):
     track_expiry_s: float = Field(
         default=float(TRACK_SERVICE_DEFAULTS.get("expiry_s", 300.0))
     )
+
+    # Optional typed autoscale config block. When present this is persisted
+    # as part of the Settings JSON so arbitrary top-level keys are not
+    # dropped by save routines that write the Settings model back to disk.
+    autoscale: Autoscale | None = Field(default=None)
 
     @field_validator("units")
     @classmethod

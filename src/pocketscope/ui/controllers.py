@@ -367,6 +367,7 @@ class UiController:
                     # Compute nearest track distance (nm) and altitude (ft)
                     nearest_range_nm = None
                     nearest_alt_ft = None
+                    ac_visible = 0
                     try:
                         from math import asin, cos, radians, sin, sqrt
 
@@ -390,6 +391,7 @@ class UiController:
                         center_lat = float(self._center_lat)
                         center_lon = float(self._center_lon)
                         if isinstance(tracks, (list, tuple)) and tracks:
+                            ac_visible = 0
                             for tr in tracks:
                                 try:
                                     if not tr.history:
@@ -430,6 +432,15 @@ class UiController:
                                         )
                                     if rng is None:
                                         continue
+                                    # Consider track visible if within configured range
+                                    try:
+                                        cfg_range = self._cfg.range_nm
+                                        if isinstance(cfg_range, (int, float)) and (
+                                            rng <= float(cfg_range)
+                                        ):
+                                            ac_visible += 1
+                                    except Exception:
+                                        pass
                                     if (
                                         nearest_range_nm is None
                                         or rng < nearest_range_nm
@@ -441,6 +452,12 @@ class UiController:
                     except Exception:
                         nearest_range_nm = None
                         nearest_alt_ft = None
+
+                    # derive visible count if available
+                    try:
+                        ac_visible_count = ac_visible
+                    except Exception:
+                        ac_visible_count = None
 
                     alt_min_ft, alt_max_ft = self.alt_filter
 
@@ -458,6 +475,7 @@ class UiController:
                         ac_count=len(tracks)
                         if isinstance(tracks, (list, tuple))
                         else None,
+                        ac_visible_count=ac_visible_count,
                         nearest_range_nm=nearest_range_nm,
                         nearest_alt_ft=nearest_alt_ft,
                         alt_filter=self.alt_filter,

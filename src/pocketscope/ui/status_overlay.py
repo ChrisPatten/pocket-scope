@@ -187,6 +187,7 @@ class StatusOverlay:
         last_update_ts: float | None = None,
         elements_layout: List[List[str]] | None = None,
         ac_count: int | None = None,
+        ac_visible_count: int | None = None,
         nearest_range_nm: float | None = None,
         nearest_alt_ft: float | None = None,
         alt_filter: tuple[float | None, float | None] | None = None,
@@ -387,12 +388,19 @@ class StatusOverlay:
                 return f">{_fmt_alt(min_ft)}"
             return f"{_fmt_alt(min_ft)}–{_fmt_alt(max_ft)}"
 
-        def _elem_ac_count(count: int | None) -> str:
-            """Aircraft count in view (AC:12)."""
+        def _elem_ac_count(count: int | None, visible: int | None) -> str:
+            """Aircraft count in view (AC: 45 (12)).
+
+            If the visible count is provided, show it in parentheses.
+            """
             try:
                 if count is None:
-                    return "AC:?"
-                return f"AC:{int(count)}"
+                    base = "AC:?"
+                else:
+                    base = f"AC:{int(count)}"
+                if visible is None:
+                    return base
+                return f"{base}({int(visible)})"
             except Exception:
                 return "AC:?"
 
@@ -446,7 +454,7 @@ class StatusOverlay:
                 "LOWEST": lambda: _elem_lowest(None),
                 "FASTEST": lambda: _elem_fastest(None),
                 "ALTFILTER": lambda: _elem_altfilter(alt_filter),
-                "AC": lambda: _elem_ac_count(ac_count),
+                "AC": lambda: _elem_ac_count(ac_count, ac_visible_count),
                 "": lambda: "",
             }
 

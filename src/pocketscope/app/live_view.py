@@ -25,7 +25,9 @@ from pocketscope.ingest.adsb.playback_source import FilePlaybackSource
 from pocketscope.platform.display.pygame_backend import PygameDisplayBackend
 from pocketscope.platform.display.web_backend import WebDisplayBackend
 from pocketscope.render.view_ppi import PpiView, TrackSnapshot
+from pocketscope.settings.store import SettingsStore
 from pocketscope.tools.config_watcher import ConfigWatcher
+from pocketscope.ui.autoscale_controller import AutoScaleController, AutoscaleSettings
 from pocketscope.ui.controllers import UiConfig, UiController
 from pocketscope.ui.softkeys import SoftKeyBar
 
@@ -263,6 +265,132 @@ async def main_async(args: argparse.Namespace) -> None:
         },
     )
     ui.set_softkeys(bar)
+    # Autoscale: background control loop (1 Hz) that proposes changes.
+    try:
+        # Adapter providing minimal required interface for controller
+        class _ASAdapter:
+            def __init__(self, ui_ctrl: UiController):
+                self._ui = ui_ctrl
+
+            def get_radius_nm(self) -> float:
+                return float(self._ui._cfg.range_nm)
+
+            def get_alt_band_ft(self) -> tuple[int | None, int | None]:
+                try:
+                    return (
+                        getattr(self._ui._settings, "altitude_min_ft", None),
+                        getattr(self._ui._settings, "altitude_max_ft", None),
+                    )
+                except Exception:
+                    return (None, None)
+
+            def ensure_in_view(self, target: dict[str, Any] | Any) -> None:
+                try:
+                    # attempt to recentre slightly by setting center; best-effort
+                    lat_v = target.get("lat")
+                    lon_v = target.get("lon")
+                    if lat_v is None or lon_v is None:
+                        raise ValueError("missing lat/lon")
+                    lat = float(lat_v)
+                    lon = float(lon_v)
+                    self._ui._center_lat = lat
+                    self._ui._center_lon = lon
+                except Exception:
+                    pass
+
+            def in_view(self, lat: float, lon: float, radius_nm: float) -> bool:
+                # reuse haversine helper
+                try:
+                    from pocketscope.core.geo import haversine_nm
+
+                    return haversine_nm(
+                        self._ui._center_lat, self._ui._center_lon, lat, lon
+                    ) <= float(radius_nm)
+                except Exception:
+                    return True
+
+        autoscale_cfg = AutoscaleSettings()
+        # try to load from settings.json if present
+        try:
+            raw: dict[str, Any] = {}
+            sp = SettingsStore.settings_path()
+            if sp.exists():
+                import json
+
+                raw = json.loads(sp.read_text()) or {}
+            acfg = raw.get("autoscale")
+            if isinstance(acfg, dict):
+                # map keys defensively
+                for k, v in acfg.items():
+                    if hasattr(autoscale_cfg, k):
+                        try:
+                            setattr(autoscale_cfg, k, v)
+                        except Exception:
+                            pass
+        except Exception:
+            pass
+
+        _adapter = _ASAdapter(ui)
+        _autoscaler = AutoScaleController(_adapter, autoscale_cfg)
+
+        async def _autoscale_loop() -> None:
+            while True:
+                try:
+                    # Build aircraft list from TrackService quick snapshot
+                    active_tracks = tracks.list_active()
+                    ac_list = []
+                    for tr in active_tracks:
+                        try:
+                            last = tr.history[-1]
+                            geo_alt = tr.state.get("geo_alt") or tr.state.get(
+                                "baro_alt"
+                            )
+                            ac_list.append(
+                                {
+                                    "lat": float(last[1]),
+                                    "lon": float(last[2]),
+                                    "geo_alt": geo_alt,
+                                    "icao24": tr.icao24,
+                                }
+                            )
+                        except Exception:
+                            continue
+                    props = _autoscaler.tick(ac_list, focused=None, now=ts.monotonic())
+                    # Apply proposals: radius -> ui cfg; alt -> settings store
+                    changed = False
+                    # Apply proposals defensively (props may contain None)
+                    rn = props.get("radius_nm")
+                    if rn is not None:
+                        try:
+                            ui._cfg.range_nm = float(rn)
+                            ui._settings.range_nm = float(rn)
+                            SettingsStore.save_debounced(ui._settings)
+                            changed = True
+                        except Exception:
+                            pass
+                    amin = props.get("alt_min_ft")
+                    if amin is not None:
+                        try:
+                            ui._settings.altitude_min_ft = float(amin)
+                            changed = True
+                        except Exception:
+                            pass
+                    amax = props.get("alt_max_ft")
+                    if amax is not None:
+                        try:
+                            ui._settings.altitude_max_ft = float(amax)
+                            changed = True
+                        except Exception:
+                            pass
+                    if changed:
+                        SettingsStore.save_debounced(ui._settings)
+                except Exception:
+                    pass
+                await asyncio.sleep(1.0)
+
+        asyncio.create_task(_autoscale_loop())
+    except Exception:
+        pass
     watcher = ConfigWatcher(bus, poll_hz=2.0)
     asyncio.create_task(watcher.run())
 
