@@ -7,8 +7,7 @@ deploy:
 
 pull-pi:
 	@echo "Pulling pi-display branch on pocketscope.local..."
-	ssh pocketscope.local '\
-		cd ~/pocket-scope && \
+	cd ~/pocket-scope && \
 		git fetch origin && \
 		git checkout pi-display && \
 		git pull origin pi-display && \
