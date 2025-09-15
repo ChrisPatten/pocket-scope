@@ -11,4 +11,4 @@ pull-pi:
 		git fetch origin && \
 		git checkout pi-display && \
 		git pull origin pi-display && \
-		sudo systemctl restart pocketscope.service \
+		sudo systemctl restart pocketscope.service
