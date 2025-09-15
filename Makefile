@@ -12,4 +12,3 @@ pull-pi:
 		git checkout pi-display && \
 		git pull origin pi-display && \
 		sudo systemctl restart pocketscope.service \
-	'
