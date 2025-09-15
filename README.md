@@ -969,6 +969,16 @@ Notes:
 
 Custom altitude filter bounds (user-defined min/max) are supported and tested (`tests/ui/test_altitude_filter_custom_bounds.py`).
 
+### Auto Scale Controller
+
+An optional controller can automatically adjust the map radius and altitude
+filter to keep roughly a target number of aircraft in view. When enabled via
+the `autoscale` block in `settings.json` it runs in the main loop and proposes
+zoom/altitude changes without performing any I/O. The controller exposes a
+`tick()` method and returns a dict of updates for the caller to apply. Tunables
+such as `target_count`, `zoom_step_factor_out`, and altitude ceilings all come
+from the `autoscale` settings block.
+
 ## File Formats
 
 ### ADS-B Trace Format (JSONL)

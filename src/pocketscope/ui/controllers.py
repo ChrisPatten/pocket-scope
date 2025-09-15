@@ -198,6 +198,23 @@ class UiController:
 
         # Softkeys (late-bound via set_softkeys)
         self._softkeys: SoftKeyBar | None = None
+
+        # Auto scale controller (optional)
+        try:
+            auto_cfg = {}
+            path = SettingsStore.settings_path()
+            raw = json.loads(path.read_text())
+            auto_cfg = raw.get("autoscale", {}) if isinstance(raw, dict) else {}
+        except Exception:
+            auto_cfg = {}
+        from pocketscope.autoscale_controller import AutoScaleController
+
+        self._autoscale: AutoScaleController | None
+        try:
+            self._autoscale = AutoScaleController(self, auto_cfg)
+        except Exception:
+            self._autoscale = None
+        self._autoscale_last = 0.0
         self._softkeys_base_actions: dict[str, Callable[[], None]] | None = None
 
         # Config change subscription & listener task
@@ -284,6 +301,38 @@ class UiController:
         self._softkeys.actions["Settings"] = _toggle_settings
         self._softkeys.layout()
 
+    # ------------------------------------------------------------------
+    # Autoscale adapter helpers
+    def get_radius_nm(self) -> float:
+        return float(self._cfg.range_nm)
+
+    def get_alt_band_ft(self) -> tuple[int | None, int | None]:
+        try:
+            lo = getattr(self._settings, "altitude_min_ft", None)
+            hi = getattr(self._settings, "altitude_max_ft", None)
+            if lo is not None:
+                lo = int(lo)
+            if hi is not None:
+                hi = int(hi)
+            return (lo, hi)
+        except Exception:
+            return (None, None)
+
+    def in_view(self, a: Any) -> bool:
+        try:
+            lat = a["lat"] if isinstance(a, dict) else getattr(a, "lat")
+            lon = a["lon"] if isinstance(a, dict) else getattr(a, "lon")
+            from pocketscope.core.geo import haversine_nm
+
+            return haversine_nm(
+                self._center_lat, self._center_lon, float(lat), float(lon)
+            ) <= float(self._cfg.range_nm)
+        except Exception:
+            return True
+
+    def ensure_in_view(self, target: Any) -> None:  # pragma: no cover - stub
+        pass
+
     async def run(self) -> None:
         self._running = True
         dt_target = 1.0 / max(1e-6, float(self._cfg.target_fps))
@@ -303,6 +352,22 @@ class UiController:
 
                 # Build snapshot of active tracks
                 snaps = self._build_snapshots()
+
+                # Autoscale controller tick (~1 Hz)
+                if self._autoscale is not None:
+                    t_ctrl = self._ts.monotonic()
+                    if t_ctrl - self._autoscale_last >= 1.0:
+                        upd = self._autoscale.tick(snaps, now=t_ctrl)
+                        self._autoscale_last = t_ctrl
+                        val = upd.get("radius_nm")
+                        if val is not None:
+                            self._cfg.range_nm = float(val)
+                        val = upd.get("alt_min_ft")
+                        if val is not None:
+                            self._settings.altitude_min_ft = val
+                        val = upd.get("alt_max_ft")
+                        if val is not None:
+                            self._settings.altitude_max_ft = val
 
                 # Render frame
                 canvas = self._display.begin_frame()
