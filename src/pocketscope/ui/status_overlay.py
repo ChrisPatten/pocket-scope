@@ -16,6 +16,7 @@ from typing import Any, Callable, Dict, List, Tuple
 
 from pocketscope.render.canvas import Canvas, Color
 from pocketscope.render.fonts import get_mono
+from pocketscope.settings.schema import Settings
 from pocketscope.settings.values import STATUS_OVERLAY_CONFIG, THEME
 
 # Colors / defaults from theme
@@ -60,7 +61,7 @@ def _measure_text_lines(lines: List[str], *, font_px: int) -> Tuple[int, int]:
                 "/Library/Fonts/Menlo.ttc",
                 "/Library/Fonts/Consolas.ttf",
             ]
-            font = None
+            font: Any = None  # PIL ImageFont instance or fallback
             for p in candidates:
                 try:
                     font = ImageFont.truetype(p, font_px)
@@ -126,48 +127,55 @@ class StatusOverlay:
 
     def __init__(
         self,
-        font_px: int = 12,
+        settings: Settings,
         *,
-        pad_x: int | None = None,
-        pad_y: int | None = None,
-        pad_top: int | None = None,
-        pad_bottom: int | None = None,
+        width_px: int | None = None,
         bg_color: Color = _COLOR_BG,
         text_color: Color = _COLOR_TEXT,
         measure_fn: Callable[[str, int], Tuple[int, int]] | None = None,
-        width_px: int | None = None,
+        elements_layout: List[List[str]] | None = None,
     ) -> None:
-        self.font_px = int(font_px)
+        self.font_px = int(getattr(settings, "status_font_px", 12))
         # Compute sensible defaults scaled to the font size when caller
         # doesn't specify explicit padding values. This keeps the overlay
         # visually consistent across font sizes on different displays.
-        if pad_x is None:
-            self.pad_x = max(2, int(round(self.font_px * 0.3)))
-        else:
-            self.pad_x = max(0, int(pad_x))
-        if pad_y is None:
-            self.pad_y = max(1, int(round(self.font_px * 0.15)))
-        else:
-            self.pad_y = max(0, int(pad_y))
+        self.pad_x = max(2, int(round(self.font_px * 0.3)))
+        self.pad_y = max(1, int(round(self.font_px * 0.15)))
         # Top/bottom padding used to compute automatic panel height
-        if pad_top is None:
-            self.pad_top = max(2, int(round(self.font_px * 0.4)))
+        # Explicit settings values may be None (schema default) meaning
+        # "auto"; only coerce when the attribute is numeric. Previous code
+        # attempted int(None) which raised TypeError breaking UI tests.
+        _auto_top = max(2, int(round(self.font_px * 0.4)))
+        _raw_top = getattr(settings, "status_pad_top_px", None)
+        if isinstance(_raw_top, (int, float)):
+            self.pad_top = int(_raw_top)
         else:
-            self.pad_top = max(0, int(pad_top))
-        if pad_bottom is None:
-            self.pad_bottom = max(2, int(round(self.font_px * 0.25)))
+            self.pad_top = _auto_top
+        _auto_bottom = max(2, int(round(self.font_px * 0.25)))
+        _raw_bottom = getattr(settings, "status_pad_bottom_px", None)
+        if isinstance(_raw_bottom, (int, float)):
+            self.pad_bottom = int(_raw_bottom)
         else:
-            self.pad_bottom = max(0, int(pad_bottom))
+            self.pad_bottom = _auto_bottom
         self.bg_color = bg_color
         self.text_color = text_color
         self.width_px = width_px  # if None we compute dyn based on content
         self._measure_cache: Dict[Tuple[str, int], Tuple[int, int]] = {}
         self._measure_fn = measure_fn or self._measure_text_internal
+        # Optional instance-level layout (list of lists per line)
+        if elements_layout is not None:
+            self._elements_layout = elements_layout
+        else:
+            self._elements_layout = [
+                ["RNG", "NEAR", "AC"],
+                ["CLOCK", "ALTFILTER", "AGE"],
+            ]
 
     # ------------------------------------------------------------------
     def draw(
         self,
         canvas: Canvas,
+        settings: Settings,
         *,
         range_nm: float,
         clock_utc: str,
@@ -176,52 +184,287 @@ class StatusOverlay:
         gps_ok: bool = True,
         imu_ok: bool = True,
         decoder_ok: bool = True,
-        units: str = "nm_ft_kt",
-        demo_mode: bool = False,
+        last_update_ts: float | None = None,
+        elements_layout: List[List[str]] | None = None,
+        ac_count: int | None = None,
+        nearest_range_nm: float | None = None,
+        nearest_alt_ft: float | None = None,
+        alt_filter: tuple[float | None, float | None] | None = None,
     ) -> None:
         # --- Build element arrays (no concatenation) ------------------
+        units = settings.units
+        demo_mode = settings.demo_mode
         if units == "mi_ft_mph":
-            rng = range_nm * 1.15078
-            rng_units = "mi"
+            # assignment retained only if future logic needs converted value;
+            # suppress unused expression
+            _ = range_nm * 1.15078
         elif units == "km_m_kmh":
-            rng = range_nm * 1.852
-            rng_units = "km"
+            _ = range_nm * 1.852
         else:
-            rng = range_nm
-            rng_units = "nm"
+            pass
 
         def mark(ok: bool) -> str:
             return "ok" if ok else "x"
 
-        lat_dir = "N" if center_lat >= 0 else "S"
-        lon_dir = "E" if center_lon >= 0 else "W"
-        lat_el = f"Lat {abs(center_lat):.2f}{lat_dir}"
-        lon_el = f"Lon {abs(center_lon):.2f}{lon_dir}"
+        # The overlay historically showed center Lat/Lon; replace that
+        # with a human-friendly "time since last data update" so the
+        # user can see how stale the displayed tracks are. Both the
+        # LAT and LON element keys map to this single age display.
+        # Element helpers -------------------------------------------------
+        def _format_age(age_s: float | None) -> str:
+            if age_s is None:
+                return "Age ?"
+            try:
+                s = int(round(age_s))
+            except Exception:
+                return "Age ?"
+            if s < 60:
+                return f"Age {s}s"
+            if s < 3600:
+                m = s // 60
+                r = s % 60
+                return f"Age {m}m{r}s" if r else f"Age {m}m"
+            h = s // 3600
+            m = (s % 3600) // 60
+            return f"Age {h}h{m}m" if m else f"Age {h}h"
+
+        def _elem_gps(ok: bool) -> str:
+            return f"GPS {'ok' if ok else 'x'}"
+
+        def _elem_imu(ok: bool) -> str:
+            return f"IMU {'ok' if ok else 'x'}"
+
+        def _elem_dec(ok: bool) -> str:
+            return f"DEC {'ok' if ok else 'x'}"
+
+        def _elem_rng(range_nm: float, units: str) -> str:
+            if units == "mi_ft_mph":
+                rng = range_nm * 1.15078
+                rng_units = "mi"
+            elif units == "km_m_kmh":
+                rng = range_nm * 1.852
+                rng_units = "km"
+            else:
+                rng = range_nm
+                rng_units = "nm"
+            return f"RNG {rng:.0f}{rng_units}"
+
+        def _elem_clock(clock_utc: str) -> str:
+            return clock_utc
+
+        def _elem_freshness(
+            last_update_ts: float | None,
+        ) -> tuple[str, str, float | None]:
+            # returns an AGE sentinel: ('AGE', label, age_s)
+            if last_update_ts is None:
+                return ("AGE", _format_age(None), None)
+            try:
+                import time
+
+                now = time.time()
+                age_s = max(0.0, now - float(last_update_ts))
+                return ("AGE", _format_age(age_s), age_s)
+            except Exception:
+                return ("AGE", _format_age(None), None)
+
+        def _elem_loc(lat: float | None, lon: float | None) -> str:
+            """Format a compact location string for the center point.
+
+            Returns a two-part lat/lon like 'N42.1234 W71.5678'. If either
+            coordinate is None, returns '?' in place.
+            """
+
+            def fmt_lat(v: float | None) -> str:
+                if v is None:
+                    return "?"
+                try:
+                    v = float(v)
+                except Exception:
+                    return "?"
+                hemi = "N" if v >= 0 else "S"
+                return f"{hemi}{abs(v):.4f}"
+
+            def fmt_lon(v: float | None) -> str:
+                if v is None:
+                    return "?"
+                try:
+                    v = float(v)
+                except Exception:
+                    return "?"
+                hemi = "E" if v >= 0 else "W"
+                return f"{hemi}{abs(v):.4f}"
+
+            return f"{fmt_lat(lat)} {fmt_lon(lon)}"
+
+        # --- Additional element helpers requested by UI config -------
+        def _fmt_alt(alt_ft: float | None) -> str:
+            """Format an altitude in feet into a compact label.
+
+            Uses flight levels (FLnnn) for altitudes >= 10000 ft, and
+            otherwise shows feet or abbreviated thousands (e.g. 10k).
+            """
+            if alt_ft is None:
+                return "?"
+            try:
+                af = int(round(float(alt_ft)))
+            except Exception:
+                return "?"
+            if af >= 10000:
+                # Flight level: 35000ft -> FL350
+                fl = int(round(af / 100.0))
+                return f"FL{fl}"
+            if af >= 1000 and af % 1000 == 0:
+                return f"{af // 1000}k"
+            if af >= 1000:
+                # show one decimal for non-round thousands
+                return f"{af/1000:.1f}k"
+            return f"{af}ft"
+
+        def _elem_near(
+            range_nm_val: float | None, alt_ft: float | None, units_in: str = "nm_ft_kt"
+        ) -> str:
+            """Nearest target summary: "NEAR: 2.1nm / 3200ft".
+
+            Accepts range in nautical miles and altitude in feet and
+            converts range to configured units.
+            """
+            if range_nm_val is None:
+                rng_label = "?"
+            else:
+                try:
+                    if units_in == "mi_ft_mph":
+                        rng = range_nm_val * 1.15078
+                        ru = "mi"
+                    elif units_in == "km_m_kmh":
+                        rng = range_nm_val * 1.852
+                        ru = "km"
+                    else:
+                        rng = range_nm_val
+                        ru = "nm"
+                    # use one decimal place for small ranges
+                    rng_label = f"{rng:.1f}{ru}"
+                except Exception:
+                    rng_label = "?"
+            return f"NEAR:{rng_label}/{_fmt_alt(alt_ft)}"
+
+        def _elem_highest(alt_ft: float | None) -> str:
+            """Highest target: small up-arrow + altitude (▲FL350)."""
+            return f"▲{_fmt_alt(alt_ft)}"
+
+        def _elem_lowest(alt_ft: float | None) -> str:
+            """Lowest target: small down-arrow + altitude (▼1500ft)."""
+            return f"▼{_fmt_alt(alt_ft)}"
+
+        def _elem_fastest(spd_kt: float | None) -> str:
+            """Fastest target speed summary (SPD 480kt)."""
+            if spd_kt is None:
+                return "SPD ?"
+            try:
+                s = int(round(float(spd_kt)))
+                return f"SPD {s}kt"
+            except Exception:
+                return "SPD ?"
+
+        def _elem_altfilter(
+            alt_filter: tuple[float | None, float | None] | None
+        ) -> str:
+            """Altitude filter description e.g. ">FL100" or "0–10k".
+
+            Uses en-dash separator for ranges when both bounds are
+            present.
+            """
+            if alt_filter is None:
+                min_ft, max_ft = None, None
+            else:
+                min_ft, max_ft = alt_filter
+
+            if min_ft is None and max_ft is None:
+                return "ALT All"
+            if min_ft is None:
+                return f"< {_fmt_alt(max_ft)}"
+            if max_ft is None:
+                # show lower bound as a 'greater than' filter
+                return f">{_fmt_alt(min_ft)}"
+            return f"{_fmt_alt(min_ft)}–{_fmt_alt(max_ft)}"
+
+        def _elem_ac_count(count: int | None) -> str:
+            """Aircraft count in view (AC:12)."""
+            try:
+                if count is None:
+                    return "AC:?"
+                return f"AC:{int(count)}"
+            except Exception:
+                return "AC:?"
+
         cfg_elems = STATUS_OVERLAY_CONFIG.get("elements", {})
-        # Build line1
-        line1_keys = cfg_elems.get("line1", ["GPS", "IMU", "DEC", "RNG"])
-        line1: List[str] = []
-        for key in line1_keys:
-            k = key.upper()
-            if k == "GPS":
-                line1.append(f"GPS {mark(gps_ok)}")
-            elif k == "IMU":
-                line1.append(f"IMU {mark(imu_ok)}")
-            elif k == "DEC":
-                line1.append(f"DEC {mark(decoder_ok)}")
-            elif k == "RNG":
-                line1.append(f"RNG {rng:.0f}{rng_units}")
-        line2_keys = cfg_elems.get("line2", ["CLOCK", "LAT", "LON"])
-        line2: List[str] = []
-        for key in line2_keys:
-            k = key.upper()
-            if k == "CLOCK":
-                line2.append(clock_utc)
-            elif k == "LAT":
-                line2.append(lat_el)
-            elif k == "LON":
-                line2.append(lon_el)
-        lines: List[List[str]] = [line1, line2]
+
+        def _outside_in_order(n: int) -> List[int]:
+            # produces indices in order: 0, n-1, 1, n-2, 2, ...
+            out: List[int] = []
+            lo = 0
+            hi = n - 1
+            while lo <= hi:
+                out.append(lo)
+                lo += 1
+                if lo <= hi:
+                    out.append(hi)
+                    hi -= 1
+            return out
+
+        # Build lines by placing provided element keys into outside-in
+        # positions so outer elements occupy edges and additional
+        # elements move inward.
+        lines: List[List[object]] = []
+        for keys in self._elements_layout:
+            # keys is a list of element keys for this line
+            if not isinstance(keys, (list, tuple)):
+                # allow a single string to represent a single-cell line
+                keys = [keys]
+            # normalize element keys to uppercase strings; legacy LAT/LON
+            # references removed — use LOC for lat/lon and AGE for freshness.
+            norm: List[str] = [str(k).upper() for k in keys]
+
+            n = max(1, len(norm))
+            cells: List[object] = [""] * n
+            _outside_in_order(n)
+
+            # dispatch map: keys -> zero-arg callables that build cell
+            dispatch: Dict[str, Callable[[], object]] = {
+                "GPS": lambda: _elem_gps(gps_ok),
+                "IMU": lambda: _elem_imu(imu_ok),
+                "DEC": lambda: _elem_dec(decoder_ok),
+                "RNG": lambda: _elem_rng(range_nm, units),
+                "CLOCK": lambda: _elem_clock(clock_utc),
+                "AGE": lambda: _elem_freshness(last_update_ts),
+                "LOC": lambda: _elem_loc(center_lat, center_lon),
+                "NEAR": lambda: _elem_near(
+                    nearest_range_nm if nearest_range_nm is not None else None,
+                    nearest_alt_ft,
+                    units,
+                ),
+                "HIGHEST": lambda: _elem_highest(None),
+                "LOWEST": lambda: _elem_lowest(None),
+                "FASTEST": lambda: _elem_fastest(None),
+                "ALTFILTER": lambda: _elem_altfilter(alt_filter),
+                "AC": lambda: _elem_ac_count(ac_count),
+                "": lambda: "",
+            }
+
+            for src_idx, key in enumerate(norm):
+                # Place elements in left-to-right order matching the provided list
+                # (use src index). This aligns visual order with the config
+                # element lists so ['RNG','NEAR','AC'] renders left->right.
+                pos = src_idx
+                key_u = str(key)
+                maker = dispatch.get(key_u.upper())
+                if maker is not None:
+                    try:
+                        cells[pos] = maker()
+                    except Exception:
+                        cells[pos] = str(key)
+                else:
+                    cells[pos] = str(key)
+            lines.append(cells)
         if demo_mode:
             demo_line = cfg_elems.get("demo_line", "DEMO MODE")
             lines.append([demo_line])  # third single-cell line
@@ -237,10 +480,17 @@ class StatusOverlay:
         for cells in lines:
             total_w = 0
             for text in cells:
+                # Cells may be plain strings or a tuple sentinel for special
+                # rendering (e.g. ('_AGE', age_el)). Use the visible label
+                # for measurement.
+                if isinstance(text, tuple) and len(text) >= 2:
+                    label = str(text[1])
+                else:
+                    label = str(text)
                 try:
-                    tw, _ = measure(text, self.font_px)
+                    tw, _ = measure(label, self.font_px)
                 except Exception:
-                    tw = int(self.font_px * 0.6) * len(text)
+                    tw = int(self.font_px * 0.6) * len(label)
                 total_w += tw + 2 * self.pad_x
             # Ensure at least a tiny width to avoid zero / negative cases
             line_widths.append(max(1, int(total_w)))
@@ -262,16 +512,115 @@ class StatusOverlay:
             cell_w = width // n
             for i, text in enumerate(cells):
                 x0 = i * cell_w
-                try:
-                    tw, th = measure(text, self.font_px)
-                except Exception:
-                    tw, th = (int(self.font_px * 0.6) * len(text), self.font_px)
-                inner_left = x0 + self.pad_x
-                inner_right = x0 + cell_w - self.pad_x
-                avail_w = max(1, inner_right - inner_left)
-                tx = inner_left + max(0, (avail_w - tw) // 2)
-                ty = y + (line_height - th) // 2
-                canvas.text((tx, ty), text, size_px=self.font_px, color=self.text_color)
+                # If this is a special AGE cell, render a colored rounded
+                # badge instead of plain text.
+                # Freshness sentinel is ('AGE', label, age_s)
+                if isinstance(text, tuple) and len(text) >= 2 and text[0] == "AGE":
+                    label = str(text[1])
+                    age_val = None
+                    if len(text) >= 3:
+                        try:
+                            age_val = float(text[2]) if text[2] is not None else None
+                        except Exception:
+                            age_val = None
+                    # Determine state from numeric age (if available)
+                    if age_val is None:
+                        state = "STALE"
+                    else:
+                        if age_val < 5.0:
+                            state = "LIVE"
+                        elif age_val < 10.0:
+                            state = "DELAY"
+                        else:
+                            state = "STALE"
+
+                    # Badge label and colors per rules
+                    if state == "LIVE":
+                        badge_text = "LIVE"
+                        bg = (0, 160, 0, 255)  # green
+                        fg = (255, 255, 255, 255)  # white
+                    elif state == "DELAY":
+                        badge_text = "DELAY"
+                        bg = (255, 165, 0, 255)  # orange
+                        fg = (0, 0, 0, 255)  # black
+                    else:
+                        badge_text = "STALE"
+                        bg = (200, 0, 0, 255)  # red
+                        fg = (255, 255, 255, 255)  # white
+
+                    # Measure badge text
+                    try:
+                        tw, th = measure(badge_text, self.font_px)
+                    except Exception:
+                        tw, th = (
+                            int(self.font_px * 0.6) * len(badge_text),
+                            self.font_px,
+                        )
+
+                    # Badge sizing
+                    badge_pad_x = max(5, int(self.font_px * 0.4))
+                    badge_h = max(self.font_px, th) + 3
+                    badge_w = tw + 2 * badge_pad_x
+                    badge_radius = badge_h // 2
+
+                    # Right-align badge within the panel (use panel width)
+                    cy = y + (line_height // 2)
+                    # place badge flush to the right edge with pad
+                    cx = max(self.pad_x, width - self.pad_x - badge_w)
+
+                    # Draw pill: two filled circles and a thick line between
+                    left_center = (cx + badge_radius, cy)
+                    right_center = (cx + badge_w - badge_radius, cy)
+                    # central bar
+                    canvas.line(
+                        (left_center[0], cy),
+                        (right_center[0], cy),
+                        width=badge_h,
+                        color=bg,
+                    )
+                    # end caps
+                    canvas.filled_circle(left_center, badge_radius, bg)
+                    canvas.filled_circle(right_center, badge_radius, bg)
+
+                    # Draw text centered in badge (vertical center using text height)
+                    text_tx = cx + max(0, (badge_w - tw) // 2)
+                    text_ty = cy - (th // 2) - 3
+                    canvas.text(
+                        (text_tx, text_ty), badge_text, size_px=self.font_px, color=fg
+                    )
+
+                else:
+                    # Plain text rendering
+                    s = (
+                        text[1]
+                        if isinstance(text, tuple) and len(text) >= 2
+                        else str(text)
+                    )
+                    if s == "":
+                        # empty placeholder (used when AGE was already placed)
+                        continue
+                    try:
+                        tw, th = measure(str(s), self.font_px)
+                    except Exception:
+                        tw, th = (int(self.font_px * 0.6) * len(str(s)), self.font_px)
+                    inner_left = x0 + self.pad_x
+                    inner_right = x0 + cell_w - self.pad_x
+                    avail_w = max(1, inner_right - inner_left)
+                    # Alignments:
+                    # - first element: left-aligned with no extra padding
+                    # - last element: right-aligned to inner_right
+                    # - others: centered
+                    if i == 0:
+                        tx = x0
+                    elif i == (n - 1):
+                        # place text as far right as possible but don't overflow
+                        tx = max(inner_left, inner_right - tw)
+                    else:
+                        tx = inner_left + max(0, (avail_w - tw) // 2)
+                    ty = y + (line_height - th) // 2
+                    canvas.text(
+                        (tx, ty), str(text), size_px=self.font_px, color=self.text_color
+                    )
             y += line_height
 
     # No border: overlay is a translucent band only
@@ -288,29 +637,20 @@ class StatusOverlay:
             try:
                 from PIL import ImageFont
 
-                # Try to obtain a truetype font similar to the backend's
-                # _FontCache; fall back to default ImageFont if not found.
+                pil_font: Any
                 try:
-                    # Use a common monospace name first; if it fails,
-                    # ImageFont.load_default will provide a bitmap font.
-                    font = ImageFont.truetype("DejaVuSansMono.ttf", size_px)
+                    pil_font = ImageFont.truetype("DejaVuSansMono.ttf", size_px)
                 except Exception:
                     try:
-                        font = ImageFont.load_default()
+                        pil_font = ImageFont.load_default()
                     except Exception:
-                        font = None
-                # Initialize wh to a conservative estimate; may be replaced
-                # by precise measurement below. This avoids mypy thinking
-                # the name is conditionally defined in multiple places.
+                        pil_font = None
                 wh = (int(size_px * 0.6) * len(text), size_px)
-                if font is not None:
-                    # Use getmask to obtain rendered mask size which is
-                    # consistent across Pillow font implementations.
+                if pil_font is not None:
                     try:
-                        m = font.getmask(text)
+                        m = pil_font.getmask(text)
                         wh = (m.size[0], m.size[1])
                     except Exception:
-                        # keep conservative fallback
                         pass
             except Exception:
                 # Fallback to pygame if Pillow not available / failed
@@ -320,9 +660,8 @@ class StatusOverlay:
                     _pg.init()
                 if not _pg.font.get_init():
                     _pg.font.init()
-                font = _pg.font.Font(None, size_px)
-                # pygame's size returns a 2-tuple of ints (w,h)
-                wh = font.size(text)
+                pg_font = _pg.font.Font(None, size_px)
+                wh = pg_font.size(text)
         except Exception:
             wh = (int(size_px * 0.6) * len(text), size_px)
         self._measure_cache[key] = wh

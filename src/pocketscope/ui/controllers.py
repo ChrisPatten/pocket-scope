@@ -117,25 +117,7 @@ class UiController:
             disp_w, _disp_h = self._display.size()
         except Exception:
             disp_w = 300  # pragmatic fallback for headless environments
-        # Use persisted status font size when available
-        try:
-            status_px = int(getattr(self._settings, "status_font_px", font_px))
-        except Exception:
-            status_px = font_px
-        # Optional explicit top/bottom pads
-        try:
-            st = getattr(self._settings, "status_pad_top_px", None)
-            sb = getattr(self._settings, "status_pad_bottom_px", None)
-            if st is not None:
-                st = int(st)
-            if sb is not None:
-                sb = int(sb)
-        except Exception:
-            st = None
-            sb = None
-        self._overlay = StatusOverlay(
-            font_px=status_px, pad_top=st, pad_bottom=sb, width_px=disp_w
-        )
+        self._overlay = StatusOverlay(self._settings, width_px=disp_w)
         self._cfg.range_nm = float(self._settings.range_nm)
         self.units = self._settings.units
         self.track_length_s = float(getattr(self._settings, "track_length_s", 45.0))
@@ -363,8 +345,108 @@ class UiController:
                     )  # still computed to keep EMA warm
                     # Future: health flags derived from services; for now assume True
                     clock_utc = self._fmt_clock(self._ts.wall_time())
+                    # Compute most recent track timestamp across active
+                    # tracks so the overlay can display the age of the
+                    # latest data. If no tracks exist, pass None.
+                    tracks = []
+                    latest_ts: float | None = None
+                    try:
+                        tracks = self._tracks.list_active()
+                        for tr in tracks:
+                            try:
+                                t = tr.last_ts.timestamp()
+                                if latest_ts is None or t > latest_ts:
+                                    latest_ts = t
+                            except Exception:
+                                continue
+                    except Exception:
+                        # leave tracks as [] and latest_ts as None
+                        tracks = []
+                        latest_ts = None
+
+                    # Compute nearest track distance (nm) and altitude (ft)
+                    nearest_range_nm = None
+                    nearest_alt_ft = None
+                    try:
+                        from math import asin, cos, radians, sin, sqrt
+
+                        def _haversine_nm(
+                            lat1: float, lon1: float, lat2: float, lon2: float
+                        ) -> float:
+                            R = 6371000.0
+                            dlat = radians(lat2 - lat1)
+                            dlon = radians(lon2 - lon1)
+                            a = (
+                                sin(dlat / 2) ** 2
+                                + cos(radians(lat1))
+                                * cos(radians(lat2))
+                                * sin(dlon / 2) ** 2
+                            )
+                            c = 2 * asin(min(1, sqrt(a)))
+                            meters = R * c
+                            nm = meters / 1852.0
+                            return nm
+
+                        center_lat = float(self._center_lat)
+                        center_lon = float(self._center_lon)
+                        if isinstance(tracks, (list, tuple)) and tracks:
+                            for tr in tracks:
+                                try:
+                                    if not tr.history:
+                                        continue
+                                    last = tr.history[-1]
+                                    lat = float(last[1])
+                                    lon = float(last[2])
+                                    alt = None
+                                    try:
+                                        # last[3] may be altitude sample
+                                        if isinstance(last[3], (int, float)):
+                                            alt = float(last[3])
+                                    except Exception:
+                                        alt = None
+                                    rng = None
+                                    # Prefer a view helper if available
+                                    try:
+                                        fn = getattr(
+                                            self._view, "great_circle_range_nm", None
+                                        )
+                                        if callable(fn):
+                                            _res = fn(
+                                                (lat, lon), (center_lat, center_lon)
+                                            )
+                                            try:
+                                                if isinstance(_res, (int, float)):
+                                                    rng = float(_res)
+                                                else:
+                                                    # try string-conversion fallback
+                                                    rng = float(str(_res))
+                                            except Exception:
+                                                rng = None
+                                    except Exception:
+                                        rng = None
+                                    if rng is None:
+                                        rng = _haversine_nm(
+                                            lat, lon, center_lat, center_lon
+                                        )
+                                    if rng is None:
+                                        continue
+                                    if (
+                                        nearest_range_nm is None
+                                        or rng < nearest_range_nm
+                                    ):
+                                        nearest_range_nm = rng
+                                        nearest_alt_ft = alt
+                                except Exception:
+                                    continue
+                    except Exception:
+                        nearest_range_nm = None
+                        nearest_alt_ft = None
+
+                    alt_min_ft, alt_max_ft = self.alt_filter
+
                     self._overlay.draw(
                         canvas,
+                        self._settings,
                         range_nm=self._cfg.range_nm,
                         clock_utc=clock_utc,
                         center_lat=self._center_lat,
@@ -372,8 +454,13 @@ class UiController:
                         gps_ok=True,
                         imu_ok=True,
                         decoder_ok=True,
-                        units=self.units,
-                        demo_mode=self.demo_mode,
+                        last_update_ts=latest_ts,
+                        ac_count=len(tracks)
+                        if isinstance(tracks, (list, tuple))
+                        else None,
+                        nearest_range_nm=nearest_range_nm,
+                        nearest_alt_ft=nearest_alt_ft,
+                        alt_filter=self.alt_filter,
                     )
                 # Settings overlay drawn (softkey mapping already synced earlier)
                 if self._settings_screen.visible:
@@ -543,6 +630,27 @@ class UiController:
         self._settings.altitude_filter = self.altitude_filter
         if persist:
             SettingsStore.save_debounced(self._settings)
+
+    @property
+    def alt_filter(self) -> tuple[float | None, float | None]:
+        """Return active altitude filter bounds (min_ft, max_ft)."""
+        # Prefer explicit min/max from settings if present
+        try:
+            custom_lo = getattr(self._settings, "altitude_min_ft", None)
+            custom_hi = getattr(self._settings, "altitude_max_ft", None)
+            if custom_lo is not None or custom_hi is not None:
+                return (
+                    float(custom_lo) if custom_lo is not None else None,
+                    float(custom_hi) if custom_hi is not None else None,
+                )
+        except (ValueError, TypeError):
+            # Fallback to band if settings values are invalid
+            pass
+
+        # Otherwise, use the selected band
+        band = getattr(self, "altitude_filter", "All")
+        lo_hi = ALTITUDE_FILTER_BANDS.get(band, (None, None))
+        return lo_hi[0], lo_hi[1]
 
     def _apply_track_windows(self) -> None:
         presets = list(TRACK_LENGTH_PRESETS_S)
@@ -839,17 +947,7 @@ class UiController:
 
     def _build_snapshots(self) -> list[TrackSnapshot]:
         tracks = self._tracks.list_active()
-        band = self.altitude_filter
-        # Allow explicit min/max altitude override when present in settings
-        try:
-            custom_lo = getattr(self._settings, "altitude_min_ft", None)
-            custom_hi = getattr(self._settings, "altitude_max_ft", None)
-        except Exception:
-            custom_lo = custom_hi = None
-        if custom_lo is not None or custom_hi is not None:
-            lo, hi = custom_lo, custom_hi
-        else:
-            lo, hi = ALTITUDE_FILTER_BANDS.get(band, (None, None))
+        lo, hi = self.alt_filter
         out: list[TrackSnapshot] = []
         # Precompute center ECEF once per frame (avoid repetition inside loop)
         _ox, _oy, _oz = geodetic_to_ecef(self._center_lat, self._center_lon, 0.0)
@@ -873,14 +971,13 @@ class UiController:
                         alt_for_filter = float(last[3])
                 except Exception:
                     pass
-            if (custom_lo is not None or custom_hi is not None) or band != "All":
-                if alt_for_filter is None:
-                    # Exclude tracks lacking altitude when filtering active
-                    continue
-                if lo is not None and alt_for_filter < lo:
-                    continue
-                if hi is not None and alt_for_filter >= hi:
-                    continue
+            if alt_for_filter is None and (lo is not None or hi is not None):
+                # Exclude tracks lacking altitude when filtering active
+                continue
+            if lo is not None and alt_for_filter is not None and alt_for_filter < lo:
+                continue
+            if hi is not None and alt_for_filter is not None and alt_for_filter >= hi:
+                continue
             # Course
             course = None
             v = tr.state.get("track_deg")
@@ -916,7 +1013,11 @@ class UiController:
                         continue
                 window_pts = hist[start_idx:]
             else:
-                window_pts = hist[-int(window_s) :]
+                # Fallback: take the most recent window_s points by count
+                try:
+                    window_pts = hist[-int(window_s) :]
+                except Exception:
+                    window_pts = hist
 
             MAX_POINTS = 600  # hard cap for rendering performance
             RECENT_DENSE = 300  # keep this many newest points unthinned when thinning

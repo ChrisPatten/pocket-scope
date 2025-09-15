@@ -606,6 +606,15 @@ class SettingsScreen:
             suffix = "" if val in presets else "*"
             return f"{int(val)}s{suffix}"
         if item.label == "Altitude Filter":
+            # Special case: if custom bounds are set, show "Custom"
+            try:
+                if (
+                    getattr(self._settings, "altitude_min_ft", None) is not None
+                    or getattr(self._settings, "altitude_max_ft", None) is not None
+                ):
+                    return "Custom"
+            except Exception:
+                pass
             return getattr(controller, "altitude_filter", "All")
         if item.label == "Demo Mode":
             return "ON" if controller.demo_mode else "OFF"
