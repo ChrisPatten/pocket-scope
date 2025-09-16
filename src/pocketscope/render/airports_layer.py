@@ -15,6 +15,7 @@ Rules
 from __future__ import annotations
 
 import os
+from collections.abc import Iterable
 from typing import Sequence
 
 from pocketscope.core.geo import (
@@ -24,7 +25,7 @@ from pocketscope.core.geo import (
     haversine_nm,
 )
 from pocketscope.data.airports import Airport
-from pocketscope.data.runways_store import get_runways_for_airport
+from pocketscope.data.base_map import BaseMap
 from pocketscope.render.airport_icon import AirportIconRenderer
 from pocketscope.render.canvas import Canvas, Color
 from pocketscope.settings.values import THEME
@@ -162,11 +163,11 @@ class AirportsLayer:
         center_lat: float,
         center_lon: float,
         range_nm: float,
-        airports: Sequence[Airport],
+        airports: Sequence[Airport] | None,
         screen_size: tuple[int, int],
         rotation_deg: float = 0.0,
         range_ring_exclusions: list[tuple[int, int, int, int]] | None = None,
-        runway_sqlite: str | None = None,
+        basemap: BaseMap | None = None,
         runway_icons: bool = False,
     ) -> None:
         """Render airport markers and labels.
@@ -229,6 +230,35 @@ class AirportsLayer:
         # Track placed label rectangles to avoid overlaps between airport labels
         placed_labels: list[tuple[int, int, int, int]] = []
 
+        # If airports not provided, try to query from basemap if available.
+        if airports is None and basemap is not None:
+            try:
+                # Approximate bbox from center + range (deg): 1 deg lat ~= 60 NM
+                dlat = float(range_nm) / 60.0
+                from math import cos, radians
+
+                lat_rad = radians(float(center_lat))
+                dlon = float(range_nm) / (60.0 * max(1e-6, cos(lat_rad)))
+                rows = basemap.get_airports_in_view(
+                    float(center_lat) - dlat,
+                    float(center_lat) + dlat,
+                    float(center_lon) - dlon,
+                    float(center_lon) + dlon,
+                )
+                airports = [
+                    Airport(
+                        ident=str(r["identifier"]).upper(),
+                        lat=float(r["lat"]),
+                        lon=float(r["lon"]),
+                    )
+                    for r in rows
+                ]
+            except Exception:
+                airports = []
+
+        if airports is None:
+            airports = []
+
         for ap in airports:
             # Range cull using haversine in NM
             if haversine_nm(center_lat, center_lon, ap.lat, ap.lon) > range_nm:
@@ -238,16 +268,78 @@ class AirportsLayer:
             # Prefer runway icon rendering when a sqlite cache file exists.
             # Do NOT attempt to connect/create sqlite unless the file is present
             # to avoid accidental DB creation. Fall back to diamond otherwise.
-            if runway_sqlite and os.path.exists(os.path.expanduser(runway_sqlite)):
+            if basemap is not None and runway_icons:
                 try:
-                    rw = get_runways_for_airport(runway_sqlite, ap.ident)
-                    renderer = AirportIconRenderer(canvas)
-                    # estimate pixels_per_meter from m_per_px
-                    radius_px = max(10, min(W, H) // 2 - 6)
-                    meters_per_nm = 1852.0
-                    m_per_px = (range_nm * meters_per_nm) / float(radius_px)
-                    ppm = 1.0 / m_per_px
-                    renderer.draw((sx, sy), rw, ppm)
+                    # Prefer fetching runways by airport identifier when possible.
+                    # This avoids using a lat/lon bbox and is more direct.
+                    rw = None
+                    try:
+                        # Try several ident forms to match how runways may be
+                        # stored in the DB (e.g., 'BOS' vs 'KBOS'). Prefer an
+                        # instance method on the basemap if available, but
+                        # fall back to the module-level helper when a sqlite
+                        # path exists on the basemap.
+                        fn = getattr(basemap, "get_runways_for_airport", None)
+                        sqlite_path = getattr(basemap, "sqlite_path", "")
+
+                        candidates = [str(ap.ident).upper()]
+                        # If ident is 3 letters, also try prefixing 'K'
+                        if len(candidates[0]) == 3:
+                            candidates.append("K" + candidates[0])
+                        # If ident starts with 'K' and is 4 letters, also try
+                        # the short form without the 'K'.
+                        if len(candidates[0]) == 4 and candidates[0].startswith("K"):
+                            candidates.append(candidates[0][1:])
+
+                        rw = None
+                        for ident_candidate in candidates:
+                            try:
+                                if callable(fn):
+                                    rw = fn(ident_candidate)
+                                elif sqlite_path and os.path.exists(sqlite_path):
+                                    from pocketscope.data.base_map import (
+                                        get_runways_for_airport,
+                                    )
+
+                                    rw = get_runways_for_airport(
+                                        sqlite_path, ident_candidate
+                                    )
+                                else:
+                                    rw = None
+                            except Exception:
+                                rw = None
+                            if rw:
+                                break
+                    except Exception:
+                        rw = None
+
+                    # If runways were found, render runway icons; otherwise
+                    # fall back to the simple diamond marker.
+                    if rw:
+                        # Ensure runways is a list for the renderer. Handle
+                        # several possible types safely and fall back to an
+                        # empty list if coercion fails.
+                        if isinstance(rw, list):
+                            runways_list = rw
+                        elif isinstance(rw, (tuple, set)):
+                            runways_list = list(rw)
+                        elif isinstance(rw, Iterable):
+                            try:
+                                runways_list = list(rw)
+                            except Exception:
+                                runways_list = []
+                        else:
+                            runways_list = []
+
+                        renderer = AirportIconRenderer(canvas)
+                        # estimate pixels_per_meter from m_per_px
+                        radius_px = max(10, min(W, H) // 2 - 6)
+                        meters_per_nm = 1852.0
+                        m_per_px = (range_nm * meters_per_nm) / float(radius_px)
+                        ppm = 1.0 / m_per_px
+                        renderer.draw((sx, sy), runways_list, ppm)
+                    else:
+                        draw_diamond((sx, sy), size=5)
                 except Exception:
                     draw_diamond((sx, sy), size=5)
             else:

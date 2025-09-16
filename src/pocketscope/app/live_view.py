@@ -17,9 +17,7 @@ from pocketscope.core.geo import ecef_to_enu, geodetic_to_ecef
 from pocketscope.core.models import AircraftTrack
 from pocketscope.core.time import RealTimeSource
 from pocketscope.core.tracks import TrackService
-from pocketscope.data.airports import load_airports_json
-from pocketscope.data.runways_store import RunwayPrefetcher, build_sqlite_from_geojson
-from pocketscope.data.sectors import load_sectors_json
+from pocketscope.data.base_map import BaseMap
 from pocketscope.ingest.adsb.json_source import Dump1090JsonSource
 from pocketscope.ingest.adsb.playback_source import FilePlaybackSource
 from pocketscope.platform.display.pygame_backend import PygameDisplayBackend
@@ -59,11 +57,15 @@ def _make_snapshots(
             continue
 
         # Build simple ENU trail from history
-        enu_trail: list[tuple[float, float]] = []
-        for _, lat, lon, _alt in tr.history[-60:]:  # limit to last ~60 samples
+        enu_trail: list[tuple[float, float, float]] = []
+        for ts_dt, lat, lon, _alt in tr.history[-60:]:  # limit to last ~60 samples
+            try:
+                ts_val = float(ts_dt.timestamp())
+            except Exception:
+                ts_val = 0.0
             tx, ty, tz = geodetic_to_ecef(lat, lon, 0.0)
             e, n, _ = ecef_to_enu(tx, ty, tz, center_lat, center_lon, 0.0)
-            enu_trail.append((e, n))
+            enu_trail.append((e, n, ts_val))
 
         course = None
         if "track_deg" in tr.state and isinstance(tr.state["track_deg"], (int, float)):
@@ -186,52 +188,38 @@ async def main_async(args: argparse.Namespace) -> None:
         label_line_gap_px=args.block_line_gap_px,
     )
 
-    airports = None
-    sectors = None
-    airports_path: str | None = None
-    if args.airports:
-        airports_path = args.airports
-    else:
-        # Try package assets/airports.json automatically (src/pocketscope/assets)
-        try_default1 = Path(__file__).resolve().parents[1] / "assets" / "airports.json"
-        try_default2 = Path.cwd() / "src" / "pocketscope" / "assets" / "airports.json"
-        if try_default1.exists():
-            airports_path = str(try_default1)
-        elif try_default2.exists():
-            airports_path = str(try_default2)
-
-    if airports_path:
+    # Ensure basemap exists and is ingested by default (non-destructive if present)
+    bm_db = str(Path.home() / ".pocketscope" / "basemap.sqlite")
+    try:
+        Path(bm_db).parent.mkdir(parents=True, exist_ok=True)
+        bm = BaseMap(bm_db)
+        # Attempt to ingest known asset files if present; ignore failures.
         try:
-            aps = load_airports_json(airports_path)
-            airports = [(ap.lat, ap.lon, ap.ident) for ap in aps]
-        except Exception as e:
-            print(f"[live_view] Failed to load airports: {e}")
-
-    # Sectors: optional path, default to sample_data/artcc.json if present
-    sectors_path: str | None = None
-    if args.sectors:
-        sectors_path = args.sectors
-    else:
-        # Try package assets/us_states.json automatically (src/pocketscope/assets)
-        try_default1 = Path(__file__).resolve().parents[1] / "assets" / "us_states.json"
-        try_default2 = Path.cwd() / "src" / "pocketscope" / "assets" / "us_states.json"
-        if try_default1.exists():
-            sectors_path = str(try_default1)
-        elif try_default2.exists():
-            sectors_path = str(try_default2)
-
-    if sectors_path:
-        try:
-            secs = load_sectors_json(
-                sectors_path,
-                center_lat=float(args.center[0]),
-                center_lon=float(args.center[1]),
-                range_nm=float(args.range),
-                cull_factor=2.0,
+            runways_asset = (
+                Path(__file__).resolve().parents[1] / "assets" / "runways.json"
             )
-            sectors = secs
-        except Exception as e:
-            print(f"[live_view] Failed to load sectors: {e}")
+            if runways_asset.exists():
+                bm.ingest_runways(str(runways_asset))
+        except Exception:
+            pass
+        try:
+            airports_asset = (
+                Path(__file__).resolve().parents[1] / "assets" / "airports.json"
+            )
+            if airports_asset.exists():
+                bm.ingest_airports(str(airports_asset))
+        except Exception:
+            pass
+        try:
+            states_asset = (
+                Path(__file__).resolve().parents[1] / "assets" / "us_states.json"
+            )
+            if states_asset.exists():
+                bm.ingest_states(str(states_asset))
+        except Exception:
+            pass
+    except Exception:
+        bm = None
 
     ui = UiController(
         display=display,
@@ -242,12 +230,8 @@ async def main_async(args: argparse.Namespace) -> None:
         cfg=UiConfig(range_nm=float(args.range), overlay=True, target_fps=30.0),
         center_lat=float(args.center[0]),
         center_lon=float(args.center[1]),
-        airports=airports,
-        sectors=sectors,
         font_px=args.font_px,
-        # Pass runway config through controller for later use
-        runways_sqlite=getattr(args, "runways_sqlite", None),
-        runway_icons=bool(getattr(args, "runway_icons", False)),
+        # UiController will always use the default basemap DB internally.
     )
     bar = SoftKeyBar(
         display.size(),
@@ -310,7 +294,8 @@ async def main_async(args: argparse.Namespace) -> None:
                     return True
 
         autoscale_cfg = AutoscaleSettings()
-        # try to load from settings.json if present
+        # Only load the persisted enabled flag; all runtime tuning is kept
+        # in-memory and must not be persisted by autoscale logic.
         try:
             raw: dict[str, Any] = {}
             sp = SettingsStore.settings_path()
@@ -319,14 +304,13 @@ async def main_async(args: argparse.Namespace) -> None:
 
                 raw = json.loads(sp.read_text()) or {}
             acfg = raw.get("autoscale")
-            if isinstance(acfg, dict):
-                # map keys defensively
-                for k, v in acfg.items():
-                    if hasattr(autoscale_cfg, k):
-                        try:
-                            setattr(autoscale_cfg, k, v)
-                        except Exception:
-                            pass
+            # Support both legacy boolean and object shapes in settings.json.
+            if isinstance(acfg, bool):
+                autoscale_cfg.enabled = acfg
+            elif isinstance(acfg, dict):
+                val = acfg.get("enabled")
+                if isinstance(val, bool):
+                    autoscale_cfg.enabled = val
         except Exception:
             pass
 
@@ -355,35 +339,45 @@ async def main_async(args: argparse.Namespace) -> None:
                             )
                         except Exception:
                             continue
+
                     props = _autoscaler.tick(ac_list, focused=None, now=ts.monotonic())
-                    # Apply proposals: radius -> ui cfg; alt -> settings store
-                    changed = False
-                    # Apply proposals defensively (props may contain None)
+
+                    # Apply proposals in-memory: update UiController overrides so
+                    # the UI updates without writing to settings.json.
                     rn = props.get("radius_nm")
                     if rn is not None:
                         try:
-                            ui._cfg.range_nm = float(rn)
-                            ui._settings.range_nm = float(rn)
-                            SettingsStore.save_debounced(ui._settings)
-                            changed = True
+                            ui.apply_autoscale_range_override(float(rn))
                         except Exception:
                             pass
-                    amin = props.get("alt_min_ft")
-                    if amin is not None:
+
+                    # Support explicit altitude override proposals (may contain
+                    # None to indicate unbounded). This key takes precedence
+                    # over legacy alt_min/alt_max proposals.
+                    alt_ov = props.get("alt_override")
+                    if alt_ov is not None:
                         try:
-                            ui._settings.altitude_min_ft = float(amin)
-                            changed = True
+                            ui.apply_autoscale_alt_override((alt_ov[0], alt_ov[1]))
                         except Exception:
                             pass
-                    amax = props.get("alt_max_ft")
-                    if amax is not None:
-                        try:
-                            ui._settings.altitude_max_ft = float(amax)
-                            changed = True
-                        except Exception:
-                            pass
-                    if changed:
-                        SettingsStore.save_debounced(ui._settings)
+                    else:
+                        amin = props.get("alt_min_ft")
+                        amax = props.get("alt_max_ft")
+                        if amin is not None or amax is not None:
+                            try:
+                                lo = (
+                                    float(amin)
+                                    if amin is not None
+                                    else ui.alt_filter[0]
+                                )
+                                hi = (
+                                    float(amax)
+                                    if amax is not None
+                                    else ui.alt_filter[1]
+                                )
+                                ui.apply_autoscale_alt_override((lo, hi))
+                            except Exception:
+                                pass
                 except Exception:
                     pass
                 await asyncio.sleep(1.0)
@@ -458,16 +452,8 @@ async def main_async(args: argparse.Namespace) -> None:
 
         asyncio.create_task(_touch_forwarder())
 
-    # Build runways sqlite on-demand (first run) if geojson provided
-    runways_sqlite = getattr(args, "runways-sqlite", None)
-    runways_geojson = getattr(args, "runways-geojson", None)
-    try:
-        if runways_geojson and runways_sqlite:
-            # Build if necessary; function already checks meta
-            build_sqlite_from_geojson(runways_geojson, runways_sqlite)
-            RunwayPrefetcher(runways_sqlite)
-    except Exception as e:
-        print(f"[live_view] Failed to prepare runways DB: {e}")
+    # Basemap and ingestion were prepared earlier; no per-run CLI flags
+    # are required. Proceed to startup.
 
     _print_help()
     # Start track maintenance (spawns internal tasks and returns immediately).
@@ -556,41 +542,6 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         type=int,
         default=-5,
         help="Additional gap between data block lines in px (default: -5)",
-    )
-    p.add_argument(
-        "--airports",
-        type=str,
-        default=None,
-        help=(
-            "Path to airports.json; defaults to sample_data/airports.json if present"
-        ),
-    )
-    p.add_argument(
-        "--sectors",
-        type=str,
-        default=None,
-        help=(
-            "Path to sectors file (simple JSON or GeoJSON FeatureCollection);"
-            " defaults to assets/us_states.json if present"
-        ),
-    )
-    p.add_argument(
-        "--runways-geojson",
-        type=str,
-        default=None,
-        help="Path to source runways GeoJSON to build sqlite from",
-    )
-    p.add_argument(
-        "--runways-sqlite",
-        type=str,
-        default=str(Path.home() / ".pocketscope" / "runways.sqlite"),
-        help="Path to runways sqlite cache (default: ~/.pocketscope/runways.sqlite)",
-    )
-    p.add_argument(
-        "--runway-icons",
-        dest="runway_icons",
-        action="store_true",
-        help="Enable runway-oriented airport icons",
     )
     p.add_argument(
         "--web-ui",

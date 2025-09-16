@@ -22,6 +22,7 @@ from dataclasses import dataclass
 from math import isfinite
 
 from pocketscope.core.geo import haversine_nm
+from pocketscope.data.base_map import BaseMap
 
 __all__ = ["Sector", "load_sectors_json"]
 
@@ -187,4 +188,45 @@ def load_sectors_json(
             )
         ]
 
+    return out
+
+
+def get_states_in_view(
+    sqlite_path: str, min_lat: float, max_lat: float, min_lon: float, max_lon: float
+) -> list[Sector]:
+    """Return state polygons intersecting the bbox. Uses BaseMap states table.
+
+    The returned Sector instances will have the state's name and polygon
+    points extracted from GeoJSON outer rings. Holes are ignored.
+    """
+    bm = BaseMap(sqlite_path)
+    rows = bm.get_states_in_view(min_lat, max_lat, min_lon, max_lon)
+    out: list[Sector] = []
+    for r in rows:
+        geom = r.get("geometry") or {}
+        if not isinstance(geom, dict):
+            continue
+        gtype = (geom.get("type") or "").upper()
+        coords = geom.get("coordinates")
+        if gtype == "POLYGON" and isinstance(coords, list) and coords:
+            ring = coords[0]
+            pts = []
+            for p in ring:
+                if isinstance(p, (list, tuple)) and len(p) >= 2:
+                    lon, lat = float(p[0]), float(p[1])
+                    pts.append((lat, lon))
+            if len(pts) >= 3:
+                out.append(Sector(name=str(r.get("name") or "STATE"), points=pts))
+        elif gtype == "MULTIPOLYGON" and isinstance(coords, list):
+            for poly in coords:
+                if not isinstance(poly, list) or not poly:
+                    continue
+                ring = poly[0]
+                pts = []
+                for p in ring:
+                    if isinstance(p, (list, tuple)) and len(p) >= 2:
+                        lon, lat = float(p[0]), float(p[1])
+                        pts.append((lat, lon))
+                if len(pts) >= 3:
+                    out.append(Sector(name=str(r.get("name") or "STATE"), points=pts))
     return out

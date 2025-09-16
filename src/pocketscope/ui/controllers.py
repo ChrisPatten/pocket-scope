@@ -74,11 +74,7 @@ class UiController:
         cfg: UiConfig,
         center_lat: float | None = None,
         center_lon: float | None = None,
-        airports: Optional[list[tuple[float, float, str]]] = None,
-        sectors: Optional[object] = None,
         font_px: int = 12,
-        runways_sqlite: str | None = None,
-        runway_icons: bool = False,
     ) -> None:
         # Core references
         self._display = display
@@ -156,6 +152,13 @@ class UiController:
         except Exception:
             # Best-effort; do not break initialization if backend missing hook
             pass
+        # Autoscale runtime-only overrides. When autoscale is enabled these
+        # in-memory values may be adjusted by the AutoScaleController. They
+        # are intentionally not persisted to settings.json.
+        self._autoscale_range_override: float | None = None
+        # altitude override is a tuple (min_ft, max_ft) where either value
+        # may be None to indicate unbounded. None means no override.
+        self._autoscale_alt_override: tuple[float | None, float | None] | None = None
 
         # Settings screen overlay (multiplier from configuration)
         settings_font_px = int(
@@ -164,6 +167,7 @@ class UiController:
         self._settings_screen = SettingsScreen(
             self._settings, font_px=settings_font_px, pad_px=6
         )
+        self._apply_track_windows()
         self._apply_track_windows()
         # Apply persisted typography settings to active view if available
         try:
@@ -175,6 +179,14 @@ class UiController:
                 self._view.label_block_pad_px = int(self._settings.label_block_pad_px)
             if hasattr(self._view, "show_sector_labels"):
                 self._view.show_sector_labels = bool(self.sector_labels)
+            # Apply aged trail cutoff from settings if view supports it
+            try:
+                if hasattr(self._view, "trail_aged_cutoff_s"):
+                    self._view.trail_aged_cutoff_s = float(
+                        getattr(self._settings, "trail_aged_cutoff_s", 30.0)
+                    )
+            except Exception:
+                pass
         except Exception:
             pass
 
@@ -203,11 +215,11 @@ class UiController:
             Path(__file__).resolve().parents[3] / "sample_data" / "demo_adsb.jsonl"
         )
 
-        # Optional static data
-        self._airports: Optional[list[tuple[float, float, str]]] = (
-            list(airports) if airports else None
-        )
-        self._sectors = sectors  # typed only when TYPE_CHECKING
+        # Optional static data. We always use an on-disk BaseMap SQLite DB
+        # located at ~/.pocketscope/basemap.sqlite. Do not accept airports or
+        # sectors as constructor params anymore; query the DB dynamically.
+        self._airports: Optional[list[tuple[float, float, str]]] = None
+        self._sectors: Optional[list["Sector"]] | None = None  # typed when available
 
         # Internal prefetch state to avoid scheduling IO every frame.
         # Key is a tuple: (range_nm_rounded, rotation_deg_rounded, idents)
@@ -215,17 +227,43 @@ class UiController:
             tuple[float, float, tuple[str, ...]]
         ] = None
 
-        # Runway DB path and flags for icon rendering and prefetching
-        self._runways_sqlite = runways_sqlite
-        self._runway_icons = bool(runway_icons)
-        self._runway_prefetcher = None
-        try:
-            if self._runways_sqlite and self._runway_icons:
-                from pocketscope.data.runways_store import RunwayPrefetcher
+        # Runway DB and prefetcher. Always attempt to use the default DB path
+        # in the user's home directory; failures are non-fatal and leave
+        # runway features disabled.
+        from pathlib import Path as _Path
 
-                self._runway_prefetcher = RunwayPrefetcher(self._runways_sqlite)
+        try:
+            from pocketscope.data.base_map import BaseMap, RunwayPrefetcher
         except Exception:
+            RunwayPrefetcher = None  # type: ignore
+            BaseMap = None  # type: ignore
+
+        self._runways_basemap = None
+        self._runway_prefetcher = None
+        self._runway_icons = True
+        try:
+            _db_path = str(_Path.home() / ".pocketscope" / "basemap.sqlite")
+            # Ensure directory exists (ingestion elsewhere may populate DB)
+            _Path(_db_path).parent.mkdir(parents=True, exist_ok=True)
+            # Best-effort creation/opening of BaseMap
+            if BaseMap is not None:
+                try:
+                    self._runways_basemap = BaseMap(_db_path)
+                except Exception:
+                    self._runways_basemap = None
+            try:
+                if self._runways_basemap is not None and RunwayPrefetcher is not None:
+                    self._runway_prefetcher = RunwayPrefetcher(_db_path)
+            except Exception:
+                self._runway_prefetcher = None
+        except Exception:
+            self._runways_basemap = None
             self._runway_prefetcher = None
+
+        # Prefetched state polygons cache. Keep cached states until the
+        # ownship center moves more than 10 NM; no TTL.
+        self._states_cached_center: Optional[tuple[float, float]] = None
+        self._states_cached: Optional[list["Sector"]] = None
 
         # FPS tracking (EMA) + orientation
         self._prev_frame_t: Optional[float] = None
@@ -234,6 +272,127 @@ class UiController:
             self._rotation_deg: float = float(getattr(self._view, "rotation_deg", 0.0))
         except Exception:
             self._rotation_deg = 0.0
+
+    # ------------------------------------------------------------------
+    # Basemap / states / runway prefetch helpers
+    def _prefetch_basemap(self, *, radius_nm: float = 200.0) -> None:
+        """Prefetch and cache basemap objects within `radius_nm` of the
+        controller center. This is intentionally performed as a single
+        disk/DB operation so render frames do not repeatedly hit the DB.
+
+        On success updates:
+        - self._states_cached, self._states_cached_center
+        - self._sectors
+        - self._airports
+        and triggers runway prefetch for nearby airports if a runway
+        prefetcher is available.
+        """
+        try:
+            # Local imports to avoid module-level import cost in tests
+            from pocketscope.core.geo import haversine_nm
+            from pocketscope.data.sectors import get_states_in_view
+        except Exception:
+            return
+
+        try:
+            import math
+
+            # Compute bbox for radius_nm
+            dlat = float(radius_nm) / 60.0
+            lat_rad = math.radians(float(self._center_lat))
+            dlon = float(radius_nm) / (60.0 * max(1e-6, math.cos(lat_rad)))
+            min_lat = float(self._center_lat) - dlat
+            max_lat = float(self._center_lat) + dlat
+            min_lon = float(self._center_lon) - dlon
+            max_lon = float(self._center_lon) + dlon
+        except Exception:
+            return
+
+        # Fetch state polygons (single DB call)
+        try:
+            states = get_states_in_view(
+                getattr(self._runways_basemap, "sqlite_path", ""),
+                float(min_lat),
+                float(max_lat),
+                float(min_lon),
+                float(max_lon),
+            )
+            states_list = list(states) if states else []
+            self._states_cached = states_list
+            self._states_cached_center = (
+                float(self._center_lat),
+                float(self._center_lon),
+            )
+            self._sectors = states_list if states_list else None
+        except Exception:
+            # leave previous cache intact on failure
+            pass
+
+        # Fetch airports from basemap if available (single DB call)
+        try:
+            if self._runways_basemap is not None:
+                # BaseMap expects (min_lat, max_lat, min_lon, max_lon)
+                airports = self._runways_basemap.get_airports_in_view(
+                    min_lat, max_lat, min_lon, max_lon
+                )
+                # Convert to simple list of tuples and keep only those within
+                # radius
+                ap_list: list[tuple[float, float, str]] = []
+                for lat, lon, ident in airports:
+                    try:
+                        dist = haversine_nm(
+                            float(self._center_lat),
+                            float(self._center_lon),
+                            float(lat),
+                            float(lon),
+                        )
+                        if dist <= float(radius_nm):
+                            ap_list.append((float(lat), float(lon), str(ident).upper()))
+                    except Exception:
+                        continue
+                self._airports = ap_list
+            else:
+                self._airports = None
+        except Exception:
+            # keep previous airports on failure
+            pass
+
+        # Runway prefetch for idents within radius (single call)
+        try:
+            if self._runway_prefetcher and self._airports:
+                idents = [ident for (_la, _lo, ident) in self._airports]
+                if idents:
+                    try:
+                        self._runway_prefetcher.prefetch(idents)
+                        # update last prefetch key to avoid redundant calls
+                        self._last_runway_prefetch_key = (
+                            round(float(self._cfg.range_nm), 3),
+                            round(float(self._rotation_deg), 2),
+                            tuple(sorted(idents)),
+                        )
+                    except Exception:
+                        pass
+        except Exception:
+            pass
+
+    def _should_refresh_cache_for_move(self) -> bool:
+        """Return True when cached states/airports should be refreshed due to
+        ownship center movement > 10 NM or when no cache exists.
+        """
+        try:
+            from pocketscope.core.geo import haversine_nm
+
+            if self._states_cached_center is None or self._states_cached is None:
+                return True
+            dist = haversine_nm(
+                float(self._states_cached_center[0]),
+                float(self._states_cached_center[1]),
+                float(self._center_lat),
+                float(self._center_lon),
+            )
+            return dist > 10.0
+        except Exception:
+            return True
 
     def set_softkeys(self, bar: SoftKeyBar) -> None:
         # Apply persisted softkey typography/padding when available
@@ -277,6 +436,14 @@ class UiController:
 
         try:
             while self._running:
+                # Ensure basemap/sectors/airports are prefetched once on
+                # startup to avoid per-frame disk I/O. The helper is
+                # idempotent and cheap if DB missing.
+                try:
+                    if self._states_cached is None or self._airports is None:
+                        self._prefetch_basemap(radius_nm=200.0)
+                except Exception:
+                    pass
                 t0 = self._ts.monotonic()
                 # Handle input
                 self._process_input()
@@ -297,29 +464,22 @@ class UiController:
                 # Draw PPI view with occlusion rectangles
                 # Prefetch runways for visible airports when PPI state changes
                 try:
-                    if self._runway_prefetcher and self._airports:
-                        from pocketscope.core.geo import haversine_nm
-
-                        idents_to_prefetch: list[str] = []
-                        for lat, lon, ident in self._airports:
-                            if (
-                                haversine_nm(
-                                    self._center_lat, self._center_lon, lat, lon
-                                )
-                                <= self._cfg.range_nm
-                            ):
-                                idents_to_prefetch.append(str(ident).upper())
-
-                        # Create a compact prefetch key and keep each component on
-                        # its own line to satisfy line-length limits.
-                        range_key = round(float(self._cfg.range_nm), 3)
-                        rot_key = round(float(self._rotation_deg), 2)
-                        idents_key = tuple(sorted(idents_to_prefetch))
-                        key = (range_key, rot_key, idents_key)
-                        if key != self._last_runway_prefetch_key:
-                            if idents_to_prefetch:
-                                self._runway_prefetcher.prefetch(idents_to_prefetch)
-                            self._last_runway_prefetch_key = key
+                    # Use cached states/airports and only touch disk when the
+                    # ownship center has moved beyond the configured threshold
+                    # or when the cache is empty. Heavy DB operations are
+                    # encapsulated in _prefetch_basemap which centralizes IO.
+                    try:
+                        if self._runways_basemap and self._runway_prefetcher:
+                            if self._should_refresh_cache_for_move():
+                                # Refresh caches (states, airports, runways)
+                                self._prefetch_basemap(radius_nm=200.0)
+                        else:
+                            # If no basemap present, ensure fields are None
+                            self._airports = None
+                            # Keep previous sectors if any; do not attempt IO
+                    except Exception:
+                        # Do not allow prefetch failures to break the render loop
+                        pass
                 except Exception:
                     # Do not allow prefetch failures to break the render loop
                     pass
@@ -333,7 +493,7 @@ class UiController:
                     airports=self._airports,
                     sectors=cast("Optional[Sequence[Sector]]", self._sectors),
                     occlusions=self._compute_occlusions(),
-                    runway_sqlite=self._runways_sqlite,
+                    basemap=self._runways_basemap,
                     runway_icons=self._runway_icons,
                 )
 
@@ -365,8 +525,13 @@ class UiController:
                         latest_ts = None
 
                     # Compute nearest track distance (nm) and altitude (ft)
+                    # ac_count: number of aircraft whose location is within the
+                    # visible area of the PPI (range only)
+                    # ac_visible_count: number of aircraft actually visible to the
+                    # user considering altitude filters in effect
                     nearest_range_nm = None
                     nearest_alt_ft = None
+                    ac_count = 0
                     ac_visible = 0
                     try:
                         from math import asin, cos, radians, sin, sqrt
@@ -390,8 +555,8 @@ class UiController:
 
                         center_lat = float(self._center_lat)
                         center_lon = float(self._center_lon)
+                        alt_min_ft, alt_max_ft = self.alt_filter
                         if isinstance(tracks, (list, tuple)) and tracks:
-                            ac_visible = 0
                             for tr in tracks:
                                 try:
                                     if not tr.history:
@@ -432,11 +597,48 @@ class UiController:
                                         )
                                     if rng is None:
                                         continue
-                                    # Consider track visible if within configured range
+                                    # Count aircraft within PPI range (ac_count)
                                     try:
                                         cfg_range = self._cfg.range_nm
                                         if isinstance(cfg_range, (int, float)) and (
                                             rng <= float(cfg_range)
+                                        ):
+                                            ac_count += 1
+                                    except Exception:
+                                        pass
+                                    # Determine if aircraft passes altitude filter
+                                    alt_pass = True
+                                    try:
+                                        # If an altitude filter is active and the
+                                        # track lacks altitude, it's considered not
+                                        # visible
+                                        if (
+                                            alt_min_ft is not None
+                                            or alt_max_ft is not None
+                                        ) and alt is None:
+                                            alt_pass = False
+                                        if (
+                                            alt is not None
+                                            and alt_min_ft is not None
+                                            and alt < alt_min_ft
+                                        ):
+                                            alt_pass = False
+                                        if (
+                                            alt is not None
+                                            and alt_max_ft is not None
+                                            and alt >= alt_max_ft
+                                        ):
+                                            alt_pass = False
+                                    except Exception:
+                                        alt_pass = True
+                                    # ac_visible: within range and passes altitude
+                                    # filter
+                                    try:
+                                        cfg_range = self._cfg.range_nm
+                                        if (
+                                            isinstance(cfg_range, (int, float))
+                                            and (rng <= float(cfg_range))
+                                            and alt_pass
                                         ):
                                             ac_visible += 1
                                     except Exception:
@@ -459,8 +661,6 @@ class UiController:
                     except Exception:
                         ac_visible_count = None
 
-                    alt_min_ft, alt_max_ft = self.alt_filter
-
                     self._overlay.draw(
                         canvas,
                         self._settings,
@@ -472,9 +672,9 @@ class UiController:
                         imu_ok=True,
                         decoder_ok=True,
                         last_update_ts=latest_ts,
-                        ac_count=len(tracks)
-                        if isinstance(tracks, (list, tuple))
-                        else None,
+                        ac_count=(
+                            ac_count if isinstance(tracks, (list, tuple)) else None
+                        ),
                         ac_visible_count=ac_visible_count,
                         nearest_range_nm=nearest_range_nm,
                         nearest_alt_ft=nearest_alt_ft,
@@ -652,8 +852,21 @@ class UiController:
     @property
     def alt_filter(self) -> tuple[float | None, float | None]:
         """Return active altitude filter bounds (min_ft, max_ft)."""
-        # Prefer explicit min/max from settings if present
+        # Priority order when autoscale is enabled:
+        # 1. In-memory autoscale altitude override (not persisted)
+        # 2. Explicit persisted settings altitude_min_ft / altitude_max_ft
+        # 3. Selected altitude band
         try:
+            # Runtime autoscale override takes precedence when present
+            _ov = getattr(self, "_autoscale_alt_override", None)
+            if _ov is not None:
+                try:
+                    lo, hi = _ov
+                    return lo, hi
+                except Exception:
+                    # If override is malformed, fall through to other sources
+                    pass
+
             custom_lo = getattr(self._settings, "altitude_min_ft", None)
             custom_hi = getattr(self._settings, "altitude_max_ft", None)
             if custom_lo is not None or custom_hi is not None:
@@ -669,6 +882,55 @@ class UiController:
         band = getattr(self, "altitude_filter", "All")
         lo_hi = ALTITUDE_FILTER_BANDS.get(band, (None, None))
         return lo_hi[0], lo_hi[1]
+
+    # Autoscale override APIs --------------------------------------
+    def apply_autoscale_range_override(self, range_nm: float | None) -> None:
+        """Apply a runtime-only autoscale range override (or clear with None).
+
+        This updates the live view immediately but does not persist to disk.
+        """
+        try:
+            self._autoscale_range_override = (
+                float(range_nm) if range_nm is not None else None
+            )
+            if range_nm is not None:
+                self._cfg.range_nm = float(range_nm)
+            else:
+                # restore to persisted baseline when cleared
+                self._cfg.range_nm = float(self._settings.range_nm)
+        except Exception:
+            pass
+
+    def apply_autoscale_alt_override(
+        self, alt_pair: tuple[float | None, float | None] | None
+    ) -> None:
+        """Apply an in-memory altitude override tuple (min_ft, max_ft)
+        or clear with None.
+
+        When set, `alt_filter` will prefer this override. This method is
+        the supported public API for autoscale adjustments.
+        """
+        try:
+            if alt_pair is None:
+                self._autoscale_alt_override = None
+            else:
+                lo, hi = alt_pair
+                lo_val = float(lo) if lo is not None else None
+                hi_val = float(hi) if hi is not None else None
+                self._autoscale_alt_override = (lo_val, hi_val)
+        except Exception:
+            pass
+
+    def clear_autoscale_overrides(self) -> None:
+        """Clear both range and altitude autoscale overrides and restore
+        persisted values.
+        """
+        try:
+            self._autoscale_range_override = None
+            self._autoscale_alt_override = None
+            self._cfg.range_nm = float(self._settings.range_nm)
+        except Exception:
+            pass
 
     def _apply_track_windows(self) -> None:
         presets = list(TRACK_LENGTH_PRESETS_S)
@@ -871,6 +1133,16 @@ class UiController:
                     )
                 except Exception:
                     pass
+                # Mirror trail aged cutoff to view if present
+                try:
+                    cutoff = float(getattr(new, "trail_aged_cutoff_s", 30.0))
+                    if hasattr(self._view, "trail_aged_cutoff_s"):
+                        try:
+                            self._view.trail_aged_cutoff_s = cutoff
+                        except Exception:
+                            pass
+                except Exception:
+                    pass
                 self.demo_mode = new.demo_mode
                 self.altitude_filter = getattr(new, "altitude_filter", "All")
                 self.north_up_lock = getattr(new, "north_up_lock", True)
@@ -1059,14 +1331,18 @@ class UiController:
                     pts_sel = dense  # degenerate case
 
             # Convert selected points to ENU
-            trail_enu: list[tuple[float, float]] = []
-            for _, la, lon_pt, _alt in pts_sel:
+            trail_enu: list[tuple[float, float, float]] = []
+            for ts_dt, la, lon_pt, _alt in pts_sel:
                 try:
                     tx, ty, tz = geodetic_to_ecef(float(la), float(lon_pt), 0.0)
                     e, n, _ = ecef_to_enu(
                         tx, ty, tz, self._center_lat, self._center_lon, 0.0
                     )
-                    trail_enu.append((e, n))
+                    try:
+                        ts_val = float(ts_dt.timestamp())
+                    except Exception:
+                        ts_val = 0.0
+                    trail_enu.append((e, n, ts_val))
                 except Exception:
                     continue
             # Optional kinematics

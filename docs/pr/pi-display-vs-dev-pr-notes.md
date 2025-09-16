@@ -46,7 +46,7 @@ Added
 - docs/systemd-setup.md
 - src/pocketscope/assets/runways.json
 - src/pocketscope/config.py
-- src/pocketscope/data/runways_store.py
+- src/pocketscope/data/base_map.py
 - src/pocketscope/ingest/adsb/file_source.py
 - src/pocketscope/platform/display/ili9341_backend.py
 - src/pocketscope/platform/display/spi_lock.py
@@ -109,7 +109,7 @@ Notable functional changes and rationale
 - UI/UX improvements: many tweaks to softkeys, status overlay, settings screen, scaling, and support for screen orientation flipping.
 - Performance: frame rate configurability, rendering and track performance optimizations, and timeout tuning for network sources.
 - Ingest sources: new file-based ADS-B ingest (`file_source.py`) and tweaks to `json_source`/`playback_source` to fix JSON issues and add support for local readsb.
-- Airports / Runways: new runway data asset and a `runways_store` plus tests and an `airport_icon` renderer.
+- Airports / Runways: new runway data asset and a `base_map` module plus tests and an `airport_icon` renderer.
 - Tests: multiple new platform and unit tests added to cover the new hardware codepaths and UI features. Some golden-render tests were removed (deleted file), likely replaced with more targeted tests.
 
 Potential risks / review focus

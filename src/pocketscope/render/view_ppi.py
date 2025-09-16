@@ -38,6 +38,7 @@ from pocketscope.settings.values import AUTO_RING_CONFIG, PPI_CONFIG, THEME
 if TYPE_CHECKING:  # for type hints only
     from pocketscope.data.sectors import Sector
 
+
 _PPI_THEME = THEME.get("colors", {}).get("ppi", {}) if isinstance(THEME, dict) else {}
 
 
@@ -59,6 +60,7 @@ ColorAircraft: Color = _col(_PPI_THEME.get("aircraft"), (255, 255, 0, 255))
 ColorLabels: Color = _col(_PPI_THEME.get("labels"), (255, 255, 255, 255))
 ColorDataBlock: Color = _col(_PPI_THEME.get("datablock"), (0, 255, 0, 255))
 ColorDataBlockBG: Color = _col(_PPI_THEME.get("datablock_bg"), (0, 0, 0, 140))
+ColorTrailsAged: Color = _col(_PPI_THEME.get("trails_aged"), (0, 180, 255, 180))
 
 
 def _on_runtime_update(rc: Any) -> None:
@@ -86,6 +88,8 @@ def _on_runtime_update(rc: Any) -> None:
         ColorLabels = _col(ppi_theme.get("labels"), ColorLabels)
         ColorDataBlock = _col(ppi_theme.get("datablock"), ColorDataBlock)
         ColorDataBlockBG = _col(ppi_theme.get("datablock_bg"), ColorDataBlockBG)
+        global ColorTrailsAged
+        ColorTrailsAged = _col(ppi_theme.get("trails_aged"), ColorTrailsAged)
     except Exception:
         pass
 
@@ -115,7 +119,11 @@ class TrackSnapshot:
     lon: float
     callsign: Optional[str] = None
     course_deg: Optional[float] = None
-    trail_enu: Optional[Sequence[Tuple[float, float]]] = None
+    # trail_enu items are normally (e, n) tuples in meters. When available
+    # they may optionally include a timestamp: (e, n, ts) where ts is a
+    # float POSIX timestamp. The renderer handles both shapes for
+    # backwards-compatibility.
+    trail_enu: Optional[Sequence[Tuple[float, float, float]]] = None
     # Optional kinematics for labels (pass-through to DataBlockFormatter)
     geo_alt_ft: Optional[float] = None
     baro_alt_ft: Optional[float] = None
@@ -138,6 +146,7 @@ class PpiView:
         label_line_gap_px: int = 2,
         label_block_pad_px: int = 2,
         range_rings: Optional[Sequence[float]] = None,
+        trail_aged_cutoff_s: float = 30.0,
     ) -> None:
         self.range_nm = float(range_nm)
         if rotation_deg == 0.0 and isinstance(PPI_CONFIG, dict):
@@ -164,6 +173,11 @@ class PpiView:
         # Optional explicit ring distances (NM). If not provided we auto-compute
         # a concise set of 2–5 "nice" rings terminating at the configured range.
         self._explicit_rings = [float(r) for r in range_rings] if range_rings else None
+        # Age cutoff (seconds) for rendering aged trail segments
+        try:
+            self.trail_aged_cutoff_s = float(trail_aged_cutoff_s)
+        except Exception:
+            self.trail_aged_cutoff_s = 30.0
 
     # ---------------------------------------------------------------------
     def _auto_range_rings(self) -> List[float]:
@@ -242,7 +256,7 @@ class PpiView:
         airports: Optional[Sequence[Tuple[float, float, str]]] = None,
         sectors: Optional[Sequence["Sector"]] = None,
         occlusions: Optional[Sequence[Tuple[int, int, int, int]]] = None,
-        runway_sqlite: str | None = None,
+        basemap: Optional[Any] = None,
         runway_icons: bool = False,
     ) -> None:
         """Draw the PPI view contents.
@@ -325,17 +339,30 @@ class PpiView:
                 pass
 
         # z-index 1: Airports
-        if self.show_airports and airports:
+        # Draw airports either from an explicitly provided list OR from a
+        # BaseMap instance (queried by AirportsLayer when airports is None).
+        if self.show_airports and (airports or basemap):
             try:
-                from pocketscope.data.airports import Airport
+                aps: Optional[List[Any]] = None
+                if airports:
+                    # Convert tuple form (lat, lon, ident) to Airport dataclass
+                    try:
+                        from pocketscope.data.airports import Airport as _Airport
 
-                aps: list[Airport] = []
-                for lat, lon, ident in airports:
-                    aps.append(
-                        Airport(
-                            ident=str(ident).upper(), lat=float(lat), lon=float(lon)
-                        )
-                    )
+                        aps = []
+                        for lat, lon, ident in airports:
+                            aps.append(
+                                _Airport(
+                                    ident=str(ident).upper(),
+                                    lat=float(lat),
+                                    lon=float(lon),
+                                )
+                            )
+                    except Exception:
+                        # If conversion fails, fall back to letting AirportsLayer
+                        # query the basemap (if available) by passing None.
+                        aps = None
+
                 AirportsLayer(font_px=self.label_font_px).draw(
                     canvas,
                     center_lat=center_lat,
@@ -345,7 +372,7 @@ class PpiView:
                     screen_size=(w, h),
                     rotation_deg=self.rotation_deg,
                     range_ring_exclusions=range_ring_exclusions,
-                    runway_sqlite=runway_sqlite,
+                    basemap=basemap,
                     runway_icons=runway_icons,
                 )
             except Exception:
@@ -495,12 +522,62 @@ class PpiView:
         for pc in precomp:
             t = pc["track"]
             if t.trail_enu:
-                pts: List[Tuple[int, int]] = []
-                for e, n in t.trail_enu:
-                    x, y = _enu_to_screen_rot(e, n)
-                    pts.append((int(round(cx + x)), int(round(cy + y))))
-                if len(pts) >= 2:
-                    canvas.polyline(pts, width=2, color=ColorTrails)
+                pts_all: List[Tuple[int, int]] = []
+                # Determine if timestamps are present (third element)
+                has_ts = False
+                try:
+                    first = t.trail_enu[0]
+                    has_ts = len(first) >= 3
+                except Exception:
+                    has_ts = False
+
+                # If timestamps available, split into aged (>30s) and recent
+                # segments using the last point's timestamp as reference.
+                if has_ts:
+                    # Build list of (x,y,ts) preserving chronological order
+                    pts_xy_ts: List[Tuple[int, int, float]] = []
+                    for item in t.trail_enu:
+                        try:
+                            e, n, ts = item[0], item[1], float(item[2])
+                        except Exception:
+                            # Fallback for malformed entry: skip
+                            continue
+                        x, y = _enu_to_screen_rot(e, n)
+                        pts_xy_ts.append((int(round(cx + x)), int(round(cy + y)), ts))
+
+                    if len(pts_xy_ts) >= 2:
+                        end_ts = float(pts_xy_ts[-1][2])
+                        cutoff = end_ts - float(
+                            getattr(self, "trail_aged_cutoff_s", 30.0)
+                        )
+                        # Find split index where points become recent
+                        split_idx = 0
+                        for i, (_x, _y, ts) in enumerate(pts_xy_ts):
+                            if ts >= cutoff:
+                                split_idx = i
+                                break
+
+                        # Old segment: points before split_idx
+                        if split_idx >= 2:
+                            old_pts = [(x, y) for (x, y, _ts) in pts_xy_ts[:split_idx]]
+                            canvas.polyline(old_pts, width=1, color=ColorTrailsAged)
+
+                        # Recent segment: points from split_idx to end
+                        recent_pts = [(x, y) for (x, y, _ts) in pts_xy_ts[split_idx:]]
+                        if len(recent_pts) >= 2:
+                            canvas.polyline(recent_pts, width=2, color=ColorTrails)
+                else:
+                    # Backwards-compatible rendering when no timestamps
+                    for item in t.trail_enu:
+                        try:
+                            e = float(item[0])
+                            n = float(item[1])
+                            x, y = _enu_to_screen_rot(e, n)
+                            pts_all.append((int(round(cx + x)), int(round(cy + y))))
+                        except Exception:
+                            continue
+                    if len(pts_all) >= 2:
+                        canvas.polyline(pts_all, width=2, color=ColorTrails)
 
         # Pass 2: glyphs (z=6) & labels
         for pc in precomp:

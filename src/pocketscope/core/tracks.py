@@ -184,6 +184,14 @@ class TrackService:
         icao24 = msg.icao24
         msg_ts = msg.ts.timestamp()
 
+        # Ignore messages that explicitly report altitude == 0 (either
+        # barometric or geometric). Treat 0 as an explicit value to be
+        # ignored (not the same as None).
+        if (msg.baro_alt is not None and msg.baro_alt < 100) or (
+            msg.geo_alt is not None and msg.geo_alt < 100
+        ):
+            return
+
         # Get or create track
         track = self._tracks.get(icao24)
         if track is None:

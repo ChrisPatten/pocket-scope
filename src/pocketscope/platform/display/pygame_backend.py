@@ -181,8 +181,14 @@ class PygameDisplayBackend(DisplayBackend):
         self._window_surface = None
         if create_window and os.environ.get("SDL_VIDEODRIVER") != "dummy":
             try:
+                # Request hardware double-buffering for smoother updates
+                flags = 0
+                try:
+                    flags = local_pg.DOUBLEBUF | local_pg.HWSURFACE
+                except Exception:
+                    flags = 0
                 self._window_surface = local_pg.display.set_mode(
-                    (self._width, self._height)
+                    (self._width, self._height), flags=flags
                 )
             except Exception:
                 # Fallback to offscreen and provide a hint for diagnostics
@@ -193,11 +199,37 @@ class PygameDisplayBackend(DisplayBackend):
                 )
                 self._window_surface = None
 
-        # Create offscreen surface; use SRCALPHA for per-pixel alpha
-        # We avoid creating a display window to be headless/deterministic
-        self._surface = local_pg.Surface(
-            (self._width, self._height), flags=local_pg.SRCALPHA
-        )
+        # Create offscreen surface. When a real window was created, make the
+        # offscreen surface match the display format (no per-pixel alpha) so
+        # blitting completely overwrites the window each frame. This avoids
+        # alpha blending ghosting that can occur when using SRCALPHA surfaces
+        # and then blitting them onto a non-alpha window surface.
+        if self._window_surface is not None:
+            # Create a display-format surface for fast blits that replace
+            # pixels rather than blending. Convert to the display format so
+            # the pixel format matches the window surface.
+            surf = local_pg.Surface((self._width, self._height))
+            try:
+                self._surface = surf.convert()
+            except Exception:
+                # convert() may fail in some headless/backends; fall back
+                self._surface = surf
+        else:
+            # Headless/offscreen mode - keep per-pixel alpha for tests.
+            # convert_alpha() requires a display pixel format to be set
+            # (via display.set_mode). In some headless backends (SDL dummy)
+            # convert_alpha() raises; guard and fall back to the raw
+            # SRCALPHA surface if conversion isn't available.
+            surf = local_pg.Surface(
+                (self._width, self._height), flags=local_pg.SRCALPHA
+            )
+            try:
+                self._surface = surf.convert_alpha()
+            except Exception:
+                # Some SDL backends (notably the 'dummy' video driver) do
+                # not provide a display pixel format; keep the original
+                # SRCALPHA surface which is sufficient for headless tests.
+                self._surface = surf
         self._font_cache = _FontCache()
 
     def size(self) -> Tuple[int, int]:

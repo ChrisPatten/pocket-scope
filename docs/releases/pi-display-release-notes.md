@@ -17,12 +17,9 @@ Highlights
 - Orientation flipping, softkeys and status overlay scaling improvements.
 - Configurable frame rate and rendering performance optimizations.
 - Support for local readsb/dump1090 services and fixes to JSON ingest handling.
-- New runway asset data and runway lookup/store plus `airport_icon` renderer.
-- New platform and unit tests targeting hardware codepaths; updated UI tests.
-
-Notable commits
----------------
-
+  `src/pocketscope/data/base_map.py`
+  `src/pocketscope/assets/runways.json`
+  `src/pocketscope/data/base_map.py`
 - a09240c  add initial tft support
 - 4b4415a  update spi frame buffer logic
 - 1416a6e  json fix for pi
@@ -56,7 +53,7 @@ Files of interest
 - Ingest & assets:
   - `src/pocketscope/ingest/adsb/file_source.py`
   - `src/pocketscope/assets/runways.json`
-  - `src/pocketscope/data/runways_store.py`
+  - `src/pocketscope/data/base_map.py`
 
 - Tests: new platform tests under `tests/platform/` and unit tests under `src/pocketscope/tests/`.
 

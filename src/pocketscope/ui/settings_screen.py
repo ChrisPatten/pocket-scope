@@ -159,6 +159,11 @@ class SettingsScreen:
                 tuple(str(x) if x is not None else "auto" for x in STATUS_PAD_CHOICES),
             ),
             MenuItem(
+                "Status Pad X",
+                "cycle",
+                tuple(str(x) if x is not None else "auto" for x in STATUS_PAD_CHOICES),
+            ),
+            MenuItem(
                 "Status Pad Bottom",
                 "cycle",
                 tuple(str(x) if x is not None else "auto" for x in STATUS_PAD_CHOICES),
@@ -370,6 +375,23 @@ class SettingsScreen:
             try:
                 if new_status_pad_top is not None:
                     controller._overlay.pad_top = int(new_status_pad_top)
+            except Exception:
+                pass
+        elif item.label == "Status Pad X":
+            try:
+                cur_status_pad_x = getattr(self._settings, "status_pad_x_px", None)
+            except Exception:
+                cur_status_pad_x = None
+            choices = list(STATUS_PAD_CHOICES)
+            idx = next((i for i, s in enumerate(choices) if s == cur_status_pad_x), -1)
+            if idx == -1:
+                idx = 0
+            idx = (idx + 1) % len(choices)
+            new_status_pad_x: int | None = choices[idx]
+            self._settings.status_pad_x_px = new_status_pad_x
+            try:
+                if new_status_pad_x is not None:
+                    controller._overlay.pad_x = int(new_status_pad_x)
             except Exception:
                 pass
         elif item.label == "Status Pad Bottom":

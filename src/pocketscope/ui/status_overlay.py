@@ -139,7 +139,14 @@ class StatusOverlay:
         # Compute sensible defaults scaled to the font size when caller
         # doesn't specify explicit padding values. This keeps the overlay
         # visually consistent across font sizes on different displays.
-        self.pad_x = max(2, int(round(self.font_px * 0.3)))
+        # Allow instance padding to be overridden via settings.status_pad_x_px
+        _raw_pad_x = getattr(settings, "status_pad_x_px", None)
+        if isinstance(_raw_pad_x, (int, float)):
+            # explicit numeric setting takes precedence
+            self.pad_x = int(_raw_pad_x)
+        else:
+            # sensible default scaled to font size
+            self.pad_x = max(2, int(round(self.font_px * 0.3)))
         self.pad_y = max(1, int(round(self.font_px * 0.15)))
         # Top/bottom padding used to compute automatic panel height
         # Explicit settings values may be None (schema default) meaning

@@ -73,6 +73,17 @@ class AutoScaleController:
 
         # status string for UI chip
         self._last_status: str = ""
+        # Remember the user-configured baseline range at startup. This is
+        # treated as the minimum range that autoscale will attempt to reach
+        # when zooming in; altitude filtering is used as a fallback when
+        # already at or below this baseline.
+        try:
+            self._baseline_range_nm = float(self._adapter.get_radius_nm())
+        except Exception:
+            self._baseline_range_nm = float(self._cfg.radius_nm_min)
+
+        # On first tick, autoscale should start with no altitude filter.
+        self._first_tick = True
 
     # Public API -------------------------------------------------
     def tick(
@@ -80,7 +91,7 @@ class AutoScaleController:
         aircraft_list: Iterable[Any],
         focused: Optional[Any] = None,
         now: Optional[float] = None,
-    ) -> dict[str, Optional[float]]:
+    ) -> dict[str, Optional[Any]]:
         """Process one control tick and propose changes.
 
         Returns dict with keys: radius_nm, alt_min_ft, alt_max_ft (None = no change)
@@ -88,11 +99,13 @@ class AutoScaleController:
         if now is None:
             now = time.monotonic()
 
-        # Proposal dict: None -> no change
-        out: dict[str, Optional[float]] = {
+        # Proposal dict: None -> no change. alt_override is an optional
+        # tuple (lo, hi) used for in-memory altitude overrides.
+        out: dict[str, Optional[Any]] = {
             "radius_nm": None,
             "alt_min_ft": None,
             "alt_max_ft": None,
+            "alt_override": None,
         }
 
         if not self._cfg.enabled:
@@ -245,26 +258,60 @@ class AutoScaleController:
                         self._change_timestamps.append(now)
                         changed = True
 
+        # On initial activation, clear any existing altitude filter so we
+        # start from an unfiltered view (in-memory only). This is applied
+        # as an explicit override request.
+        if self._first_tick:
+            self._first_tick = False
+            # Only request a clear if there is an active band
+            if cur_lo is not None or cur_hi is not None:
+                # Only apply the initial clear if no other proposals were
+                # produced this tick (avoid clobbering an expansion/trim).
+                other_changes = any(
+                    v is not None for k, v in out.items() if k != "alt_override"
+                )
+                if not other_changes:
+                    out["alt_override"] = (None, None)
+                    # also explicitly clear min/max for callers that inspect
+                    out["alt_min_ft"] = None
+                    out["alt_max_ft"] = None
+                    changed = True
+
         # If high and confirmed
         if self._high_count >= int(self._cfg.confirm_ticks):
-            # Try zooming in first
+            # If we're zoomed out relative to the user baseline, prefer
+            # zooming in toward that baseline first. Only once at-or-below
+            # the baseline do we apply altitude filtering.
+            try:
+                baseline = float(self._baseline_range_nm)
+            except Exception:
+                baseline = float(self._cfg.radius_nm_min)
+
+            zoomed_out = r > baseline + 1e-6
+
             if (
-                r > float(self._cfg.radius_nm_min)
+                zoomed_out
+                and r > float(self._cfg.radius_nm_min)
                 and (now - self._last_zoom_t) >= float(self._cfg.zoom_cooldown_s)
                 and changes_allowed
             ):
-                new_r = max(
+                # Zoom in toward baseline (do not go below baseline)
+                target_r = max(
                     float(self._cfg.radius_nm_min),
                     r * float(self._cfg.zoom_step_factor_in),
                 )
-                new_r = self._snap_radius(new_r)
+                # clamp to baseline as minimum target when zooming in
+                if target_r < baseline:
+                    target_r = baseline
+                new_r = self._snap_radius(target_r)
                 if new_r != r:
                     out["radius_nm"] = new_r
                     self._last_zoom_t = now
                     self._change_timestamps.append(now)
                     changed = True
             else:
-                # Trim altitude ceiling using percentile of visible alts
+                # We're at-or-below baseline or zoom attempt not allowed -> use
+                # altitude trimming as fallback.
                 if (
                     vis_alts
                     and (now - self._last_alt_t) >= float(self._cfg.alt_cooldown_s)
@@ -288,6 +335,11 @@ class AutoScaleController:
                     nh = min(nh, int(self._cfg.alt_max_ceiling_ft))
                     nh = self._snap_alt(nh)
                     if cur_hi is None or nh < (cur_hi or int(1e9)):
+                        # propose an explicit override tuple so caller can apply
+                        # this in-memory without persisting. Also populate
+                        # alt_max_ft for backward compatibility with callers
+                        # that expect that key.
+                        out["alt_override"] = (None, nh)
                         out["alt_max_ft"] = nh
                         self._last_alt_t = now
                         self._change_timestamps.append(now)

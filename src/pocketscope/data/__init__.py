@@ -5,9 +5,11 @@ be added in future iterations.
 """
 
 from .airports import Airport, load_airports_json, nearest_airports
+from .base_map import get_airports
 
 __all__ = [
     "Airport",
     "load_airports_json",
     "nearest_airports",
+    "get_airports",
 ]

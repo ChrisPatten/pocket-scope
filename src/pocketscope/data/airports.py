@@ -65,10 +65,37 @@ def load_airports_json(path: str) -> list[Airport]:
     list[Airport]
         Parsed and normalized airport entries.
     """
+    # Keep compatibility: if a sqlite DB is provided, read from the airports table.
+    out: list[Airport] = []
+    try:
+        if str(path).lower().endswith(".sqlite") or str(path).lower().endswith(".db"):
+            import sqlite3
+
+            conn = sqlite3.connect(path)
+            conn.row_factory = sqlite3.Row
+            cur = conn.cursor()
+            cur.execute("SELECT identifier, lat, lon FROM airports")
+            rows = cur.fetchall()
+            for r in rows:
+                try:
+                    ident = _coerce_ident(r["identifier"]) if r["identifier"] else None
+                    lat = _coerce_float(r["lat"])
+                    lon = _coerce_float(r["lon"])
+                    if ident is None or lat is None or lon is None:
+                        continue
+                    out.append(Airport(ident=ident, lat=lat, lon=lon))
+                except Exception:
+                    continue
+            conn.close()
+            return out
+    except Exception:
+        # not a sqlite DB or cannot open - fall back to JSON
+        pass
+
+    # Fallback: treat path as JSON file
     with open(path, "r", encoding="utf-8") as f:
         data = json.load(f)
 
-    out: list[Airport] = []
     if not isinstance(data, list):
         return out
 
