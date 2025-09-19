@@ -20,6 +20,20 @@ PocketScope is a handheld Pi-powered ATC-style scope for decoding and displaying
 - **Rendering/UI**: Canvas API + multiple backends (Pygame, SPI TFT ILI9341, Web) with ATC-style data blocks, sector + airports overlays, deterministic golden-frame tests
 - **Persistent UI Settings**: Debounced JSON settings (units, default range, track length preset, demo mode, altitude filter incl. custom bounds, north-up lock, autoscale target) with soft key bar + settings screen
 
+Note on softkeys
+-----------------
+
+In the current development branch the SoftKeyBar is intentionally disabled by default at runtime (the code remains present). To provide the bar to the controller call `set_softkeys(bar)` as before and then call `enable_softkeys()` on the `UiController` instance to attach it at runtime. This makes it easy to temporarily disable softkeys for profiling or simplified UI runs without removing the code.
+
+Example:
+
+```python
+# create and configure SoftKeyBar as usual
+ui.set_softkeys(bar)
+# attach it so it draws and receives input
+ui.enable_softkeys()
+```
+
 ### Data Sources
 - **ADS-B**: File-based playback with deterministic timing and live polling of dump1090 `aircraft.json`
 - **Aircraft Tracking**: Real-time track maintenance with ring-buffer trails, state aggregation, and expiry management

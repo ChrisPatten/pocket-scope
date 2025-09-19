@@ -204,7 +204,13 @@ class UiController:
             pass
 
         # Softkeys (late-bound via set_softkeys)
+        # NOTE: Softkeys are disabled by default in this branch. The bar
+        # instance is stored in `_softkeys_backing` so it can be re-attached
+        # later without losing configuration. Use `enable_softkeys()` to
+        # attach at runtime.
         self._softkeys: SoftKeyBar | None = None
+        self._softkeys_backing: SoftKeyBar | None = None
+        self._softkeys_enabled: bool = False
         self._softkeys_base_actions: dict[str, Callable[[], None]] | None = None
 
         # Config change subscription & listener task
@@ -263,14 +269,31 @@ class UiController:
             bar.bar_height = None
         except Exception:
             pass
-        self._softkeys = bar
+        # Store backing instance so callers can supply the bar even when
+        # softkeys are intentionally disabled. If softkeys are enabled the
+        # bar will be attached and wired as before; otherwise we keep the
+        # instance available for future enablement.
+        self._softkeys_backing = bar
 
-        # Ensure Settings button is wired
+        # Wire up appearance settings on the backing instance so layout is
+        # correct when later attached.
+
+        # Ensure Settings button is wired on the backing bar as well
         def _toggle_settings() -> None:
             self._settings_screen.on_key("s", self)
 
-        self._softkeys.actions["Settings"] = _toggle_settings
-        self._softkeys.layout()
+        try:
+            self._softkeys_backing.actions["Settings"] = _toggle_settings
+        except Exception:
+            pass
+
+        # Attach only if enabled (default: disabled)
+        if self._softkeys_enabled:
+            self._softkeys = self._softkeys_backing
+            try:
+                self._softkeys.layout()
+            except Exception:
+                pass
 
     async def run(self) -> None:
         self._running = True
@@ -539,6 +562,44 @@ class UiController:
 
     def toggle_overlay(self) -> None:
         self._cfg.overlay = not self._cfg.overlay
+
+    def enable_softkeys(self) -> None:
+        """Attach the previously-set SoftKeyBar to the controller so it is
+        drawn and receives input. If no bar was provided via `set_softkeys`
+        this is a no-op.
+        """
+        try:
+            if self._softkeys_backing is None:
+                return
+            self._softkeys_enabled = True
+            self._softkeys = self._softkeys_backing
+            # Ensure actions mapping and layout are installed
+            try:
+                if self._softkeys_base_actions is None:
+                    # preserve existing mapping if present
+                    self._softkeys_base_actions = dict(self._softkeys.actions)
+            except Exception:
+                pass
+            try:
+                self._softkeys.layout()
+            except Exception:
+                pass
+        except Exception:
+            pass
+
+    def disable_softkeys(self) -> None:
+        """Detach the SoftKeyBar so it is not drawn or receives input.
+        The backing instance is preserved and can be re-attached with
+        `enable_softkeys()`.
+        """
+        try:
+            self._softkeys_enabled = False
+            # Keep backing, but detach runtime reference
+            self._softkeys = None
+            # Clear base_actions so when re-enabled we rebuild mapping
+            self._softkeys_base_actions = None
+        except Exception:
+            pass
 
     def cycle_units(self, *, persist: bool = True) -> None:
         order = list(UNITS_ORDER)
@@ -1057,17 +1118,25 @@ class UiController:
         if not getattr(self, "autoscale_enabled", False):
             self._autoscale_alt_override = None
             return
+
+        cfg_min = float(self._cfg.min_range_nm)
+        cfg_max = float(self._cfg.max_range_nm)
         try:
-            base_range = float(self._settings.range_nm)
+            user_range = float(self._settings.range_nm)
         except Exception:
-            base_range = float(self._cfg.range_nm)
-        base_range = max(
-            float(self._cfg.min_range_nm),
-            min(base_range, float(self._cfg.max_range_nm)),
-        )
-        max_range_allowed = float(self._cfg.max_range_nm)
+            user_range = float(self._cfg.range_nm)
+
         target = max(1, int(getattr(self, "autoscale_target_visible", 12)))
         eligible_metrics = [m for m in metrics if self._has_full_datablock(m)]
+
+        if not eligible_metrics:
+            # No eligible aircraft -> reset overrides and clamp range inside bounds
+            clamped = max(cfg_min, min(user_range, cfg_max))
+            self._autoscale_alt_override = None
+            self._cfg.range_nm = clamped
+            self._autoscale_range_nm = clamped
+            return
+
         distances = sorted(
             m.distance_nm for m in eligible_metrics if math.isfinite(m.distance_nm)
         )
@@ -1077,46 +1146,86 @@ class UiController:
                 return 0
             return bisect_right(distances, r + 1e-9)
 
-        base_count = count_for_range(base_range)
-        selected_range = base_range
-        selected_count = base_count
-        self._autoscale_alt_override = None
-
-        if base_count > target:
-            threshold = self._autoscale_alt_threshold(
-                eligible_metrics, base_range, target
-            )
-            if threshold is not None:
-                self._autoscale_alt_override = (None, threshold)
+        if user_range < 50.0:
+            # Treat user range as minimum (lower bound)
+            lower_bound = max(cfg_min, user_range)
+            upper_bound = cfg_max
         else:
-            candidate_set: set[float] = {base_range}
-            for step in RANGE_LADDER_NM:
-                try:
-                    step_val = float(step)
-                except Exception:
-                    continue
-                if base_range <= step_val <= max_range_allowed:
-                    candidate_set.add(step_val)
-            candidate_set.add(max_range_allowed)
-            range_candidates = sorted(candidate_set)
-            if base_count < target and range_candidates:
-                matched = False
-                for candidate in range_candidates:
-                    if candidate <= base_range:
-                        continue
-                    cnt = count_for_range(candidate)
-                    selected_range = candidate
-                    selected_count = cnt
-                    if cnt >= target:
-                        matched = True
-                        break
-                if not matched:
-                    selected_range = range_candidates[-1]
-                    selected_count = count_for_range(selected_range)
-                if selected_range > base_range and selected_count > target:
-                    selected_range = base_range
-                    selected_count = base_count
+            # Treat user range as maximum (upper bound)
+            lower_bound = cfg_min
+            upper_bound = min(cfg_max, user_range)
 
+        if lower_bound > upper_bound:
+            lower_bound, upper_bound = upper_bound, lower_bound
+
+        current_range = max(lower_bound, min(self._cfg.range_nm, upper_bound))
+        base_range = max(lower_bound, min(user_range, upper_bound))
+
+        ladder_vals: set[float] = set()
+        for step in RANGE_LADDER_NM:
+            try:
+                val = float(step)
+            except Exception:
+                continue
+            if lower_bound <= val <= upper_bound:
+                ladder_vals.add(val)
+        ladder_vals.update({lower_bound, upper_bound, base_range, current_range})
+
+        candidates = sorted(ladder_vals)
+        counts: dict[float, int] = {r: count_for_range(r) for r in candidates}
+        base_count = counts.get(base_range, count_for_range(base_range))
+
+        self._autoscale_alt_override = None
+        selected_range = current_range
+
+        if user_range < 50.0:
+            # Lower-bound mode: zoom out to reach target, altitude filter only at base
+            if base_count > target:
+                selected_range = base_range
+                threshold = self._autoscale_alt_threshold(
+                    eligible_metrics, base_range, target
+                )
+                if threshold is not None:
+                    self._autoscale_alt_override = (None, threshold)
+            else:
+                chosen: float | None = None
+                for candidate in candidates:
+                    if candidate < base_range:
+                        continue
+                    if counts[candidate] >= target:
+                        chosen = candidate
+                        break
+                if chosen is None:
+                    selected_range = upper_bound
+                else:
+                    selected_range = chosen
+        else:
+            # Upper-bound mode: treat user range as cap; zoom in to shed traffic first
+            if base_count <= target:
+                selected_range = base_range
+            else:
+                chosen = None
+                for candidate in reversed(candidates):
+                    if candidate > base_range:
+                        continue
+                    if counts[candidate] <= target:
+                        chosen = candidate
+                        break
+                if chosen is None:
+                    selected_range = lower_bound
+                else:
+                    selected_range = max(lower_bound, chosen)
+                final_count = counts.get(
+                    selected_range, count_for_range(selected_range)
+                )
+                if final_count > target:
+                    threshold = self._autoscale_alt_threshold(
+                        eligible_metrics, selected_range, target
+                    )
+                    if threshold is not None:
+                        self._autoscale_alt_override = (None, threshold)
+
+        selected_range = max(lower_bound, min(selected_range, upper_bound))
         self._autoscale_range_nm = selected_range
         self._cfg.range_nm = selected_range
 

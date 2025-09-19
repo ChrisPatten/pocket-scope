@@ -82,30 +82,8 @@ async def test_settings_screen_full_flow(
     # Still no file (staged change)
     assert not path.exists()
 
-    # Invoke Save softkey action to persist staged changes
-    from pocketscope.ui.softkeys import SoftKeyBar
-
-    if ui._softkeys is None:  # type: ignore[attr-defined]
-        bar = SoftKeyBar(
-            display.size(),
-            actions={
-                "Zoom-": ui.zoom_out,
-                "Units": ui.cycle_units,
-                "Tracks": ui.cycle_track_length,
-                "Demo": ui.toggle_demo,
-                "Settings": lambda: None,
-                "Zoom+": ui.zoom_in,
-            },
-        )
-        ui.set_softkeys(bar)
-        ui._settings_screen.visible = True  # expose Save
-        ui._sync_softkeys()  # type: ignore[attr-defined]
-    else:
-        ui._settings_screen.visible = True  # type: ignore[attr-defined]
-        ui._sync_softkeys()  # type: ignore[attr-defined]
-    bar = ui._softkeys  # type: ignore[attr-defined]
-    assert bar is not None
-    bar.actions["Save"]()
+    # Persist staged changes by invoking SettingsScreen's save helper (no softkeys needed)
+    settings_screen._save_and_close()  # type: ignore[attr-defined]
     await asyncio.sleep(0.1)
     data = json.loads(path.read_text())
     assert data["demo_mode"] is True
