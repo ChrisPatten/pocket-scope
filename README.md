@@ -39,6 +39,35 @@ PocketScope is a handheld Pi-powered ATC-style scope for decoding and displaying
 - **Frames**: Geodetic⇄ECEF conversion and ECEF→ENU local tangent plane
 - **Mapping**: ENU→screen north‑up mapping and range/bearing convenience APIs
 
+Mapping and spatial utilities
+-----------------------------
+
+PocketScope includes a small spatial utility module for common mapping tasks
+and lightweight GeoJSON <-> WKB conversion helpers used by the bundled
+GeoJSON ingestion tool. See docs/spatial.md for details on:
+
+- computing haversine distances and approximate bounding boxes
+- converting GeoJSON geometries to a minimal WKB bytes format stored in
+    the SQLite map DB
+- reading WKB back to GeoJSON-like dicts and deriving polygon centroids
+- registering a HAV_MILES SQL function on a sqlite3.Connection for fast
+    distance queries inside SQL
+
+There is also a command-line ingestion helper that converts GeoJSON feature
+collections (airports, runways, states) into a spatially indexed SQLite DB
+ready for fast map lookups. Example:
+
+```bash
+python -m pocketscope.data.ingest_geojson_to_sqlite \
+    --airports data/airports.geojson \
+    --runways data/runways.geojson \
+    --states data/states.geojson \
+    --out ./build/map.db --replace
+```
+
+For full details on the spatial helpers and the ingestion tool, see
+`docs/spatial.md`.
+
 # PocketScope
 
 <!-- Badges -->
