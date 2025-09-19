@@ -23,10 +23,16 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from math import cos, radians, sin
-from typing import TYPE_CHECKING, Any, Iterable, List, Optional, Sequence, Tuple
+from typing import TYPE_CHECKING, Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 from pocketscope import config as _config
-from pocketscope.core.geo import ecef_to_enu, enu_to_screen, geodetic_to_ecef
+from pocketscope.core.geo import (
+    ecef_to_enu,
+    enu_to_screen,
+    geodetic_to_ecef,
+    haversine_nm,
+    initial_bearing_deg,
+)
 from pocketscope.render.airports_layer import AirportsLayer
 from pocketscope.render.canvas import Canvas, Color
 from pocketscope.render.labels import DataBlockFormatter as LabelFormatter
@@ -59,6 +65,81 @@ ColorAircraft: Color = _col(_PPI_THEME.get("aircraft"), (255, 255, 0, 255))
 ColorLabels: Color = _col(_PPI_THEME.get("labels"), (255, 255, 255, 255))
 ColorDataBlock: Color = _col(_PPI_THEME.get("datablock"), (0, 255, 0, 255))
 ColorDataBlockBG: Color = _col(_PPI_THEME.get("datablock_bg"), (0, 0, 0, 140))
+
+_M_PER_NM = 1852.0
+_FT_TO_M = 0.3048
+
+
+def _ft_to_m(value: Any) -> float | None:
+    if value is None:
+        return None
+    try:
+        return float(value) * _FT_TO_M
+    except (TypeError, ValueError):
+        return None
+
+
+def _primary_ring(geometry: Any) -> List[List[float]]:
+    if not isinstance(geometry, dict):
+        return []
+    gtype = geometry.get("type")
+    coords = geometry.get("coordinates")
+    if gtype == "Polygon":
+        rings = coords or []
+        return list(rings[0]) if rings else []
+    if gtype == "MultiPolygon":
+        polygons = coords or []
+        if not polygons:
+            return []
+        first = polygons[0]
+        return list(first[0]) if first else []
+    return []
+
+
+def _runway_length_bearing(geometry: Any) -> tuple[float | None, float | None]:
+    ring = _primary_ring(geometry)
+    if len(ring) < 2:
+        return (None, None)
+    best_pair: tuple[float, float, float, float] | None = None
+    max_nm = 0.0
+    points = [(float(pt[1]), float(pt[0])) for pt in ring]
+    for idx, (lat1, lon1) in enumerate(points):
+        for lat2, lon2 in points[idx + 1 :]:
+            dist_nm = haversine_nm(lat1, lon1, lat2, lon2)
+            if dist_nm > max_nm:
+                max_nm = dist_nm
+                best_pair = (lat1, lon1, lat2, lon2)
+    if best_pair is None or max_nm <= 0.0:
+        return (None, None)
+    bearing = initial_bearing_deg(*best_pair)
+    return (max_nm * _M_PER_NM, bearing)
+
+
+def _prepare_runway_icons(
+    runways: Sequence[Dict[str, Any]]
+) -> dict[str, list[Dict[str, Any]]]:
+    grouped: dict[str, list[Dict[str, Any]]] = {}
+    for rw in runways:
+        ident = rw.get("airport_ident")
+        if not ident:
+            continue
+        length_m_prop = _ft_to_m(rw.get("length_ft"))
+        width_m_prop = _ft_to_m(rw.get("width_ft"))
+        geom = rw.get("geometry")
+        geom_length_m, geom_bearing = _runway_length_bearing(geom)
+        if length_m_prop is None:
+            length_m_prop = geom_length_m
+        entry = {
+            "length_m": length_m_prop,
+            "width_m": width_m_prop,
+            "bearing_true": geom_bearing,
+            "surface": rw.get("surface"),
+            "light_actv": rw.get("light_actv"),
+            "light_intns": rw.get("light_intns"),
+        }
+        key = str(ident).upper()
+        grouped.setdefault(key, []).append(entry)
+    return grouped
 
 
 def _on_runtime_update(rc: Any) -> None:
@@ -239,11 +320,9 @@ class PpiView:
         center_lat: float,
         center_lon: float,
         tracks: Iterable[TrackSnapshot],
-        airports: Optional[Sequence[Tuple[float, float, str]]] = None,
+        map_data: Optional[Dict[str, Any]] = None,
         sectors: Optional[Sequence["Sector"]] = None,
         occlusions: Optional[Sequence[Tuple[int, int, int, int]]] = None,
-        runway_sqlite: str | None = None,
-        runway_icons: bool = False,
     ) -> None:
         """Draw the PPI view contents.
         - Deterministic: draws tracks sorted by (callsign, icao), optional text
@@ -305,6 +384,12 @@ class PpiView:
                         )
                     )
 
+        map_airports = map_data.get("airports") if map_data else []
+        runways_source = map_data.get("runways") if map_data else []
+        runways_by_ident = (
+            _prepare_runway_icons(runways_source) if runways_source else {}
+        )
+
         # z-index 0: Sectors
         if sectors:
             try:
@@ -325,28 +410,18 @@ class PpiView:
                 pass
 
         # z-index 1: Airports
-        if self.show_airports and airports:
+        if self.show_airports and map_airports:
             try:
-                from pocketscope.data.airports import Airport
-
-                aps: list[Airport] = []
-                for lat, lon, ident in airports:
-                    aps.append(
-                        Airport(
-                            ident=str(ident).upper(), lat=float(lat), lon=float(lon)
-                        )
-                    )
                 AirportsLayer(font_px=self.label_font_px).draw(
                     canvas,
                     center_lat=center_lat,
                     center_lon=center_lon,
                     range_nm=self.range_nm,
-                    airports=aps,
+                    airports=map_airports,
                     screen_size=(w, h),
                     rotation_deg=self.rotation_deg,
                     range_ring_exclusions=range_ring_exclusions,
-                    runway_sqlite=runway_sqlite,
-                    runway_icons=runway_icons,
+                    runways_by_ident=runways_by_ident if runways_by_ident else None,
                 )
             except Exception:
                 pass

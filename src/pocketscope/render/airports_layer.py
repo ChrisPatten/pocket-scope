@@ -14,8 +14,7 @@ Rules
 
 from __future__ import annotations
 
-import os
-from typing import Sequence
+from typing import Any, Mapping, Sequence
 
 from pocketscope.core.geo import (
     ecef_to_enu,
@@ -23,8 +22,6 @@ from pocketscope.core.geo import (
     geodetic_to_ecef,
     haversine_nm,
 )
-from pocketscope.data.airports import Airport
-from pocketscope.data.runways_store import get_runways_for_airport
 from pocketscope.render.airport_icon import AirportIconRenderer
 from pocketscope.render.canvas import Canvas, Color
 from pocketscope.settings.values import THEME
@@ -47,6 +44,12 @@ def _coerce_color(val: object, fallback: tuple[int, int, int, int]) -> Color:
 
 MarkerColor: Color = _coerce_color(_AL_THEME.get("marker"), (160, 160, 160, 255))
 LabelColor: Color = _coerce_color(_AL_THEME.get("label"), (255, 255, 255, 255))
+
+
+def _airport_field(ap: Any, key: str) -> Any:
+    if isinstance(ap, Mapping):
+        return ap.get(key)
+    return getattr(ap, key, None)
 
 
 class AirportsLayer:
@@ -162,12 +165,11 @@ class AirportsLayer:
         center_lat: float,
         center_lon: float,
         range_nm: float,
-        airports: Sequence[Airport],
+        airports: Sequence[Any] | None,
         screen_size: tuple[int, int],
         rotation_deg: float = 0.0,
         range_ring_exclusions: list[tuple[int, int, int, int]] | None = None,
-        runway_sqlite: str | None = None,
-        runway_icons: bool = False,
+        runways_by_ident: Mapping[str, Sequence[Mapping[str, Any]]] | None = None,
     ) -> None:
         """Render airport markers and labels.
 
@@ -229,32 +231,42 @@ class AirportsLayer:
         # Track placed label rectangles to avoid overlaps between airport labels
         placed_labels: list[tuple[int, int, int, int]] = []
 
+        if not airports:
+            return
+
         for ap in airports:
+            lat = _airport_field(ap, "lat")
+            lon = _airport_field(ap, "lon")
+            ident = _airport_field(ap, "ident")
+            if lat is None or lon is None or ident is None:
+                continue
+            try:
+                lat = float(lat)
+                lon = float(lon)
+            except (TypeError, ValueError):
+                continue
+            ident_str = str(ident).upper()
             # Range cull using haversine in NM
-            if haversine_nm(center_lat, center_lon, ap.lat, ap.lon) > range_nm:
+            if haversine_nm(center_lat, center_lon, lat, lon) > range_nm:
                 continue
 
-            sx, sy = to_screen(ap.lat, ap.lon)
-            # Prefer runway icon rendering when a sqlite cache file exists.
-            # Do NOT attempt to connect/create sqlite unless the file is present
-            # to avoid accidental DB creation. Fall back to diamond otherwise.
-            if runway_sqlite and os.path.exists(os.path.expanduser(runway_sqlite)):
+            sx, sy = to_screen(lat, lon)
+            runway_entries = (
+                [dict(x) for x in runways_by_ident.get(ident_str, [])]
+                if runways_by_ident is not None
+                else []
+            )
+            if runway_entries:
                 try:
-                    rw = get_runways_for_airport(runway_sqlite, ap.ident)
-                    renderer = AirportIconRenderer(canvas)
-                    # estimate pixels_per_meter from m_per_px
-                    radius_px = max(10, min(W, H) // 2 - 6)
-                    meters_per_nm = 1852.0
-                    m_per_px = (range_nm * meters_per_nm) / float(radius_px)
                     ppm = 1.0 / m_per_px
-                    renderer.draw((sx, sy), rw, ppm)
+                    AirportIconRenderer(canvas).draw((sx, sy), runway_entries, ppm)
                 except Exception:
                     draw_diamond((sx, sy), size=5)
             else:
                 draw_diamond((sx, sy), size=5)
 
             # Find best position for label avoiding exclusions and prior labels
-            text = ap.ident
+            text = ident_str
             label_pos = self._find_best_label_position(
                 sx,
                 sy,

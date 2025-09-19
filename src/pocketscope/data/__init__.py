@@ -1,13 +1,5 @@
-"""Data loaders and fixtures for PocketScope.
+"""Data utilities for PocketScope."""
 
-Currently includes a minimal airports loader. More directories/sources will
-be added in future iterations.
-"""
+from .cache import LRUCache, key_for_center
 
-from .airports import Airport, load_airports_json, nearest_airports
-
-__all__ = [
-    "Airport",
-    "load_airports_json",
-    "nearest_airports",
-]
+__all__ = ["LRUCache", "key_for_center"]

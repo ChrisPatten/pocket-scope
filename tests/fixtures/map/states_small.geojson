@@ -1,0 +1,22 @@
+{
+  "type": "FeatureCollection",
+  "features": [
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "MultiPolygon",
+        "coordinates": [[[
+          [-71.3, 41.9],
+          [-70.8, 41.9],
+          [-70.8, 42.3],
+          [-71.3, 42.3],
+          [-71.3, 41.9]
+        ]]]
+      },
+      "properties": {
+        "GEO_ID": "S1",
+        "NAME": "Test State"
+      }
+    }
+  ]
+}

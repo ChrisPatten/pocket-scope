@@ -89,6 +89,9 @@ class Settings(BaseModel):
     track_expiry_s: float = Field(
         default=float(TRACK_SERVICE_DEFAULTS.get("expiry_s", 300.0))
     )
+    # Additional airport identifiers to display beyond 3-letter alpha codes.
+    # This allows display of airports with numeric or longer identifiers.
+    extra_airports: list[str] = Field(default_factory=list)
 
     @field_validator("units")
     @classmethod
@@ -107,6 +110,22 @@ class Settings(BaseModel):
         if v <= 0:
             raise ValueError("track_length_s must be > 0")
         return v
+
+    @field_validator("extra_airports")
+    @classmethod
+    def _chk_extra_airports(
+        cls, v: list[str]
+    ) -> list[str]:  # pragma: no cover - trivial
+        if not isinstance(v, list):
+            raise ValueError("extra_airports must be a list")
+        result = []
+        for item in v:
+            if isinstance(item, str):
+                # Normalize to uppercase and strip whitespace
+                normalized = str(item).strip().upper()
+                if normalized:
+                    result.append(normalized)
+        return result
 
     @field_validator("track_expiry_s")
     @classmethod

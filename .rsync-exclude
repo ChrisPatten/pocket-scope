@@ -4,3 +4,4 @@ __pycache__
 # matches at any depth (requires rsync with '**' support; rsync 3.1+)
 **/.*/
 pocketscope.egg-info
+build/
