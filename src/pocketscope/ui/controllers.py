@@ -10,7 +10,9 @@ from __future__ import annotations
 
 import asyncio
 import json
+import math
 import os
+from bisect import bisect_right
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable, Optional, Sequence, cast
@@ -59,6 +61,16 @@ class UiConfig:
     max_range_nm: float = float(ZOOM_LIMITS.get("max_range_nm", 80.0))
     target_fps: float = 30.0
     overlay: bool = True
+
+
+@dataclass(slots=True)
+class _TrackMetric:
+    track: Any
+    last_point: Any
+    lat: float
+    lon: float
+    altitude_ft: float | None
+    distance_nm: float
 
 
 class UiController:
@@ -137,6 +149,19 @@ class UiController:
         self.north_up_lock = getattr(self._settings, "north_up_lock", True)
         # Sector label visibility (persisted)
         self.sector_labels = bool(getattr(self._settings, "sector_labels", True))
+        self.autoscale_enabled = bool(
+            getattr(self._settings, "autoscale_enabled", False)
+        )
+        try:
+            self.autoscale_target_visible = int(
+                getattr(self._settings, "autoscale_target_visible", 12)
+            )
+        except Exception:
+            self.autoscale_target_visible = 12
+        self._autoscale_alt_override: tuple[float | None, float | None] | None = None
+        self._autoscale_range_nm: float | None = None
+        self._total_aircraft_count: int = 0
+        self._visible_aircraft_count: int = 0
         # Apply persisted trail length immediately so TrackService windows
         # reflect a user-provided custom value on startup (previously only
         # applied when cycling or after a cfg.changed hot‑reload event).
@@ -264,8 +289,10 @@ class UiController:
                 # Ensure softkey action set reflects current settings screen visibility
                 self._sync_softkeys()
 
-                # Build snapshot of active tracks
-                snaps = self._build_snapshots()
+                metrics, tracks_active = self._collect_track_metrics()
+                self._total_aircraft_count = len(metrics)
+                self._apply_autoscale(metrics)
+                snaps = self._build_snapshots(metrics)
 
                 # Render frame
                 canvas = self._display.begin_frame()
@@ -310,10 +337,9 @@ class UiController:
                     # Compute most recent track timestamp across active
                     # tracks so the overlay can display the age of the
                     # latest data. If no tracks exist, pass None.
-                    tracks = []
+                    tracks = list(tracks_active)
                     latest_ts: float | None = None
                     try:
-                        tracks = self._tracks.list_active()
                         for tr in tracks:
                             try:
                                 t = tr.last_ts.timestamp()
@@ -322,7 +348,6 @@ class UiController:
                             except Exception:
                                 continue
                     except Exception:
-                        # leave tracks as [] and latest_ts as None
                         tracks = []
                         latest_ts = None
 
@@ -417,9 +442,10 @@ class UiController:
                         imu_ok=True,
                         decoder_ok=True,
                         last_update_ts=latest_ts,
-                        ac_count=len(tracks)
-                        if isinstance(tracks, (list, tuple))
-                        else None,
+                        ac_counts=(
+                            len(tracks) if isinstance(tracks, (list, tuple)) else None,
+                            self._visible_aircraft_count,
+                        ),
                         nearest_range_nm=nearest_range_nm,
                         nearest_alt_ft=nearest_alt_ft,
                         alt_filter=self.alt_filter,
@@ -596,6 +622,16 @@ class UiController:
     @property
     def alt_filter(self) -> tuple[float | None, float | None]:
         """Return active altitude filter bounds (min_ft, max_ft)."""
+        if getattr(self, "autoscale_enabled", False):
+            # Explicitly type this local so static checkers do not treat
+            # getattr()'s result as Any and then complain about returning
+            # Any from a function declared to return a typed tuple.
+            override: tuple[float | None, float | None] | None = getattr(
+                self, "_autoscale_alt_override", None
+            )
+            if override is not None:
+                return override
+            return (None, None)
         # Prefer explicit min/max from settings if present
         try:
             custom_lo = getattr(self._settings, "altitude_min_ft", None)
@@ -818,6 +854,21 @@ class UiController:
                 self.demo_mode = new.demo_mode
                 self.altitude_filter = getattr(new, "altitude_filter", "All")
                 self.north_up_lock = getattr(new, "north_up_lock", True)
+                self.autoscale_enabled = bool(
+                    getattr(new, "autoscale_enabled", self.autoscale_enabled)
+                )
+                try:
+                    self.autoscale_target_visible = int(
+                        getattr(
+                            new,
+                            "autoscale_target_visible",
+                            self.autoscale_target_visible,
+                        )
+                    )
+                except Exception:
+                    pass
+                self._autoscale_alt_override = None
+                self._autoscale_range_nm = None
                 # Mirror flip_display runtime state and notify backend
                 try:
                     self._flip_display = bool(getattr(new, "flip_display", False))
@@ -907,64 +958,215 @@ class UiController:
         except asyncio.CancelledError:
             pass
 
-    def _build_snapshots(self) -> list[TrackSnapshot]:
-        tracks = self._tracks.list_active()
+    def _collect_track_metrics(self) -> tuple[list[_TrackMetric], list[Any]]:
+        try:
+            active = self._tracks.list_active()
+        except Exception:
+            return ([], [])
+        metrics: list[_TrackMetric] = []
+        for tr in active:
+            history = getattr(tr, "history", None)
+            if not history:
+                continue
+            try:
+                last = history[-1]
+                lat = float(last[1])
+                lon = float(last[2])
+            except Exception:
+                continue
+            altitude_ft = self._altitude_for_filter(tr, last)
+            distance_nm = self._distance_nm(lat, lon)
+            metrics.append(
+                _TrackMetric(
+                    track=tr,
+                    last_point=last,
+                    lat=lat,
+                    lon=lon,
+                    altitude_ft=altitude_ft,
+                    distance_nm=distance_nm,
+                )
+            )
+        return metrics, list(active)
+
+    def _has_full_datablock(self, metric: _TrackMetric) -> bool:
+        if metric.altitude_ft is None:
+            return False
+        try:
+            heading = metric.track.state.get("track_deg")
+        except Exception:
+            heading = None
+        if not isinstance(heading, (int, float)):
+            return False
+        try:
+            speed = metric.track.state.get("ground_speed")
+        except Exception:
+            speed = None
+        if not isinstance(speed, (int, float)):
+            return False
+        return True
+
+    @staticmethod
+    def _altitude_for_filter(tr: Any, last_point: Any) -> float | None:
+        alt_for_filter: float | None = None
+        try:
+            geo_alt = tr.state.get("geo_alt")
+        except Exception:
+            geo_alt = None
+        try:
+            baro_alt = tr.state.get("baro_alt")
+        except Exception:
+            baro_alt = None
+        if isinstance(geo_alt, (int, float)):
+            alt_for_filter = float(geo_alt)
+        elif isinstance(baro_alt, (int, float)):
+            alt_for_filter = float(baro_alt)
+        else:
+            try:
+                if isinstance(last_point[3], (int, float)):
+                    alt_for_filter = float(last_point[3])
+            except Exception:
+                pass
+        return alt_for_filter
+
+    def _distance_nm(self, lat: float, lon: float) -> float:
+        try:
+            tx, ty, tz = geodetic_to_ecef(lat, lon, 0.0)
+            e, n, _ = ecef_to_enu(tx, ty, tz, self._center_lat, self._center_lon, 0.0)
+            return math.hypot(e, n) / 1852.0
+        except Exception:
+            return math.inf
+
+    def _autoscale_alt_threshold(
+        self, metrics: list[_TrackMetric], range_limit: float, target: int
+    ) -> float | None:
+        alts = sorted(
+            float(m.altitude_ft)
+            for m in metrics
+            if m.altitude_ft is not None
+            and math.isfinite(m.distance_nm)
+            and m.distance_nm <= range_limit + 1e-6
+        )
+        if not alts:
+            return None
+        idx = min(len(alts), max(1, target)) - 1
+        threshold = alts[idx] + 0.999
+        return threshold
+
+    def _apply_autoscale(self, metrics: list[_TrackMetric]) -> None:
+        self._autoscale_range_nm = None
+        if not getattr(self, "autoscale_enabled", False):
+            self._autoscale_alt_override = None
+            return
+        try:
+            base_range = float(self._settings.range_nm)
+        except Exception:
+            base_range = float(self._cfg.range_nm)
+        base_range = max(
+            float(self._cfg.min_range_nm),
+            min(base_range, float(self._cfg.max_range_nm)),
+        )
+        max_range_allowed = float(self._cfg.max_range_nm)
+        target = max(1, int(getattr(self, "autoscale_target_visible", 12)))
+        eligible_metrics = [m for m in metrics if self._has_full_datablock(m)]
+        distances = sorted(
+            m.distance_nm for m in eligible_metrics if math.isfinite(m.distance_nm)
+        )
+
+        def count_for_range(r: float) -> int:
+            if not distances:
+                return 0
+            return bisect_right(distances, r + 1e-9)
+
+        base_count = count_for_range(base_range)
+        selected_range = base_range
+        selected_count = base_count
+        self._autoscale_alt_override = None
+
+        if base_count > target:
+            threshold = self._autoscale_alt_threshold(
+                eligible_metrics, base_range, target
+            )
+            if threshold is not None:
+                self._autoscale_alt_override = (None, threshold)
+        else:
+            candidate_set: set[float] = {base_range}
+            for step in RANGE_LADDER_NM:
+                try:
+                    step_val = float(step)
+                except Exception:
+                    continue
+                if base_range <= step_val <= max_range_allowed:
+                    candidate_set.add(step_val)
+            candidate_set.add(max_range_allowed)
+            range_candidates = sorted(candidate_set)
+            if base_count < target and range_candidates:
+                matched = False
+                for candidate in range_candidates:
+                    if candidate <= base_range:
+                        continue
+                    cnt = count_for_range(candidate)
+                    selected_range = candidate
+                    selected_count = cnt
+                    if cnt >= target:
+                        matched = True
+                        break
+                if not matched:
+                    selected_range = range_candidates[-1]
+                    selected_count = count_for_range(selected_range)
+                if selected_range > base_range and selected_count > target:
+                    selected_range = base_range
+                    selected_count = base_count
+
+        self._autoscale_range_nm = selected_range
+        self._cfg.range_nm = selected_range
+
+    def _build_snapshots(
+        self, metrics: list[_TrackMetric] | None = None
+    ) -> list[TrackSnapshot]:
+        if metrics is None:
+            metrics, _ = self._collect_track_metrics()
         lo, hi = self.alt_filter
         out: list[TrackSnapshot] = []
+        visible_count = 0
+        range_limit = float(self._cfg.range_nm)
         # Precompute center ECEF once per frame (avoid repetition inside loop)
         _ox, _oy, _oz = geodetic_to_ecef(self._center_lat, self._center_lon, 0.0)
-        for tr in tracks:
-            if not tr.history:
-                continue
-            last = tr.history[-1]
-            lat, lon = float(last[1]), float(last[2])
-            # Determine altitude used for filtering. Preference order:
-            # geo_alt, then baro_alt, then last trail altitude sample.
-            alt_for_filter: float | None = None
-            _ga = tr.state.get("geo_alt")
-            _ba = tr.state.get("baro_alt")
-            if isinstance(_ga, (int, float)):
-                alt_for_filter = float(_ga)
-            elif isinstance(_ba, (int, float)):
-                alt_for_filter = float(_ba)
-            else:
-                try:
-                    if isinstance(last[3], (int, float)):
-                        alt_for_filter = float(last[3])
-                except Exception:
-                    pass
+        for metric in metrics:
+            tr = metric.track
+            last = metric.last_point
+            lat = metric.lat
+            lon = metric.lon
+            alt_for_filter = metric.altitude_ft
             if alt_for_filter is None and (lo is not None or hi is not None):
-                # Exclude tracks lacking altitude when filtering active
                 continue
             if lo is not None and alt_for_filter is not None and alt_for_filter < lo:
                 continue
             if hi is not None and alt_for_filter is not None and alt_for_filter >= hi:
                 continue
-            # Course
+            if (
+                self._has_full_datablock(metric)
+                and math.isfinite(metric.distance_nm)
+                and metric.distance_nm <= range_limit + 1e-6
+            ):
+                visible_count += 1
             course = None
-            v = tr.state.get("track_deg")
+            try:
+                v = tr.state.get("track_deg")
+            except Exception:
+                v = None
             if isinstance(v, (int, float)):
                 course = float(v)
-            # Dynamic trail window & thinning ---------------------------------
-            # We render up to *track_length_s* seconds of trail, selecting
-            # points by timestamp (not just count) so custom long lengths
-            # (e.g. 600s) display correctly. When the resulting window has
-            # more than MAX_POINTS we thin the *older* portion while keeping
-            # a dense recent tail for visual fidelity of current motion.
             try:
                 window_s = float(getattr(self, "track_length_s", 60.0))
             except Exception:
                 window_s = 60.0
-            # Compute cutoff timestamp
             try:
                 end_ts = last[0].timestamp()
             except Exception:
-                # Fallback: skip dynamic behaviour if timestamp missing
                 end_ts = None
             hist = tr.history
             if end_ts is not None:
                 cutoff = end_ts - window_s
-                # Find first index >= cutoff (linear scan; history lengths are modest)
                 start_idx = 0
                 for i, pt in enumerate(hist):
                     try:
@@ -975,17 +1177,15 @@ class UiController:
                         continue
                 window_pts = hist[start_idx:]
             else:
-                # Fallback: take the most recent window_s points by count
                 try:
                     window_pts = hist[-int(window_s) :]
                 except Exception:
                     window_pts = hist
 
-            MAX_POINTS = 600  # hard cap for rendering performance
-            RECENT_DENSE = 300  # keep this many newest points unthinned when thinning
+            MAX_POINTS = 600
+            RECENT_DENSE = 300
             pts_sel = window_pts
             if len(pts_sel) > MAX_POINTS:
-                # Keep last RECENT_DENSE verbatim; thin older portion uniformly.
                 dense = pts_sel[-RECENT_DENSE:]
                 older = pts_sel[:-RECENT_DENSE]
                 if older:
@@ -994,15 +1194,13 @@ class UiController:
                         target_old = 1
                     step = max(1, int(len(older) / target_old))
                     thinned_old = older[::step]
-                    # Ensure we don't exceed MAX_POINTS (trim oldest if necessary)
                     combined = thinned_old + dense
                     if len(combined) > MAX_POINTS:
                         combined = combined[-MAX_POINTS:]
                     pts_sel = combined
                 else:
-                    pts_sel = dense  # degenerate case
+                    pts_sel = dense
 
-            # Convert selected points to ENU
             trail_enu: list[tuple[float, float]] = []
             for _, la, lon_pt, _alt in pts_sel:
                 try:
@@ -1013,11 +1211,22 @@ class UiController:
                     trail_enu.append((e, n))
                 except Exception:
                     continue
-            # Optional kinematics
-            geo_alt = tr.state.get("geo_alt")
-            baro_alt = tr.state.get("baro_alt")
-            gs = tr.state.get("ground_speed")
-            vr = tr.state.get("vertical_rate")
+            try:
+                geo_alt = tr.state.get("geo_alt")
+            except Exception:
+                geo_alt = None
+            try:
+                baro_alt = tr.state.get("baro_alt")
+            except Exception:
+                baro_alt = None
+            try:
+                gs = tr.state.get("ground_speed")
+            except Exception:
+                gs = None
+            try:
+                vr = tr.state.get("vertical_rate")
+            except Exception:
+                vr = None
             out.append(
                 TrackSnapshot(
                     icao=tr.icao24,
@@ -1038,6 +1247,8 @@ class UiController:
                     ),
                 )
             )
+        self._total_aircraft_count = len(metrics)
+        self._visible_aircraft_count = visible_count
         return out
 
     def _update_fps(self, t0: float) -> tuple[float, float]:

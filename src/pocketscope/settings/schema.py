@@ -29,6 +29,8 @@ class Settings(BaseModel):
 
     units: str = Field(default=UNITS_ORDER[0])
     range_nm: float = Field(default=10.0)
+    autoscale_enabled: bool = Field(default=False)
+    autoscale_target_visible: int = Field(default=12)
     track_length_s: float = Field(
         default=(
             TRACK_LENGTH_PRESETS_S[1]
@@ -136,6 +138,17 @@ class Settings(BaseModel):
             raise ValueError("track_expiry_s must be numeric") from None
         if v <= 0:
             raise ValueError("track_expiry_s must be > 0 (seconds)")
+        return v
+
+    @field_validator("autoscale_target_visible")
+    @classmethod
+    def _chk_autoscale_target(cls, v: int) -> int:  # pragma: no cover - trivial
+        try:
+            v = int(v)
+        except Exception:
+            raise ValueError("autoscale_target_visible must be an integer") from None
+        if v <= 0:
+            raise ValueError("autoscale_target_visible must be >= 1")
         return v
 
     @field_validator("altitude_filter")

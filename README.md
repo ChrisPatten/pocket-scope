@@ -18,7 +18,7 @@ PocketScope is a handheld Pi-powered ATC-style scope for decoding and displaying
 - **Time Abstraction**: Deterministic testing support with SimTimeSource and RealTimeSource
 - **Modular Design**: Clean separation between ingestion, processing, and visualization
 - **Rendering/UI**: Canvas API + multiple backends (Pygame, SPI TFT ILI9341, Web) with ATC-style data blocks, sector + airports overlays, deterministic golden-frame tests
-- **Persistent UI Settings**: Debounced JSON settings (units, default range, track length preset, demo mode, altitude filter incl. custom bounds, north-up lock) with soft key bar + settings screen
+- **Persistent UI Settings**: Debounced JSON settings (units, default range, track length preset, demo mode, altitude filter incl. custom bounds, north-up lock, autoscale target) with soft key bar + settings screen
 
 ### Data Sources
 - **ADS-B**: File-based playback with deterministic timing and live polling of dump1090 `aircraft.json`
@@ -87,7 +87,7 @@ PocketScope is a handheld Pi-powered ATC-style scope for decoding and displaying
 - **Time Abstraction**: Deterministic testing support with SimTimeSource and RealTimeSource
 - **Modular Design**: Clean separation between ingestion, processing, and visualization
 - **Rendering/UI**: Canvas API + multiple backends (Pygame, SPI TFT ILI9341, Web) with ATC-style data blocks, sector + airports overlays, deterministic golden-frame tests
-- **Persistent UI Settings**: Debounced JSON settings (units, default range, track length preset, demo mode, altitude filter incl. custom bounds, north-up lock) with soft key bar + settings screen
+- **Persistent UI Settings**: Debounced JSON settings (units, default range, track length preset, demo mode, altitude filter incl. custom bounds, north-up lock, autoscale target) with soft key bar + settings screen
 
 ### Data Sources
 - **ADS-B**: File-based playback with deterministic timing and live polling of dump1090 `aircraft.json`
@@ -995,6 +995,20 @@ Notes:
 | Altitude Filter | Visibility band (All, 0–5k, 5–10k, 10–20k, >20k) | Debounced save |
 | Demo Mode | Loop JSONL trace + DEMO badge + temporary recenter | Debounced save |
 | North-up Lock | Enforce rotation 0°; unlock enables arrow rotation | Debounced save |
+
+Additional autoscale controls live in `~/.pocketscope/settings.json` (not yet surfaced in the on-screen Settings UI):
+
+```jsonc
+{
+  "autoscale_enabled": true,
+  "autoscale_target_visible": 12
+}
+```
+
+- `autoscale_enabled`: when true, the controller starts from your saved zoom level and dynamically prefers zoom or altitude filters to keep roughly the target number of aircraft visible. It never writes the derived zoom/altitude back to disk.
+- `autoscale_target_visible`: desired count of aircraft on screen (default 12). Autoscale first tightens the max altitude band when you have more than the target at your chosen zoom. When fewer than the target are visible, it zooms out across the configured range ladder before falling back to altitude filtering.
+
+The status overlay now reports aircraft totals as `AC:<total>(<visible>)` so you can verify what autoscale is doing without leaving the main scope view.
 
 Custom altitude filter bounds (user-defined min/max) are supported and tested (`tests/ui/test_altitude_filter_custom_bounds.py`).
 
