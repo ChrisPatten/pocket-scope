@@ -15,10 +15,12 @@ from pocketscope.render.canvas import Canvas
 class SectorsLayer:
     def __init__(
         self,
-        color: tuple[int, int, int, int] = (80, 120, 200, 100),
+        color: tuple[int, int, int, int] = (128, 128, 128, 100),
         width_px: int = 1,
         show_labels: bool = True,
     ) -> None:
+        # Use medium gray for sector/state outlines by default. Preserve
+        # translucency (alpha=100) to match previous visual weight.
         self.color = (int(color[0]), int(color[1]), int(color[2]), int(color[3]))
         self.width_px = int(width_px)
         self.show_labels = bool(show_labels)

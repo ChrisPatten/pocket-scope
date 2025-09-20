@@ -111,6 +111,29 @@ def _measure_text_lines(lines: List[str], *, font_px: int) -> Tuple[int, int]:
         return int(max_len * font_px * 0.6), font_px * len(lines)
 
 
+def _fmt_alt(alt_ft: float | None) -> str:
+    """Format an altitude in feet into a compact label.
+
+    Uses flight levels (FLnnn) for altitudes >= 10000 ft, otherwise
+    returns feet or abbreviated thousands (e.g. 10k).
+    """
+
+    if alt_ft is None:
+        return "?"
+    try:
+        af = int(round(float(alt_ft)))
+    except Exception:
+        return "?"
+    if af >= 10000:
+        fl = int(round(af / 100.0))
+        return f"FL{fl}"
+    if af >= 1000 and af % 1000 == 0:
+        return f"{af // 1000}k"
+    if af >= 1000:
+        return f"{af/1000:.1f}k"
+    return f"{af}ft"
+
+
 class StatusOverlay:
     """Two-line element-based status panel (no ASCII borders).
 
@@ -171,6 +194,46 @@ class StatusOverlay:
                 ["CLOCK", "ALTFILTER", "AGE"],
             ]
 
+    @staticmethod
+    def format_alt_filter(
+        alt_filter: tuple[float | None, float | None] | None,
+        *,
+        autoscale: bool = False,
+    ) -> str:
+        if alt_filter is None:
+            min_ft, max_ft = None, None
+        else:
+            min_ft, max_ft = alt_filter
+        # Treat very small minimum altitudes (<= 500 ft) as unspecified for
+        # status display purposes so they don't clutter the label.
+        try:
+            if isinstance(min_ft, (int, float)) and float(min_ft) <= 500.0:
+                min_ft = None
+        except Exception:
+            pass
+
+        # Autoscale prefix should be a compact 'A' with no trailing space.
+        prefix = "A" if autoscale else ""
+
+        if (
+            min_ft is None or (isinstance(min_ft, (int, float)) and min_ft < 1000)
+        ) and max_ft is not None:
+            label = f"<{_fmt_alt(max_ft)}"
+        elif max_ft is None and min_ft is not None:
+            label = f">{_fmt_alt(min_ft)}"
+        elif min_ft is None and max_ft is None:
+            label = "---"
+        elif min_ft is not None and max_ft is not None:
+            label = f"{_fmt_alt(min_ft)}–{_fmt_alt(max_ft)}"
+        else:
+            label = "---"
+
+        # Do not include the previous 'ALT' label; if autoscale is enabled,
+        # prefix with 'A' immediately before the label (no space).
+        if prefix:
+            return f"{prefix}{label}"
+        return label
+
     # ------------------------------------------------------------------
     def draw(
         self,
@@ -190,6 +253,7 @@ class StatusOverlay:
         nearest_range_nm: float | None = None,
         nearest_alt_ft: float | None = None,
         alt_filter: tuple[float | None, float | None] | None = None,
+        alt_filter_autoscale: bool = False,
     ) -> None:
         # --- Build element arrays (no concatenation) ------------------
         units = settings.units
@@ -247,7 +311,8 @@ class StatusOverlay:
             else:
                 rng = range_nm
                 rng_units = "nm"
-            return f"RNG {rng:.0f}{rng_units}"
+            # Compact range display with colon and unit suffix, e.g. 'RNG:10nm'
+            return f"RNG:{rng:.0f}{rng_units}"
 
         def _elem_clock(clock_utc: str) -> str:
             return clock_utc
@@ -297,29 +362,6 @@ class StatusOverlay:
             return f"{fmt_lat(lat)} {fmt_lon(lon)}"
 
         # --- Additional element helpers requested by UI config -------
-        def _fmt_alt(alt_ft: float | None) -> str:
-            """Format an altitude in feet into a compact label.
-
-            Uses flight levels (FLnnn) for altitudes >= 10000 ft, and
-            otherwise shows feet or abbreviated thousands (e.g. 10k).
-            """
-            if alt_ft is None:
-                return "?"
-            try:
-                af = int(round(float(alt_ft)))
-            except Exception:
-                return "?"
-            if af >= 10000:
-                # Flight level: 35000ft -> FL350
-                fl = int(round(af / 100.0))
-                return f"FL{fl}"
-            if af >= 1000 and af % 1000 == 0:
-                return f"{af // 1000}k"
-            if af >= 1000:
-                # show one decimal for non-round thousands
-                return f"{af/1000:.1f}k"
-            return f"{af}ft"
-
         def _elem_near(
             range_nm_val: float | None, alt_ft: float | None, units_in: str = "nm_ft_kt"
         ) -> str:
@@ -345,7 +387,8 @@ class StatusOverlay:
                     rng_label = f"{rng:.1f}{ru}"
                 except Exception:
                     rng_label = "?"
-            return f"NEAR:{rng_label}/{_fmt_alt(alt_ft)}"
+            # Short label 'NR' for nearest target
+            return f"NR:{rng_label}/{_fmt_alt(alt_ft)}"
 
         def _elem_highest(alt_ft: float | None) -> str:
             """Highest target: small up-arrow + altitude (▲FL350)."""
@@ -368,24 +411,9 @@ class StatusOverlay:
         def _elem_altfilter(
             alt_filter: tuple[float | None, float | None] | None
         ) -> str:
-            """Altitude filter description e.g. ">FL100" or "0–10k".
-
-            Uses en-dash separator for ranges when both bounds are
-            present.
-            """
-            if alt_filter is None:
-                min_ft, max_ft = None, None
-            else:
-                min_ft, max_ft = alt_filter
-
-            if min_ft is None and max_ft is None:
-                return "ALT All"
-            if min_ft is None:
-                return f"< {_fmt_alt(max_ft)}"
-            if max_ft is None:
-                # show lower bound as a 'greater than' filter
-                return f">{_fmt_alt(min_ft)}"
-            return f"{_fmt_alt(min_ft)}–{_fmt_alt(max_ft)}"
+            return StatusOverlay.format_alt_filter(
+                alt_filter, autoscale=alt_filter_autoscale
+            )
 
         def _elem_ac_count(counts: tuple[int | None, int | None] | None) -> str:
             """Aircraft count summary (AC:total(visible))."""
@@ -395,7 +423,8 @@ class StatusOverlay:
                 total, visible = counts
                 total_txt = "?" if total is None else str(int(total))
                 visible_txt = "?" if visible is None else str(int(visible))
-                return f"AC:{total_txt}({visible_txt})"
+                # Show visible first, total in parentheses: 'AC:visible(total)'
+                return f"AC:{visible_txt}({total_txt})"
             except Exception:
                 return "AC:?"
 
@@ -499,9 +528,10 @@ class StatusOverlay:
             line_widths.append(max(1, int(total_w)))
         computed_width = max(line_widths) if line_widths else 1
         width = self.width_px or computed_width
+        # TODO: better handle height of special characters (e.g. "-")
         line_height = self.font_px + 2 * self.pad_y
         # Include top/bottom padding in total panel height so the overlay
-        # visually separates from content above/below and scales with font.
+        #  visually separates from content above/below and scales with font.
         panel_h = self.pad_top + (line_height * len(lines)) + self.pad_bottom
 
         # --- Background fill ------------------------------------------

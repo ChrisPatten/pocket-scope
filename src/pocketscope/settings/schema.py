@@ -31,6 +31,8 @@ class Settings(BaseModel):
     range_nm: float = Field(default=10.0)
     autoscale_enabled: bool = Field(default=False)
     autoscale_target_visible: int = Field(default=12)
+    autoscale_min_range_nm: float | None = Field(default=None)
+    autoscale_max_range_nm: float | None = Field(default=None)
     track_length_s: float = Field(
         default=(
             TRACK_LENGTH_PRESETS_S[1]
@@ -151,6 +153,19 @@ class Settings(BaseModel):
             raise ValueError("autoscale_target_visible must be >= 1")
         return v
 
+    @field_validator("autoscale_min_range_nm", "autoscale_max_range_nm")
+    @classmethod
+    def _chk_autoscale_range(cls, v: float | None) -> float | None:
+        if v is None:
+            return None
+        try:
+            fv = float(v)
+        except Exception:
+            raise ValueError("autoscale range limits must be numeric or null") from None
+        if fv <= 0:
+            raise ValueError("autoscale range limits must be > 0")
+        return fv
+
     @field_validator("altitude_filter")
     @classmethod
     def _chk_alt_filter(cls, v: str) -> str:  # pragma: no cover - trivial
@@ -197,6 +212,14 @@ class Settings(BaseModel):
         ):
             raise ValueError(
                 "altitude_min_ft must be < altitude_max_ft when both are set"
+            )
+        if (
+            self.autoscale_min_range_nm is not None
+            and self.autoscale_max_range_nm is not None
+            and self.autoscale_min_range_nm > self.autoscale_max_range_nm
+        ):
+            raise ValueError(
+                "autoscale_min_range_nm must be <= autoscale_max_range_nm when both are set"  # noqa:E501
             )
         # Migration: if legacy track_length_mode present in input data, map to numeric
         # value using old canonical mapping (short=15, medium=45, long=120) unless

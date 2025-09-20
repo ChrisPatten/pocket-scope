@@ -511,7 +511,9 @@ class PpiView:
             return int(round(cx + x)), int(round(cy + y))
 
         # Optional data-block label machinery
-        label_items: list[tuple[Tuple[int, int], Tuple[str, str, str], bool]] = []
+        label_candidates: list[
+            tuple[int, tuple[int, int], tuple[str, str, str], bool]
+        ] = []
         label_formatter: LabelFormatter | None = None
         label_layout: LabelLayout | None = None
         if self.show_data_blocks:
@@ -628,7 +630,8 @@ class PpiView:
                     focused=False,
                 )
                 lines = label_formatter.format_standard(ls)
-                label_items.append(((gx, gy), lines, False))
+                dist2 = (gx - cx) * (gx - cx) + (gy - cy) * (gy - cy)
+                label_candidates.append((dist2, (gx, gy), lines, False))
             else:
                 if self.show_simple_labels:
                     label_text = t.callsign or t.icao
@@ -661,7 +664,13 @@ class PpiView:
                 except Exception:
                     occl.extend(list(occlusions))
             occl.append((ox, oy, ow, oh))
-            placements = label_layout.place_blocks(label_items, occlusions=occl)
+            ordered_label_items = [
+                (anchor, lines, expanded)
+                for _range2, anchor, lines, expanded in sorted(
+                    label_candidates, key=lambda entry: entry[0]
+                )
+            ]
+            placements = label_layout.place_blocks(ordered_label_items, occlusions=occl)
             for p in placements:
                 ax, ay = p.anchor_px
                 w_b, h_b = label_layout.measure(p.lines)

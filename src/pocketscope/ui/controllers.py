@@ -472,6 +472,28 @@ class UiController:
                         nearest_range_nm=nearest_range_nm,
                         nearest_alt_ft=nearest_alt_ft,
                         alt_filter=self.alt_filter,
+                        # Only show autoscale marker when an autoscale
+                        # override is present and it imposes a finite
+                        # altitude cap (i.e. not math.inf).
+                        alt_filter_autoscale=(
+                            True
+                            if (
+                                getattr(self, "_autoscale_alt_override", None)
+                                is not None
+                                and getattr(self, "_autoscale_alt_override")[1]
+                                is not None
+                                and not (
+                                    isinstance(
+                                        getattr(self, "_autoscale_alt_override")[1],
+                                        float,
+                                    )
+                                    and math.isinf(
+                                        getattr(self, "_autoscale_alt_override")[1]
+                                    )
+                                )
+                            )
+                            else False
+                        ),
                     )
                 # Settings overlay drawn (softkey mapping already synced earlier)
                 if self._settings_screen.visible:
@@ -680,20 +702,8 @@ class UiController:
         if persist:
             SettingsStore.save_debounced(self._settings)
 
-    @property
-    def alt_filter(self) -> tuple[float | None, float | None]:
-        """Return active altitude filter bounds (min_ft, max_ft)."""
-        if getattr(self, "autoscale_enabled", False):
-            # Explicitly type this local so static checkers do not treat
-            # getattr()'s result as Any and then complain about returning
-            # Any from a function declared to return a typed tuple.
-            override: tuple[float | None, float | None] | None = getattr(
-                self, "_autoscale_alt_override", None
-            )
-            if override is not None:
-                return override
-            return (None, None)
-        # Prefer explicit min/max from settings if present
+    def _user_alt_filter_bounds(self) -> tuple[float | None, float | None]:
+        """Return user-requested altitude bounds, ignoring autoscale overrides."""
         try:
             custom_lo = getattr(self._settings, "altitude_min_ft", None)
             custom_hi = getattr(self._settings, "altitude_max_ft", None)
@@ -703,13 +713,36 @@ class UiController:
                     float(custom_hi) if custom_hi is not None else None,
                 )
         except (ValueError, TypeError):
-            # Fallback to band if settings values are invalid
+            # Fall back to band if settings values are invalid
             pass
 
-        # Otherwise, use the selected band
         band = getattr(self, "altitude_filter", "All")
         lo_hi = ALTITUDE_FILTER_BANDS.get(band, (None, None))
         return lo_hi[0], lo_hi[1]
+
+    @property
+    def alt_filter(self) -> tuple[float | None, float | None]:
+        """Return active altitude filter bounds (min_ft, max_ft)."""
+        base_lo, base_hi = self._user_alt_filter_bounds()
+        if getattr(self, "autoscale_enabled", False):
+            # Explicitly type this local so static checkers do not treat
+            # getattr()'s result as Any and then complain about returning
+            # Any from a function declared to return a typed tuple.
+            override: tuple[float | None, float | None] | None = getattr(
+                self, "_autoscale_alt_override", None
+            )
+            if override is not None:
+                o_lo, o_hi = override
+                if o_lo is not None:
+                    base_lo = max(base_lo, o_lo) if base_lo is not None else float(o_lo)
+                if o_hi is not None:
+                    if math.isinf(o_hi):
+                        base_hi = None
+                    else:
+                        base_hi = (
+                            min(base_hi, o_hi) if base_hi is not None else float(o_hi)
+                        )
+        return base_lo, base_hi
 
     def _apply_track_windows(self) -> None:
         presets = list(TRACK_LENGTH_PRESETS_S)
@@ -1050,20 +1083,48 @@ class UiController:
         return metrics, list(active)
 
     def _has_full_datablock(self, metric: _TrackMetric) -> bool:
-        if metric.altitude_ft is None:
+        alt_val = metric.altitude_ft
+        if alt_val is None or not math.isfinite(float(alt_val)):
             return False
+
         try:
-            heading = metric.track.state.get("track_deg")
+            state = metric.track.state
+        except Exception:
+            return False
+
+        alt_state: float | None = None
+        try:
+            geo_alt = state.get("geo_alt")
+        except Exception:
+            geo_alt = None
+        if isinstance(geo_alt, (int, float)) and math.isfinite(float(geo_alt)):
+            alt_state = float(geo_alt)
+        else:
+            try:
+                baro_alt = state.get("baro_alt")
+            except Exception:
+                baro_alt = None
+            if isinstance(baro_alt, (int, float)) and math.isfinite(float(baro_alt)):
+                alt_state = float(baro_alt)
+        if alt_state is None:
+            return False
+
+        try:
+            heading = state.get("track_deg")
         except Exception:
             heading = None
-        if not isinstance(heading, (int, float)):
+        if not isinstance(heading, (int, float)) or not math.isfinite(float(heading)):
             return False
+
         try:
-            speed = metric.track.state.get("ground_speed")
+            speed = state.get("ground_speed")
         except Exception:
             speed = None
-        if not isinstance(speed, (int, float)):
+        if not isinstance(speed, (int, float)) or not math.isfinite(float(speed)):
             return False
+        if abs(float(speed)) < 0.1:
+            return False
+
         return True
 
     @staticmethod
@@ -1119,6 +1180,24 @@ class UiController:
             self._autoscale_alt_override = None
             return
 
+        user_lo, user_hi = self._user_alt_filter_bounds()
+
+        def _eligible_for_autoscale(
+            m: _TrackMetric, *, ignore_hi: bool = False
+        ) -> bool:
+            if not math.isfinite(m.distance_nm):
+                return False
+            if not self._has_full_datablock(m):
+                return False
+            alt = m.altitude_ft
+            if alt is None:
+                return False
+            if user_lo is not None and alt < user_lo:
+                return False
+            if not ignore_hi and user_hi is not None and alt >= user_hi:
+                return False
+            return True
+
         cfg_min = float(self._cfg.min_range_nm)
         cfg_max = float(self._cfg.max_range_nm)
         try:
@@ -1127,7 +1206,24 @@ class UiController:
             user_range = float(self._cfg.range_nm)
 
         target = max(1, int(getattr(self, "autoscale_target_visible", 12)))
-        eligible_metrics = [m for m in metrics if self._has_full_datablock(m)]
+
+        autoscale_min_range = getattr(self._settings, "autoscale_min_range_nm", None)
+        autoscale_max_range = getattr(self._settings, "autoscale_max_range_nm", None)
+        try:
+            if autoscale_min_range is not None:
+                autoscale_min_range = float(autoscale_min_range)
+        except Exception:
+            autoscale_min_range = None
+        try:
+            if autoscale_max_range is not None:
+                autoscale_max_range = float(autoscale_max_range)
+        except Exception:
+            autoscale_max_range = None
+
+        eligible_metrics = [m for m in metrics if _eligible_for_autoscale(m)]
+        extended_metrics = [
+            m for m in metrics if _eligible_for_autoscale(m, ignore_hi=True)
+        ]
 
         if not eligible_metrics:
             # No eligible aircraft -> reset overrides and clamp range inside bounds
@@ -1137,23 +1233,61 @@ class UiController:
             self._autoscale_range_nm = clamped
             return
 
-        distances = sorted(
-            m.distance_nm for m in eligible_metrics if math.isfinite(m.distance_nm)
-        )
+        distances = sorted(m.distance_nm for m in eligible_metrics)
+        max_distance = distances[-1] if distances else 0.0
+        extended_distances = sorted(m.distance_nm for m in extended_metrics)
+        max_distance_extended = extended_distances[-1] if extended_distances else 0.0
 
         def count_for_range(r: float) -> int:
             if not distances:
                 return 0
             return bisect_right(distances, r + 1e-9)
 
+        step_nm = 5.0
+
+        def _ceil_to_step(val: float) -> float:
+            if step_nm <= 0:
+                return val
+            try:
+                if val <= 0:
+                    return 0.0
+                return math.ceil((val - 1e-6) / step_nm) * step_nm
+            except Exception:
+                return val
+
+        limit_upper = cfg_max
+        if autoscale_max_range is not None:
+            limit_upper = min(limit_upper, autoscale_max_range)
+        if limit_upper < cfg_min:
+            limit_upper = cfg_min
+
         if user_range < 50.0:
             # Treat user range as minimum (lower bound)
             lower_bound = max(cfg_min, user_range)
-            upper_bound = cfg_max
+            if autoscale_min_range is not None:
+                lower_bound = max(lower_bound, autoscale_min_range)
+            max_distance_total = max(max_distance, max_distance_extended)
+            raw_upper = max(lower_bound, max_distance_total)
+            upper_bound = min(cfg_max, _ceil_to_step(raw_upper))
+            if autoscale_max_range is not None:
+                upper_bound = min(upper_bound, autoscale_max_range)
         else:
             # Treat user range as maximum (upper bound)
             lower_bound = cfg_min
-            upper_bound = min(cfg_max, user_range)
+            if autoscale_min_range is not None:
+                lower_bound = max(lower_bound, autoscale_min_range)
+            upper_bound_candidate = max(max_distance, max_distance_extended, user_range)
+            upper_bound = min(
+                cfg_max, _ceil_to_step(max(lower_bound, upper_bound_candidate))
+            )
+            if autoscale_max_range is not None:
+                upper_bound = min(upper_bound, autoscale_max_range)
+            limit_upper = min(limit_upper, user_range)
+
+        if max_distance_extended > max_distance and limit_upper >= lower_bound:
+            upper_bound = limit_upper
+        else:
+            upper_bound = min(upper_bound, limit_upper)
 
         if lower_bound > upper_bound:
             lower_bound, upper_bound = upper_bound, lower_bound
@@ -1161,15 +1295,15 @@ class UiController:
         current_range = max(lower_bound, min(self._cfg.range_nm, upper_bound))
         base_range = max(lower_bound, min(user_range, upper_bound))
 
-        ladder_vals: set[float] = set()
-        for step in RANGE_LADDER_NM:
-            try:
-                val = float(step)
-            except Exception:
-                continue
-            if lower_bound <= val <= upper_bound:
-                ladder_vals.add(val)
-        ladder_vals.update({lower_bound, upper_bound, base_range, current_range})
+        ladder_vals: set[float] = {lower_bound, upper_bound, base_range, current_range}
+        try:
+            start = math.ceil((lower_bound + 1e-6) / step_nm) * step_nm
+        except Exception:
+            start = lower_bound
+        val = start
+        while val <= upper_bound + 1e-6:
+            ladder_vals.add(round(val, 6))
+            val += step_nm
 
         candidates = sorted(ladder_vals)
         counts: dict[float, int] = {r: count_for_range(r) for r in candidates}
@@ -1226,6 +1360,18 @@ class UiController:
                         self._autoscale_alt_override = (None, threshold)
 
         selected_range = max(lower_bound, min(selected_range, upper_bound))
+
+        if (
+            user_hi is not None
+            and selected_range >= limit_upper - 1e-6
+            and self._autoscale_alt_override is None
+        ):
+            base_upper_count = count_for_range(limit_upper)
+            if extended_distances:
+                extended_count = bisect_right(extended_distances, limit_upper + 1e-6)
+                if extended_count > base_upper_count and base_upper_count < target:
+                    self._autoscale_alt_override = (None, math.inf)
+
         self._autoscale_range_nm = selected_range
         self._cfg.range_nm = selected_range
 
