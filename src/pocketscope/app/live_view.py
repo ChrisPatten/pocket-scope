@@ -273,11 +273,14 @@ async def main_async(args: argparse.Namespace) -> None:
 
                         def _dispatch_press(x: int, y: int) -> None:
                             consumed_local = False
-                            # Settings overlay takes precedence
+                            # Settings overlay (legacy) takes precedence if present.
+                            settings_screen = getattr(ui, "_settings_screen", None)
                             try:
-                                if ui._settings_screen.visible:
+                                if settings_screen is not None and getattr(
+                                    settings_screen, "visible", False
+                                ):
                                     try:
-                                        consumed_local = ui._settings_screen.on_mouse(
+                                        consumed_local = settings_screen.on_mouse(
                                             x, y, display.size(), ui
                                         )
                                     except Exception:

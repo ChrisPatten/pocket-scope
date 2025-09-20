@@ -209,9 +209,14 @@ async def test_autoscale_ignores_partial_datablocks(tmp_path, monkeypatch):
 
     try:
         ui._apply_autoscale(metrics)  # type: ignore[attr-defined]
-
-        assert ui._cfg.range_nm == pytest.approx(10.0)
-        assert ui._autoscale_range_nm == pytest.approx(10.0)
+        # With partial datablocks now included, autoscale should consider the
+        # second (more distant) aircraft when determining range. The user
+        # requested range is 10nm (treated as lower-bound mode). Target=2
+        # aircraft: we have 1 inside 10nm, 2 by 55nm. The max configured
+        # autoscale_max_range_nm is 20.0 so autoscale should expand up to
+        # that cap to try to include the second aircraft.
+        assert ui._cfg.range_nm == pytest.approx(20.0)
+        assert ui._autoscale_range_nm == pytest.approx(20.0)
     finally:
         await ui.stop()
         await tracks.stop()

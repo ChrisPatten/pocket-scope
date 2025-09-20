@@ -534,6 +534,7 @@ User-facing configuration is now persisted across runs:
 
 - `Settings` model (`settings/schema.py`) stored at `~/.pocketscope/settings.json` (override path with `POCKETSCOPE_HOME`).
 - Debounced atomic writes via `SettingsStore` to minimize unnecessary disk I/O while adjusting controls rapidly.
+- Strict validation: unknown or invalid fields in an existing `settings.json` now raise an error instead of silently reverting to defaults. This makes typos immediately visible. To recover, fix or delete the offending `settings.json` (a new one with defaults will be created on next run). A legacy `track_length_mode` key is still accepted and automatically migrated to `track_length_s`.
 - `ConfigWatcher` publishes `cfg.changed` when the file mtime changes allowing hot reload (e.g. manual edit in an editor) without restarting.
 - Soft key bar (`ui/softkeys.py`) renders large tap/click targets (Zoom-/+, Units, Tracks, Demo, Settings) with auto font scaling.
 - Settings screen overlay (`ui/settings_screen.py`) toggled by Settings soft key or `s` key; edits are staged and flushed explicitly via Save (Back dismisses without forcing immediate write).

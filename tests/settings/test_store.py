@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 
 from pocketscope.settings.schema import Settings
-from pocketscope.settings.store import SettingsStore
+from pocketscope.settings.store import SettingsStore, SettingsLoadError
 
 
 def test_load_defaults(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -26,15 +26,34 @@ def test_roundtrip(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     assert s2.range_nm == 5.0
 
 
-def test_corrupt_returns_default(
+def test_unknown_field_raises(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("POCKETSCOPE_HOME", str(tmp_path))
+    p = SettingsStore.settings_path()
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(json.dumps({"units": "nm_ft_kt", "bogus_field": 1}))
+    with pytest.raises(SettingsLoadError):
+        SettingsStore.load()
+
+
+def test_legacy_track_length_mode_allows(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("POCKETSCOPE_HOME", str(tmp_path))
+    p = SettingsStore.settings_path()
+    p.parent.mkdir(parents=True, exist_ok=True)
+    # Provide only legacy key; should migrate to numeric track_length_s
+    p.write_text(json.dumps({"track_length_mode": "medium"}))
+    s = SettingsStore.load()
+    assert abs(s.track_length_s - 45.0) < 1e-6
+
+
+def test_corrupt_raises_error(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setenv("POCKETSCOPE_HOME", str(tmp_path))
     p = SettingsStore.settings_path()
     p.parent.mkdir(parents=True, exist_ok=True)
     p.write_text("{broken")
-    s = SettingsStore.load()
-    assert s.units == "nm_ft_kt"
+    with pytest.raises(SettingsLoadError):
+        SettingsStore.load()
 
 
 @pytest.mark.asyncio

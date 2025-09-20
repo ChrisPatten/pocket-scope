@@ -22,7 +22,7 @@ Coordinates and units
 from __future__ import annotations
 
 from dataclasses import dataclass
-from math import cos, radians, sin
+from math import cos, isfinite, radians, sin
 from typing import TYPE_CHECKING, Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 from pocketscope import config as _config
@@ -65,6 +65,34 @@ ColorAircraft: Color = _col(_PPI_THEME.get("aircraft"), (255, 255, 0, 255))
 ColorLabels: Color = _col(_PPI_THEME.get("labels"), (255, 255, 255, 255))
 ColorDataBlock: Color = _col(_PPI_THEME.get("datablock"), (0, 255, 0, 255))
 ColorDataBlockBG: Color = _col(_PPI_THEME.get("datablock_bg"), (0, 0, 0, 140))
+
+# ---------------------------------------------------------------------------
+# Vertical rate color scale (mirrors vertical_profile gradient).
+# Descents (negative FPM) trend toward red; climbs (positive FPM) toward green.
+# The scale clamps symmetrically at +/- 3000 fpm to avoid oversaturation.
+_VS_COLOR_NEG: Color = (215, 60, 60, 255)
+_VS_COLOR_POS: Color = (60, 210, 90, 255)
+_VS_COLOR_NEUTRAL: Color = (160, 160, 160, 255)
+_VS_CLAMP_ABS_FPM: float = 3000.0
+
+
+def _vs_color(vs_fpm: float | None) -> Color:
+    """Map vertical rate (fpm) -> RGBA gradient color.
+
+    The mapping linearly blends between red (descent) and green (climb) with
+    neutral gray when unknown. Values are clamped at +/- _VS_CLAMP_ABS_FPM.
+    """
+    if not isinstance(vs_fpm, (int, float)) or not isfinite(float(vs_fpm)):
+        return _VS_COLOR_NEUTRAL
+    mag = max(-_VS_CLAMP_ABS_FPM, min(_VS_CLAMP_ABS_FPM, float(vs_fpm)))
+    t = (mag + _VS_CLAMP_ABS_FPM) / (
+        2.0 * _VS_CLAMP_ABS_FPM
+    )  # [-clamp,+clamp] -> [0,1]
+    r = int(round(_VS_COLOR_NEG[0] + t * (_VS_COLOR_POS[0] - _VS_COLOR_NEG[0])))
+    g = int(round(_VS_COLOR_NEG[1] + t * (_VS_COLOR_POS[1] - _VS_COLOR_NEG[1])))
+    b = int(round(_VS_COLOR_NEG[2] + t * (_VS_COLOR_POS[2] - _VS_COLOR_NEG[2])))
+    return (r, g, b, 255)
+
 
 _M_PER_NM = 1852.0
 _FT_TO_M = 0.3048
@@ -202,6 +230,9 @@ class TrackSnapshot:
     baro_alt_ft: Optional[float] = None
     ground_speed_kt: Optional[float] = None
     vertical_rate_fpm: Optional[float] = None
+    focused: bool = False
+    pinned: bool = False
+    info_block_visible: bool = True
 
 
 class PpiView:
@@ -489,7 +520,14 @@ class PpiView:
         _draw_cardinal(270.0, "W")
 
         # z-index 5/6: ownship base marker (below trails/markers for consistency)
-        canvas.filled_circle((cx, cy), 4, color=ColorOwnship)
+        try:
+            canvas.filled_circle((cx, cy), 2, color=ColorOwnship)  # center
+        except Exception:
+            # Fallback: smallest circle
+            try:
+                canvas.filled_circle((cx, cy), 1, color=ColorOwnship)
+            except Exception:
+                pass
 
         # Origin for ENU conversion
         _ox, _oy, _oz = geodetic_to_ecef(center_lat, center_lon, 0.0)
@@ -580,6 +618,9 @@ class PpiView:
                     canvas.polyline(pts, width=2, color=ColorTrails)
 
         # Pass 2: glyphs (z=6) & labels
+        # Track vertical rate by glyph anchor so we can colorize info blocks
+        # after layout without changing layout APIs.
+        anchor_vs: Dict[Tuple[int, int], float | None] = {}
         for pc in precomp:
             t = pc["track"]
             gx = pc["gx"]
@@ -615,6 +656,7 @@ class PpiView:
                 self.show_data_blocks
                 and label_formatter is not None
                 and visible_for_label
+                and t.info_block_visible
             ):
                 ls = LabelTrack(
                     icao24=t.icao,
@@ -626,12 +668,13 @@ class PpiView:
                     ground_speed_kt=t.ground_speed_kt,
                     vertical_rate_fpm=t.vertical_rate_fpm,
                     emitter_type=None,
-                    pinned=False,
-                    focused=False,
+                    pinned=bool(t.pinned),
+                    focused=bool(t.focused),
                 )
                 lines = label_formatter.format_standard(ls)
                 dist2 = (gx - cx) * (gx - cx) + (gy - cy) * (gy - cy)
                 label_candidates.append((dist2, (gx, gy), lines, False))
+                anchor_vs[(gx, gy)] = getattr(t, "vertical_rate_fpm", None)
             else:
                 if self.show_simple_labels:
                     label_text = t.callsign or t.icao
@@ -700,11 +743,14 @@ class PpiView:
                         )
                 except Exception:
                     pass
+                # Derive per-block text color from vertical rate (gradient).
+                vs_val = anchor_vs.get(p.anchor_px)
+                vs_color = _vs_color(vs_val)
                 for i, s in enumerate(p.lines):
                     y = p.y + i * (self.label_font_px + self.label_line_gap_px)
                     canvas.text(
                         (p.x + 2, y),
                         s,
                         size_px=self.label_font_px,
-                        color=ColorDataBlock,
+                        color=vs_color,
                     )

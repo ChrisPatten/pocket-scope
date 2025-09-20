@@ -102,8 +102,5 @@ class AirportIconRenderer:
             except Exception:
                 pass
 
-        # Draw small central dot as reference
-        try:
-            self.canvas.filled_circle((cx, cy), 3, color=(180, 180, 180, 255))
-        except Exception:
-            pass
+        # Removed central dot when runway icons are drawn (requirement).
+        # Intentionally left blank.

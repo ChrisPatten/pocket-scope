@@ -32,15 +32,18 @@ from pocketscope.settings.values import (
     ALTITUDE_FILTER_BANDS,
     ALTITUDE_FILTER_CYCLE_ORDER,
     RANGE_LADDER_NM,
-    SETTINGS_SCREEN_CONFIG,
     TRACK_LENGTH_PRESETS_S,
     TRACK_SERVICE_DEFAULTS,
     UNITS_ORDER,
     ZOOM_LIMITS,
 )
-from pocketscope.ui.settings_screen import SettingsScreen
 from pocketscope.ui.softkeys import SoftKeyBar
 from pocketscope.ui.status_overlay import StatusOverlay
+from pocketscope.ui.vertical_profile import (
+    VerticalProfilePanel,
+    VerticalProfileSample,
+    VerticalProfileState,
+)
 
 if TYPE_CHECKING:
     from pocketscope.data.sectors import Sector
@@ -71,6 +74,11 @@ class _TrackMetric:
     lon: float
     altitude_ft: float | None
     distance_nm: float
+
+
+_SIDEBAR_MODES = {"vertical_profile", "hotkey_bar", "none"}
+_SIDEBAR_SIDES = {"left", "right"}
+_INFO_BLOCK_POLICIES = {"focus_and_closest", "all", "none"}
 
 
 class UiController:
@@ -130,6 +138,27 @@ class UiController:
         except Exception:
             disp_w = 300  # pragmatic fallback for headless environments
         self._overlay = StatusOverlay(self._settings, width_px=disp_w)
+        self.primary_sidebar_mode = getattr(
+            self._settings, "primary_sidebar_mode", "vertical_profile"
+        )
+        self.primary_sidebar_side = getattr(
+            self._settings, "primary_sidebar_side", "right"
+        )
+        self.info_blocks_policy = getattr(
+            self._settings, "info_blocks_policy", "focus_and_closest"
+        )
+        self._info_blocks_previous: str | None = None
+        self._info_blocks_prev_baseline: str = (
+            self.info_blocks_policy
+            if self.info_blocks_policy != "focus_and_closest"
+            else "all"
+        )
+        self._info_block_targets: set[str] | None = None
+        self._sidebar_focus_icao: str | None = None
+        self._sidebar_focus_pinned: bool = False
+        self._sidebar_closest_icao: str | None = None
+        self._vertical_profile: VerticalProfilePanel | None = None
+        self._sidebar_state: VerticalProfileState | None = None
         self._cfg.range_nm = float(self._settings.range_nm)
         self.units = self._settings.units
         self.track_length_s = float(getattr(self._settings, "track_length_s", 45.0))
@@ -182,13 +211,9 @@ class UiController:
             # Best-effort; do not break initialization if backend missing hook
             pass
 
-        # Settings screen overlay (multiplier from configuration)
-        settings_font_px = int(
-            font_px * float(SETTINGS_SCREEN_CONFIG.get("font_multiplier", 1.2))
-        )
-        self._settings_screen = SettingsScreen(
-            self._settings, font_px=settings_font_px, pad_px=6
-        )
+        # Settings screen overlay placeholder (feature removed but attribute kept
+        # for backward compatibility with older code paths/tests referencing it).
+        self._settings_screen = None  # legacy placeholder
         self._apply_track_windows()
         # Apply persisted typography settings to active view if available
         try:
@@ -247,6 +272,9 @@ class UiController:
         except Exception:
             self._rotation_deg = 0.0
 
+        self._apply_info_blocks_policy()
+        self._apply_sidebar_mode(initial=True)
+
     def set_softkeys(self, bar: SoftKeyBar) -> None:
         # Apply persisted softkey typography/padding when available
         try:
@@ -279,8 +307,8 @@ class UiController:
         # correct when later attached.
 
         # Ensure Settings button is wired on the backing bar as well
-        def _toggle_settings() -> None:
-            self._settings_screen.on_key("s", self)
+        def _toggle_settings() -> None:  # pragma: no cover - settings removed
+            return
 
         try:
             self._softkeys_backing.actions["Settings"] = _toggle_settings
@@ -315,6 +343,8 @@ class UiController:
                 metrics, tracks_active = self._collect_track_metrics()
                 self._total_aircraft_count = len(metrics)
                 self._apply_autoscale(metrics)
+                now_wall = self._ts.wall_time()
+                self._update_sidebar(metrics, now_monotonic=t0, now_wall=now_wall)
                 snaps = self._build_snapshots(metrics)
 
                 # Render frame
@@ -356,7 +386,7 @@ class UiController:
                         t0
                     )  # still computed to keep EMA warm
                     # Future: health flags derived from services; for now assume True
-                    clock_utc = self._fmt_clock(self._ts.wall_time())
+                    clock_utc = self._fmt_clock(now_wall)
                     # Compute most recent track timestamp across active
                     # tracks so the overlay can display the age of the
                     # latest data. If no tracks exist, pass None.
@@ -496,10 +526,19 @@ class UiController:
                         ),
                     )
                 # Settings overlay drawn (softkey mapping already synced earlier)
-                if self._settings_screen.visible:
-                    self._settings_screen.draw(
-                        canvas, size=self._display.size(), controller=self
-                    )
+                # Settings screen removed
+                if (
+                    self.primary_sidebar_mode == "vertical_profile"
+                    and self._vertical_profile
+                ):
+                    try:
+                        self._vertical_profile.draw(
+                            canvas,
+                            size=self._display.size(),
+                            state=self._sidebar_state,
+                        )
+                    except Exception:
+                        pass
                 # Draw softkeys last (either restricted or full set)
                 if self._softkeys:
                     self._softkeys.draw(canvas)
@@ -529,6 +568,7 @@ class UiController:
 
         Rectangles are (x, y, w, h) in display coordinates. Covers:
         - Status overlay (top band) when enabled
+        - Vertical profile sidebar when active
         - SoftKeyBar (bottom band) when present
         """
         occ: list[tuple[int, int, int, int]] = []
@@ -546,6 +586,17 @@ class UiController:
                 occ.append((0, 0, w, panel_h))
         except Exception:
             pass
+        # Vertical profile sidebar
+        if (
+            self.primary_sidebar_mode == "vertical_profile"
+            and self._vertical_profile is not None
+        ):
+            try:
+                rect = self._vertical_profile.panel_rect()
+            except Exception:
+                rect = None
+            if rect is not None:
+                occ.append(rect)
         # Softkeys band
         try:
             if self._softkeys and getattr(self._softkeys, "_rects", None):
@@ -622,6 +673,128 @@ class UiController:
             self._softkeys_base_actions = None
         except Exception:
             pass
+
+    # Sidebar / info-block configuration ---------------------------------
+    def _apply_sidebar_mode(self, *, initial: bool = False) -> None:
+        mode = self.primary_sidebar_mode
+        if mode == "vertical_profile":
+            if self._vertical_profile is None:
+                self._vertical_profile = VerticalProfilePanel(
+                    self._settings, side=self.primary_sidebar_side
+                )
+            else:
+                self._vertical_profile.refresh_settings(self._settings)
+                self._vertical_profile.set_side(self.primary_sidebar_side)
+            self.disable_softkeys()
+        elif mode == "hotkey_bar":
+            self._vertical_profile = None
+            if self._softkeys_backing is not None:
+                self.enable_softkeys()
+        else:
+            self._vertical_profile = None
+            self.disable_softkeys()
+        if not initial:
+            self._refresh_info_block_targets()
+
+    def _apply_info_blocks_policy(self) -> None:
+        try:
+            self._view.show_data_blocks = self.info_blocks_policy != "none"
+        except Exception:
+            pass
+        self._refresh_info_block_targets()
+
+    def _refresh_info_block_targets(
+        self,
+        *,
+        focus: str | None = None,
+        closest: str | None = None,
+    ) -> None:
+        policy = self.info_blocks_policy
+        focus_id = focus if focus is not None else self._sidebar_focus_icao
+        closest_id = closest if closest is not None else self._sidebar_closest_icao
+        if policy == "all":
+            self._info_block_targets = None
+        elif policy == "none":
+            self._info_block_targets = set()
+        else:
+            targets: set[str] = set()
+            if focus_id:
+                targets.add(focus_id)
+            if closest_id and closest_id != focus_id:
+                targets.add(closest_id)
+            self._info_block_targets = targets
+
+    def set_info_blocks_policy(self, policy: str, *, persist: bool = True) -> None:
+        if policy not in _INFO_BLOCK_POLICIES:
+            return
+        if policy == self.info_blocks_policy:
+            return
+        prev = self.info_blocks_policy
+        self.info_blocks_policy = policy
+        self._settings.info_blocks_policy = policy
+        if prev != "focus_and_closest":
+            self._info_blocks_prev_baseline = prev
+        if policy != "focus_and_closest":
+            self._info_blocks_prev_baseline = policy
+        self._apply_info_blocks_policy()
+        if persist:
+            SettingsStore.save_debounced(self._settings)
+
+    def cycle_info_blocks_policy(self, *, persist: bool = True) -> None:
+        order = ["focus_and_closest", "all", "none"]
+        idx = order.index(self.info_blocks_policy)
+        nxt = order[(idx + 1) % len(order)]
+        self.set_info_blocks_policy(nxt, persist=persist)
+
+    def set_primary_sidebar_mode(self, mode: str, *, persist: bool = True) -> None:
+        if mode not in _SIDEBAR_MODES:
+            return
+        if mode == self.primary_sidebar_mode:
+            return
+        prev_mode = self.primary_sidebar_mode
+        self.primary_sidebar_mode = mode
+        self._settings.primary_sidebar_mode = mode
+        self._apply_sidebar_mode()
+        if mode == "vertical_profile" and self.info_blocks_policy not in {
+            "focus_and_closest",
+            "none",
+        }:
+            self.set_info_blocks_policy("focus_and_closest", persist=persist)
+        if (
+            prev_mode == "vertical_profile"
+            and self.info_blocks_policy == "focus_and_closest"
+        ):
+            if (
+                self._info_blocks_prev_baseline
+                and self._info_blocks_prev_baseline != "focus_and_closest"
+            ):
+                self.set_info_blocks_policy(
+                    self._info_blocks_prev_baseline, persist=persist
+                )
+        if persist:
+            SettingsStore.save_debounced(self._settings)
+
+    def cycle_primary_sidebar_mode(self, *, persist: bool = True) -> None:
+        order = ["vertical_profile", "hotkey_bar", "none"]
+        idx = order.index(self.primary_sidebar_mode)
+        nxt = order[(idx + 1) % len(order)]
+        self.set_primary_sidebar_mode(nxt, persist=persist)
+
+    def set_primary_sidebar_side(self, side: str, *, persist: bool = True) -> None:
+        if side not in _SIDEBAR_SIDES:
+            return
+        if side == self.primary_sidebar_side:
+            return
+        self.primary_sidebar_side = side
+        self._settings.primary_sidebar_side = side
+        if self._vertical_profile is not None:
+            self._vertical_profile.set_side(side)
+        if persist:
+            SettingsStore.save_debounced(self._settings)
+
+    def toggle_primary_sidebar_side(self, *, persist: bool = True) -> None:
+        side = "left" if self.primary_sidebar_side == "right" else "right"
+        self.set_primary_sidebar_side(side, persist=persist)
 
     def cycle_units(self, *, persist: bool = True) -> None:
         order = list(UNITS_ORDER)
@@ -823,18 +996,22 @@ class UiController:
                 if self._softkeys:
                     self._softkeys.on_key(pg.key.name(key))
                 # Route to settings screen (string form from pygame key)
-                if self._settings_screen.visible:
-                    self._settings_screen.on_key(pg.key.name(key), self)
-                    # If still visible after handling and not a toggle key,
-                    # swallow other bindings
-                    if self._settings_screen.visible and pg.key.name(key) not in {"s"}:
-                        if key in (pg.K_q, pg.K_ESCAPE):
-                            # settings screen handles quit to scope, not app
-                            continue
-                        # Do not process remaining key logic while menu open
-                        continue
-                elif pg.key.name(key) == "s":  # open via hotkey
-                    self._settings_screen.on_key("s", self)
+                # Settings screen removed: ignore settings hotkey
+                if pg.key.name(key) == "s":
+                    # Consume to avoid legacy behavior
+                    continue
+                sidebar_handled = False
+                if (
+                    self.primary_sidebar_mode == "vertical_profile"
+                    and self._vertical_profile is not None
+                ):
+                    try:
+                        sidebar_handled = self._vertical_profile.on_key(
+                            pg.key.name(key), self._ts.monotonic()
+                        )
+                    except Exception:
+                        sidebar_handled = False
+                if sidebar_handled:
                     continue
                 if key in (pg.K_LEFTBRACKET, pg.K_MINUS):
                     self.zoom_out()
@@ -847,22 +1024,22 @@ class UiController:
                 elif key == pg.K_o:
                     self.toggle_overlay()
                 elif key in (pg.K_q, pg.K_ESCAPE):
-                    if self._settings_screen.visible:
-                        self._settings_screen.visible = False
-                    else:
-                        self._running = False
+                    self._running = False
             elif ev.type == pg.MOUSEBUTTONDOWN:
                 x, y = ev.pos
                 # If settings screen visible, attempt to consume click first.
-                if self._settings_screen.visible:
+                # Settings screen removed: no mouse interception
+                if (
+                    self.primary_sidebar_mode == "vertical_profile"
+                    and self._vertical_profile is not None
+                ):
                     try:
-                        consumed = self._settings_screen.on_mouse(
-                            x, y, self._display.size(), self
-                        )
+                        if self._vertical_profile.on_mouse(
+                            x, y, ev.button, self._ts.monotonic()
+                        ):
+                            continue
                     except Exception:
-                        consumed = False
-                    if consumed:
-                        continue  # Do not allow click to fall through
+                        pass
                 if self._softkeys:
                     self._softkeys.on_mouse(x, y, ev.button == 1)
             elif ev.type == pg.MOUSEWHEEL:
@@ -884,17 +1061,14 @@ class UiController:
         """
         if not self._softkeys:
             return
-        if self._settings_screen.visible:
-            if self._softkeys_base_actions is None:
-                self._softkeys_base_actions = dict(self._softkeys.actions)
-                self._softkeys.actions = self._settings_screen.softkey_actions(self)
+        # Settings screen removed: ensure base actions remain intact
+        if self._softkeys_base_actions is not None:
+            self._softkeys.actions = dict(self._softkeys_base_actions)
+            self._softkeys_base_actions = None
+            try:
                 self._softkeys.layout()
-        else:
-            if self._softkeys_base_actions is not None:
-                # Restore full action set
-                self._softkeys.actions = dict(self._softkeys_base_actions)
-                self._softkeys_base_actions = None
-                self._softkeys.layout()
+            except Exception:
+                pass
 
     def _step_range(self, value: float, *, direction: int) -> float:
         # Discrete zoom ladder
@@ -972,8 +1146,7 @@ class UiController:
                 except Exception:
                     pass
                 self._apply_track_windows()
-                # Refresh visible settings screen with external changes
-                self._settings_screen.refresh_from_controller(self._settings)
+                # Settings screen removed: no refresh
                 # Update central runtime config and notify listeners so
                 # renderers and other components can react to external
                 # settings changes dynamically. Notifications are deferred
@@ -981,6 +1154,77 @@ class UiController:
                 # synchronous timing hazards.
                 try:
                     _config.update_from_settings(self._settings)
+                except Exception:
+                    pass
+                # Live‑apply sidebar mode / side / info block policy changes.
+                # Previously these fields were only read during controller
+                # initialization, so editing settings.json while the app was
+                # running (e.g. to enable the vertical profile) had no
+                # visible effect until a restart. Applying them here lets
+                # users toggle these options via external config updates.
+                try:
+                    new_mode = getattr(
+                        new, "primary_sidebar_mode", self.primary_sidebar_mode
+                    )
+                    if (
+                        isinstance(new_mode, str)
+                        and new_mode in _SIDEBAR_MODES
+                        and new_mode != self.primary_sidebar_mode
+                    ):
+                        prev_mode = self.primary_sidebar_mode
+                        self.primary_sidebar_mode = new_mode
+                        # Rebuild / teardown vertical profile or softkeys
+                        self._apply_sidebar_mode()
+                        # Enforce policy constraints when entering/exiting
+                        if (
+                            new_mode == "vertical_profile"
+                            and self.info_blocks_policy
+                            not in {"focus_and_closest", "none"}
+                        ):
+                            # Preserve previous baseline so when user later
+                            # leaves vertical profile we can restore it if
+                            # focus_and_closest was only a temporary override.
+                            if self.info_blocks_policy != "focus_and_closest":
+                                self._info_blocks_prev_baseline = (
+                                    self.info_blocks_policy
+                                )
+                            self.info_blocks_policy = "focus_and_closest"
+                            self._apply_info_blocks_policy()
+                        if (
+                            prev_mode == "vertical_profile"
+                            and self.info_blocks_policy == "focus_and_closest"
+                            and self._info_blocks_prev_baseline
+                            and self._info_blocks_prev_baseline
+                            not in {"focus_and_closest"}
+                        ):
+                            # Restore prior baseline policy now that vertical
+                            # profile view is no longer active.
+                            self.info_blocks_policy = self._info_blocks_prev_baseline
+                            self._apply_info_blocks_policy()
+                    new_side = getattr(
+                        new, "primary_sidebar_side", self.primary_sidebar_side
+                    )
+                    if (
+                        isinstance(new_side, str)
+                        and new_side in _SIDEBAR_SIDES
+                        and new_side != self.primary_sidebar_side
+                    ):
+                        self.primary_sidebar_side = new_side
+                        if self._vertical_profile is not None:
+                            try:
+                                self._vertical_profile.set_side(new_side)
+                            except Exception:
+                                pass
+                    new_policy = getattr(
+                        new, "info_blocks_policy", self.info_blocks_policy
+                    )
+                    if (
+                        isinstance(new_policy, str)
+                        and new_policy in _INFO_BLOCK_POLICIES
+                        and new_policy != self.info_blocks_policy
+                    ):
+                        self.info_blocks_policy = new_policy
+                        self._apply_info_blocks_policy()
                 except Exception:
                     pass
                 # Apply backlight setting to display backend when present
@@ -1051,6 +1295,86 @@ class UiController:
                     pass
         except asyncio.CancelledError:
             pass
+
+    def _update_sidebar(
+        self,
+        metrics: list[_TrackMetric],
+        *,
+        now_monotonic: float,
+        now_wall: float,
+    ) -> None:
+        if self.primary_sidebar_mode != "vertical_profile":
+            self._sidebar_state = None
+            self._sidebar_focus_icao = None
+            self._sidebar_closest_icao = None
+            self._sidebar_focus_pinned = False
+            self._refresh_info_block_targets()
+            return
+        if self._vertical_profile is None:
+            self._vertical_profile = VerticalProfilePanel(
+                self._settings, side=self.primary_sidebar_side
+            )
+        else:
+            self._vertical_profile.refresh_settings(self._settings)
+            self._vertical_profile.set_side(self.primary_sidebar_side)
+        samples: list[VerticalProfileSample] = []
+        for metric in metrics:
+            track = metric.track
+            try:
+                last_ts = float(track.last_ts.timestamp())
+            except Exception:
+                try:
+                    last_ts = float(metric.last_point[0].timestamp())
+                except Exception:
+                    last_ts = now_wall
+            altitude = metric.altitude_ft
+            if altitude is None:
+                try:
+                    altitude = track.state.get("geo_alt")
+                except Exception:
+                    altitude = None
+                if altitude is None:
+                    try:
+                        altitude = track.state.get("baro_alt")
+                    except Exception:
+                        altitude = None
+                if not isinstance(altitude, (int, float)):
+                    altitude = None
+                elif not math.isfinite(float(altitude)):
+                    altitude = None
+                else:
+                    altitude = float(altitude)
+            dist = metric.distance_nm
+            if isinstance(dist, (int, float)) and not math.isfinite(dist):
+                dist_val: float | None = None
+            else:
+                dist_val = float(dist)
+            samples.append(
+                VerticalProfileSample(
+                    icao=track.icao24,
+                    callsign=getattr(track, "callsign", None),
+                    lat=metric.lat,
+                    lon=metric.lon,
+                    altitude_ft=altitude,
+                    last_ts=last_ts,
+                    distance_nm=dist_val,
+                    track=track,
+                )
+            )
+        state = self._vertical_profile.update(
+            samples,
+            center_lat=self._center_lat,
+            center_lon=self._center_lon,
+            now_monotonic=now_monotonic,
+            now_wall=now_wall,
+        )
+        self._sidebar_state = state
+        self._sidebar_focus_icao = state.focus.icao if state.focus else None
+        self._sidebar_focus_pinned = state.pinned
+        self._sidebar_closest_icao = state.closest.icao if state.closest else None
+        self._refresh_info_block_targets(
+            focus=self._sidebar_focus_icao, closest=self._sidebar_closest_icao
+        )
 
     def _collect_track_metrics(self) -> tuple[list[_TrackMetric], list[Any]]:
         try:
@@ -1187,8 +1511,12 @@ class UiController:
         ) -> bool:
             if not math.isfinite(m.distance_nm):
                 return False
-            if not self._has_full_datablock(m):
-                return False
+            # Previously autoscale only considered tracks with a "full"
+            # datablock (heading + speed + altitude). The requirement has
+            # been relaxed so that any track with a valid altitude and
+            # distance is considered for autoscale decisions. This allows
+            # earlier scaling reactions even when some metadata has not
+            # yet been decoded.
             alt = m.altitude_ft
             if alt is None:
                 return False
@@ -1482,6 +1810,13 @@ class UiController:
                 vr = tr.state.get("vertical_rate")
             except Exception:
                 vr = None
+            icao = getattr(tr, "icao24", None)
+            is_focus = bool(icao and icao == self._sidebar_focus_icao)
+            info_visible = (
+                True
+                if self._info_block_targets is None
+                else bool(icao and icao in self._info_block_targets)
+            )
             out.append(
                 TrackSnapshot(
                     icao=tr.icao24,
@@ -1500,6 +1835,9 @@ class UiController:
                     vertical_rate_fpm=(
                         float(vr) if isinstance(vr, (int, float)) else None
                     ),
+                    focused=is_focus,
+                    pinned=is_focus and self._sidebar_focus_pinned,
+                    info_block_visible=info_visible,
                 )
             )
         self._total_aircraft_count = len(metrics)
