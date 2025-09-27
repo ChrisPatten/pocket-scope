@@ -34,6 +34,10 @@ class SectorsLayer:
         sectors: Sequence[Sector],
         screen_size: Tuple[int, int],
         rotation_deg: float = 0.0,
+        *,
+        ppi_center_px: tuple[int, int] | None = None,
+        ppi_radius_px: int | None = None,
+        ppi_m_per_px: float | None = None,
     ) -> None:
         """
         - For each sector polygon:
@@ -43,11 +47,16 @@ class SectorsLayer:
           * Label sector name near centroid (monospaced white, size 10 px).
         """
         W, H = int(screen_size[0]), int(screen_size[1])
-        cx, cy = W // 2, H // 2
-
-        # Compute meters-per-pixel for mapping
-        radius_px = max(10, min(W, H) // 2 - 6)
-        m_per_px = (range_nm * 1852.0) / float(radius_px)
+        if ppi_center_px is not None:
+            cx, cy = int(ppi_center_px[0]), int(ppi_center_px[1])
+        else:
+            cx, cy = W // 2, H // 2
+        if ppi_radius_px is not None and ppi_m_per_px is not None:
+            radius_px = int(ppi_radius_px)
+            m_per_px = float(ppi_m_per_px)
+        else:
+            radius_px = max(10, min(W, H) // 2 - 6)
+            m_per_px = (range_nm * 1852.0) / float(radius_px)
 
         def to_screen(lat: float, lon: float) -> tuple[int, int]:
             tx, ty, tz = geodetic_to_ecef(lat, lon, 0.0)

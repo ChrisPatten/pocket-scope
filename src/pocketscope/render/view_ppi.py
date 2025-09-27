@@ -362,9 +362,48 @@ class PpiView:
 
         # Use provided size for deterministic layout
         w, h = int(size_px[0]), int(size_px[1])
-        cx, cy = int(w // 2), int(h // 2)
-        radius_px = int(min(w, h) // 2) - 6
-        if radius_px < 10:
+
+        # Layout adaptation: when occlusion rectangles include a top status
+        # bar and/or a bottom vertical profile panel we treat the vertical
+        # space between them as the *usable* PPI area. We then (a) center the
+        # ownship within that free band and (b) choose the outer range ring
+        # radius so that the full circle fits inside the band. This avoids
+        # the visual impression (on the TFT) that ownship is “low” because a
+        # bottom panel pushes it upward, and ensures the largest ring no
+        # longer disappears under the vertical profile.
+        top_clear_y = 0
+        bottom_clear_y = h
+        if occlusions:
+            try:
+                for (
+                    ox,
+                    oy,
+                    ow_,
+                    oh_,
+                ) in occlusions:  # rectangles may include overlay + panels
+                    # Heuristics: full‑width (>=90% display width) rectangle anchored
+                    # at y==0 is the status overlay; full‑width rectangle whose bottom
+                    # touches or is near the display bottom is a bottom panel (vertical
+                    # profile or softkeys). We always keep the *highest* bottom for top
+                    # bars and the *lowest* top for bottom bars.
+                    if ow_ >= 0.9 * w:
+                        if oy == 0:  # top band
+                            if oy + oh_ > top_clear_y:
+                                top_clear_y = oy + oh_
+                        # bottom band: treat any band within last 60px OR whose
+                        # lower edge is exactly h; vertical profile will be taller
+                        # than the softkey bar but both are handled the same.
+                        if (oy + oh_) >= h - 1:
+                            if oy < bottom_clear_y:
+                                bottom_clear_y = oy
+            except Exception:
+                pass
+        usable_h = max(20, bottom_clear_y - top_clear_y)
+        cx = int(w // 2)
+        cy = int(round(top_clear_y + usable_h / 2.0))
+        # Base radius limited by horizontal half‑width and half of usable vertical span
+        radius_px = int(min(w // 2, usable_h / 2.0) - 6)
+        if radius_px < 10:  # fallback safety for extremely small views
             radius_px = 10
         # Compute meters per pixel from range_nm
         meters_per_nm = 1852.0
@@ -436,6 +475,9 @@ class PpiView:
                     sectors=_secs,
                     screen_size=(w, h),
                     rotation_deg=self.rotation_deg,
+                    ppi_center_px=(cx, cy),
+                    ppi_radius_px=radius_px,
+                    ppi_m_per_px=m_per_px,
                 )
             except Exception:
                 pass
@@ -453,6 +495,9 @@ class PpiView:
                     rotation_deg=self.rotation_deg,
                     range_ring_exclusions=range_ring_exclusions,
                     runways_by_ident=runways_by_ident if runways_by_ident else None,
+                    ppi_center_px=(cx, cy),
+                    ppi_radius_px=radius_px,
+                    ppi_m_per_px=m_per_px,
                 )
             except Exception:
                 pass

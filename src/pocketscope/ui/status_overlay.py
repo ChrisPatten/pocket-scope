@@ -135,19 +135,6 @@ def _fmt_alt(alt_ft: float | None) -> str:
 
 
 class StatusOverlay:
-    """Two-line element-based status panel (no ASCII borders).
-
-    Layout philosophy matches ``SoftKeyBar``: each line is divided into
-    equal-width cells; content of each cell is centered using measured
-    text widths. All values are provided as separate *elements* (no big
-    concatenated strings) making future styling / per-element coloring
-    straightforward.
-
-    Public configuration mirrors softkeys: font size, per-cell padding,
-    optional outer border, colors. Height automatically derives from
-    font + padding (two lines by default; DEMO flag adds a third line).
-    """
-
     def __init__(
         self,
         settings: Settings,
@@ -189,10 +176,8 @@ class StatusOverlay:
         if elements_layout is not None:
             self._elements_layout = elements_layout
         else:
-            self._elements_layout = [
-                ["RNG", "NEAR", "AC"],
-                ["CLOCK", "ALTFILTER", "AGE"],
-            ]
+            # Compact single row: CLOCK | AGE | AC
+            self._elements_layout = [["CLOCK", "AGE", "AC"]]
 
     @staticmethod
     def format_alt_filter(
@@ -257,7 +242,6 @@ class StatusOverlay:
     ) -> None:
         # --- Build element arrays (no concatenation) ------------------
         units = settings.units
-        demo_mode = settings.demo_mode
         if units == "mi_ft_mph":
             # assignment retained only if future logic needs converted value;
             # suppress unused expression
@@ -428,7 +412,7 @@ class StatusOverlay:
             except Exception:
                 return "AC:?"
 
-        cfg_elems = STATUS_OVERLAY_CONFIG.get("elements", {})
+        STATUS_OVERLAY_CONFIG.get("elements", {})
 
         def _outside_in_order(n: int) -> List[int]:
             # produces indices in order: 0, n-1, 1, n-2, 2, ...
@@ -497,9 +481,7 @@ class StatusOverlay:
                 else:
                     cells[pos] = str(key)
             lines.append(cells)
-        if demo_mode:
-            demo_line = cfg_elems.get("demo_line", "DEMO MODE")
-            lines.append([demo_line])  # third single-cell line
+        # Demo mode no longer adds extra lines; status bar is fixed to one line.
 
         # --- Determine per-line cell counts & widths ------------------
         # Compute an automatic panel width based on measured text widths so
@@ -596,10 +578,16 @@ class StatusOverlay:
                     badge_w = tw + 2 * badge_pad_x
                     badge_radius = badge_h // 2
 
-                    # Right-align badge within the panel (use panel width)
+                    # Center badge within its cell (not the whole panel)
                     cy = y + (line_height // 2)
-                    # place badge flush to the right edge with pad
-                    cx = max(self.pad_x, width - self.pad_x - badge_w)
+                    inner_left = x0 + self.pad_x
+                    inner_right = x0 + cell_w - self.pad_x
+                    cell_avail_w = max(1, inner_right - inner_left)
+                    # If badge wider than cell, clamp to left boundary (fallback)
+                    if badge_w >= cell_avail_w:
+                        cx = inner_left
+                    else:
+                        cx = inner_left + (cell_avail_w - badge_w) // 2
 
                     # Draw pill: two filled circles and a thick line between
                     left_center = (cx + badge_radius, cy)

@@ -1811,7 +1811,16 @@ class UiController:
             except Exception:
                 vr = None
             icao = getattr(tr, "icao24", None)
-            is_focus = bool(icao and icao == self._sidebar_focus_icao)
+            # Focus semantics: both the actively selected (sidebar focus)
+            # and the nearest (closest) vertical profile aircraft are
+            # considered "Focus" for rendering (info block & styling).
+            is_focus = bool(
+                icao
+                and (
+                    (icao == self._sidebar_focus_icao)
+                    or (icao == self._sidebar_closest_icao)
+                )
+            )
             info_visible = (
                 True
                 if self._info_block_targets is None
