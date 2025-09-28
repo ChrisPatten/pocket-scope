@@ -18,6 +18,7 @@ from pocketscope.render.canvas import Canvas, Color
 from pocketscope.render.fonts import get_mono
 from pocketscope.settings.schema import Settings
 from pocketscope.settings.values import STATUS_OVERLAY_CONFIG, THEME
+from pocketscope.theme import ThemeManager
 
 # Colors / defaults from theme
 _SO_THEME = (
@@ -240,6 +241,12 @@ class StatusOverlay:
         alt_filter: tuple[float | None, float | None] | None = None,
         alt_filter_autoscale: bool = False,
     ) -> None:
+        # Refresh theme-driven colors each draw so live reload updates panel
+        try:
+            self.bg_color = ThemeManager.color("status.bg")
+            self.text_color = ThemeManager.color("status.text")
+        except Exception:
+            pass
         # --- Build element arrays (no concatenation) ------------------
         units = settings.units
         if units == "mi_ft_mph":
@@ -552,16 +559,28 @@ class StatusOverlay:
                     # Badge label and colors per rules
                     if state == "LIVE":
                         badge_text = "LIVE"
-                        bg = (0, 160, 0, 255)  # green
-                        fg = (255, 255, 255, 255)  # white
+                        try:
+                            bg = ThemeManager.color("status.badge.live.bg")
+                            fg = ThemeManager.color("status.badge.live.text")
+                        except Exception:
+                            bg = (0, 160, 0, 255)
+                            fg = (255, 255, 255, 255)
                     elif state == "DELAY":
                         badge_text = "DELAY"
-                        bg = (255, 165, 0, 255)  # orange
-                        fg = (0, 0, 0, 255)  # black
+                        try:
+                            bg = ThemeManager.color("status.badge.delay.bg")
+                            fg = ThemeManager.color("status.badge.delay.text")
+                        except Exception:
+                            bg = (255, 165, 0, 255)
+                            fg = (0, 0, 0, 255)
                     else:
                         badge_text = "STALE"
-                        bg = (200, 0, 0, 255)  # red
-                        fg = (255, 255, 255, 255)  # white
+                        try:
+                            bg = ThemeManager.color("status.badge.stale.bg")
+                            fg = ThemeManager.color("status.badge.stale.text")
+                        except Exception:
+                            bg = (200, 0, 0, 255)
+                            fg = (255, 255, 255, 255)
 
                     # Measure badge text
                     try:

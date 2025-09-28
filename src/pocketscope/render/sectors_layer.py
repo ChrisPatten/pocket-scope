@@ -10,18 +10,18 @@ from pocketscope.core.geo import (
 )
 from pocketscope.data.sectors import Sector
 from pocketscope.render.canvas import Canvas
+from pocketscope.theme import ThemeManager
 
 
 class SectorsLayer:
     def __init__(
         self,
-        color: tuple[int, int, int, int] = (128, 128, 128, 100),
+        color: tuple[int, int, int, int] | None = None,
         width_px: int = 1,
         show_labels: bool = True,
     ) -> None:
-        # Use medium gray for sector/state outlines by default. Preserve
-        # translucency (alpha=100) to match previous visual weight.
-        self.color = (int(color[0]), int(color[1]), int(color[2]), int(color[3]))
+        # Color resolved from theme (sector.line) if not explicitly provided
+        self._color_override = color
         self.width_px = int(width_px)
         self.show_labels = bool(show_labels)
 
@@ -75,6 +75,20 @@ class SectorsLayer:
                 x, y = enu_to_screen(er, nr, m_per_px)
             return int(round(cx + x)), int(round(cy + y))
 
+        # Resolve theme colors (live) each draw
+        try:
+            base_color = (
+                self._color_override
+                if self._color_override is not None
+                else ThemeManager.color("sector.line")
+            )
+        except Exception:
+            base_color = (128, 128, 128, 100)
+        try:
+            label_color = ThemeManager.color("sector.label")
+        except Exception:
+            label_color = (255, 255, 255, 220)
+
         # Deterministic draw order: by name
         for s in sorted(sectors, key=lambda s: s.name):
             if not s.points:
@@ -95,7 +109,7 @@ class SectorsLayer:
                 pts.append(pts[0])
 
             # Outline
-            canvas.polyline(pts, width=self.width_px, color=self.color)
+            canvas.polyline(pts, width=self.width_px, color=base_color)
 
             # Label: simple centroid of screen points
             # (excluding duplicate last point)
@@ -111,7 +125,7 @@ class SectorsLayer:
                             (int(round(sx)), int(round(sy))),
                             s.name,
                             size_px=10,
-                            color=(255, 255, 255, 220),
+                            color=label_color,
                         )  # label centroid
                 except Exception:
                     # Non-critical; skip label if any math/render issue

@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import signal
 from collections.abc import Iterable
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Awaitable, Protocol, Type, cast
@@ -248,9 +249,27 @@ async def main_async(args: argparse.Namespace) -> None:
             "-": ui.zoom_out,
             "Settings": lambda: None,
             "+": ui.zoom_in,
+            # Screenshot softkey: only visible/useful on TFT but harmless elsewhere
+            # (layout engine will size accordingly). Writes timestamped file to
+            # ~/.pocketscope/screenshots and logs the destination.
+            "Shot": lambda: print(f"[live_view] screenshot -> {ui.screenshot()}"),
         },
     )
     ui.set_softkeys(bar)
+
+    # Install a SIGUSR1 handler to request screenshot when running as a service.
+    def _sigusr1_handler(
+        _sig: int, _frm: Any
+    ) -> None:  # pragma: no cover - signal path
+        try:
+            ui.request_screenshot()
+        except Exception:
+            pass
+
+    try:
+        signal.signal(getattr(signal, "SIGUSR1"), _sigusr1_handler)
+    except Exception:
+        pass
     watcher = ConfigWatcher(bus, poll_hz=2.0)
     asyncio.create_task(watcher.run())
 

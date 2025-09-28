@@ -146,3 +146,11 @@ pocketscope/
 ## Non‑goals (v0)
 - UAT 978, MLAT, feeder/cloud features, rich cartography, alerts.
 
+## Keywords for Copilot
+- When I ask you to "prepare for commit", remember to:
+  - Update all relevant documentation in README and `docs/` to capture changes.
+  - Run `pre-commit run --all-files` to ensure all hooks pass. Resolve any issues and re-run until clean.
+  - generate a concise commit message that summarizes the changes, e.g. "Implement `Dump1090SbsSource` for ADS-B ingestion".
+- When I ask you to "prepare for PR to <target_branch>", remember to:
+  - Review the diff against the <target_branch> to capture all changes.
+  - Create a new file in `docs/pr` with the PR title and a detailed description of the changes.

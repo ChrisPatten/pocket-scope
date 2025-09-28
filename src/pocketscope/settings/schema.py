@@ -192,6 +192,11 @@ class Settings(BaseModel):
     vertical_profile: VerticalProfileSettings = Field(
         default_factory=VerticalProfileSettings
     )
+    # Theme selection + per-key overrides (hex strings). Theme palette
+    # lookups are handled by ui.theme.ThemeManager. Backward compatible:
+    # missing fields fall back to atc_classic with no overrides.
+    theme: str = Field(default="atc_classic")
+    themeOverrides: dict[str, str] = Field(default_factory=dict)
 
     @model_validator(mode="before")
     @classmethod

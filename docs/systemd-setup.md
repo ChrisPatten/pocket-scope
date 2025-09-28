@@ -114,3 +114,27 @@ python -m pocketscope \
   --center "42.00748,-71.20899" 
 ````
 
+---
+
+## 7. Capturing Screenshots in Service Mode
+
+The live viewer installs a `SIGUSR1` handler that requests a screenshot on the next frame. PNGs are saved under:
+
+```
+~/.pocketscope/screenshots/
+```
+
+Trigger a capture:
+
+```bash
+sudo systemctl kill -s SIGUSR1 pocketscope.service
+```
+
+Check logs for the saved path:
+
+```bash
+journalctl -u pocketscope.service -n 50 | grep screenshot
+```
+
+You can also drop a file named `screenshot` inside `~/.pocketscope/commands/` to trigger a capture (the file is consumed and removed automatically).
+

@@ -9,6 +9,7 @@ inputs for zooming and quitting.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import math
 import os
@@ -274,6 +275,18 @@ class UiController:
 
         self._apply_info_blocks_policy()
         self._apply_sidebar_mode(initial=True)
+        # External screenshot request flag (set by signal/file triggers)
+        self._screenshot_requested: bool = False
+        self._last_command_scan_ms: float = 0.0
+        try:
+            self._command_dir = Path.home() / ".pocketscope" / "commands"
+        except Exception:  # pragma: no cover - fallback path construction
+            self._command_dir = Path("./commands")
+        # Best effort create
+        try:
+            self._command_dir.mkdir(parents=True, exist_ok=True)
+        except Exception:
+            pass
 
     def set_softkeys(self, bar: SoftKeyBar) -> None:
         # Apply persisted softkey typography/padding when available
@@ -339,6 +352,30 @@ class UiController:
                 self._process_input()
                 # Ensure softkey action set reflects current settings screen visibility
                 self._sync_softkeys()
+                # External screenshot trigger polling (lightweight; every ~0.5s)
+                try:
+                    now_ms_poll = t0 * 1000.0
+                    if now_ms_poll - self._last_command_scan_ms > 500.0:
+                        self._last_command_scan_ms = now_ms_poll
+                        # Scan for files named 'screenshot' (any suffix allowed)
+                        if self._command_dir.exists():
+                            for p in list(self._command_dir.glob("screenshot*")):
+                                try:
+                                    p.unlink(missing_ok=True)
+                                except Exception:
+                                    pass
+                                # Queue a screenshot
+                                self._screenshot_requested = True
+                except Exception:
+                    pass
+                if self._screenshot_requested:
+                    try:
+                        path = self.screenshot()
+                        if path:
+                            print(f"[UiController] external screenshot -> {path}")
+                    except Exception:
+                        pass
+                    self._screenshot_requested = False
 
                 metrics, tracks_active = self._collect_track_metrics()
                 self._total_aircraft_count = len(metrics)
@@ -1000,6 +1037,14 @@ class UiController:
                 if pg.key.name(key) == "s":
                     # Consume to avoid legacy behavior
                     continue
+                # Allow quick screenshot via F12 when a pygame window is present.
+                try:
+                    if key == getattr(pg, "K_F12", None):
+                        # Default path mirrors touchscreen softkey behavior
+                        self.screenshot()
+                        continue
+                except Exception:
+                    pass
                 sidebar_handled = False
                 if (
                     self.primary_sidebar_mode == "vertical_profile"
@@ -1047,6 +1092,58 @@ class UiController:
                     self.zoom_in()
                 elif getattr(ev, "y", 0) < 0:
                     self.zoom_out()
+
+    # ------------------------------------------------------------------
+    def screenshot(self, path: str | None = None) -> str | None:
+        """Capture the current display framebuffer to a PNG.
+
+        When running on the TFT (ILI9341) this grabs the last rendered
+        frame already cached in the backend. For other backends it
+        delegates to their ``save_png`` implementation. A timestamped
+        file path is generated when ``path`` is not provided.
+
+        Returns the path written (or ``None`` if the backend declined).
+        """
+        try:
+            # Lazy import to avoid hard dependency in minimal test envs
+            import datetime as _dt  # noqa: WPS433
+        except Exception:
+            _dt = None  # type: ignore
+        if path is None:
+            ts = "unknown"
+            if _dt is not None:
+                try:
+                    ts = _dt.datetime.utcnow().strftime("%Y%m%d-%H%M%S")
+                except Exception:
+                    ts = "unknown"
+            base = Path.home() / ".pocketscope" / "screenshots"
+            try:
+                base.mkdir(parents=True, exist_ok=True)
+            except Exception:
+                # Fall back to CWD if home not writable
+                base = Path.cwd() / "screenshots"
+                with contextlib.suppress(Exception):
+                    base.mkdir(parents=True, exist_ok=True)
+            path = str(base / f"pocketscope-{ts}.png")
+        try:
+            self._display.save_png(path)
+        except Exception as e:  # pragma: no cover - backend failure path
+            try:
+                print(f"[UiController] screenshot failed: {e}")
+            except Exception:
+                pass
+            return None
+        return path
+
+    # ------------------------------------------------------------------
+    def request_screenshot(self) -> None:
+        """Request a screenshot on the next frame boundary.
+
+        This is safe to call from signal handlers or external triggers; the
+        actual file write occurs inside the main UI loop to avoid unsafe
+        operations in the signal context.
+        """
+        self._screenshot_requested = True
 
     def _sync_softkeys(self) -> None:
         """Synchronize softkey actions with settings screen visibility.

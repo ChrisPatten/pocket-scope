@@ -24,11 +24,7 @@ from pocketscope.core.geo import (
 )
 from pocketscope.render.airport_icon import AirportIconRenderer
 from pocketscope.render.canvas import Canvas, Color
-from pocketscope.settings.values import THEME
-
-_AL_THEME = (
-    THEME.get("colors", {}).get("airports_layer", {}) if isinstance(THEME, dict) else {}
-)
+from pocketscope.theme import ThemeManager
 
 
 def _coerce_color(val: object, fallback: tuple[int, int, int, int]) -> Color:
@@ -42,8 +38,9 @@ def _coerce_color(val: object, fallback: tuple[int, int, int, int]) -> Color:
     return fallback
 
 
-MarkerColor: Color = _coerce_color(_AL_THEME.get("marker"), (160, 160, 160, 255))
-LabelColor: Color = _coerce_color(_AL_THEME.get("label"), (255, 255, 255, 255))
+# Legacy static fallbacks retained for tests that import symbols directly.
+MarkerColor: Color = (160, 160, 160, 255)
+LabelColor: Color = (255, 255, 255, 255)
 
 
 def _airport_field(ap: Any, key: str) -> Any:
@@ -234,7 +231,7 @@ class AirportsLayer:
                 (x - r, y),  # left
                 (x, y - r),  # close
             ]
-            canvas.polyline(pts, width=1, color=MarkerColor)
+            canvas.polyline(pts, width=1, color=ThemeManager.color("airport.marker"))
 
         # Conservative label measurement: assume monospace aspect
         char_w = max(6, int(round(self.font_px * 0.6)))
@@ -271,7 +268,16 @@ class AirportsLayer:
             if runway_entries:
                 try:
                     ppm = 1.0 / m_per_px
-                    AirportIconRenderer(canvas).draw((sx, sy), runway_entries, ppm)
+                    # Scaled down runway icon: shrink both length (max_px) and overall
+                    # scale so runways render shorter and narrower per user request.
+                    AirportIconRenderer(canvas).draw(
+                        (sx, sy),
+                        runway_entries,
+                        ppm,
+                        max_px=24,  # was implicit 36
+                        scale=0.35,  # was implicit 0.5
+                        line_px=2,  # retain stroke for major runways
+                    )
                 except Exception:
                     draw_diamond((sx, sy), size=5)
             else:
@@ -293,7 +299,12 @@ class AirportsLayer:
 
             if label_pos is not None:
                 tx, ty = label_pos
-                canvas.text((tx, ty), text, size_px=self.font_px, color=LabelColor)
+                canvas.text(
+                    (tx, ty),
+                    text,
+                    size_px=self.font_px,
+                    color=ThemeManager.color("airport.text"),
+                )
                 # Record occupied label rectangle (x, y, w, h)
                 tw = max(0, len(text) * char_w)
                 placed_labels.append((tx, ty, tw, label_h))

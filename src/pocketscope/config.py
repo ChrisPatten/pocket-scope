@@ -12,6 +12,7 @@ from typing import Any, Callable, Optional
 
 from .settings.store import SettingsStore
 from .settings.values import PPI_CONFIG, SETTINGS_SCREEN_CONFIG, THEME, ZOOM_LIMITS
+from .theme import ThemeManager
 
 
 @dataclass(slots=True)
@@ -125,6 +126,17 @@ def update_from_settings(settings: object) -> None:
         # Update range if present on settings
         if hasattr(settings, "range_nm"):
             rc.ui.range_nm = float(getattr(settings, "range_nm"))
+    except Exception:
+        pass
+    # Live theme reload (best effort). We accept both pydantic Settings
+    # instances (with model_dump) and plain dicts for flexibility.
+    try:  # pragma: no cover - defensive
+        if hasattr(settings, "model_dump"):
+            ThemeManager.reload(getattr(settings, "model_dump")())
+        elif isinstance(settings, dict):
+            ThemeManager.reload(settings)
+        else:
+            ThemeManager.reload({})
     except Exception:
         pass
     _RUNTIME = rc

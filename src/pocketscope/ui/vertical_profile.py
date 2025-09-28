@@ -9,43 +9,24 @@ from typing import Any, Dict, Iterable, Optional, Sequence
 from pocketscope.core.geo import initial_bearing_deg
 from pocketscope.render.canvas import Canvas, Color
 from pocketscope.settings.schema import Settings, VerticalProfileSettings
-from pocketscope.settings.values import THEME
+from pocketscope.theme import ThemeManager
 
-_VP_THEME = (
-    THEME.get("colors", {}).get("vertical_profile", {})
-    if isinstance(THEME, dict)
-    else {}
-)
-
-
-def _color(value: object, fallback: tuple[int, int, int, int]) -> Color:
-    if (
-        isinstance(value, (list, tuple))
-        and len(value) == 4
-        and all(isinstance(c, (int, float)) for c in value)
-    ):
-        return (int(value[0]), int(value[1]), int(value[2]), int(value[3]))
-    return fallback
+# Fallback drawing colors (overridden each draw via _theme_color).
+# These provide names for type checking inside helper methods before runtime
+# theme resolution occurs.
+COLOR_AXIS: Color = (90, 90, 90, 255)
+COLOR_MUTED: Color = (140, 140, 160, 255)
 
 
-COLOR_BG = _color(_VP_THEME.get("bg"), (18, 18, 18, 235))
-COLOR_BORDER = _color(_VP_THEME.get("border"), (64, 128, 200, 255))
-COLOR_TEXT = _color(_VP_THEME.get("text"), (240, 240, 240, 255))
-COLOR_MUTED = _color(_VP_THEME.get("muted"), (140, 140, 160, 255))
-COLOR_AXIS = _color(_VP_THEME.get("axis"), (90, 90, 90, 255))
-COLOR_TRACE_ACTUAL = _color(_VP_THEME.get("trace_actual"), (120, 200, 255, 255))
-COLOR_TRACE_PRED = _color(_VP_THEME.get("trace_predicted"), (200, 200, 200, 200))
-COLOR_NOW_MARKER = _color(_VP_THEME.get("now_marker"), (255, 255, 255, 160))
+def _theme_color(key: str, fallback: tuple[int, int, int, int]) -> Color:
+    try:
+        c = ThemeManager.color(key)
+        return (int(c[0]), int(c[1]), int(c[2]), int(c[3]))
+    except Exception:
+        return fallback
 
-# New gradient endpoints for vertical rate (FPM) display. Descents (negative)
-# are rendered reddish, climbs (positive) greenish. We blend linearly between
-# the two across a symmetric clamp window so large magnitudes do not blow out
-# the scale. This is intentionally local (not theme driven yet) to keep the
-# change self‑contained.
-_VS_COLOR_NEG: Color = (215, 60, 60, 255)
-_VS_COLOR_POS: Color = (60, 210, 90, 255)
-_VS_COLOR_NEUTRAL: Color = (160, 160, 160, 255)
-_VS_CLAMP_ABS_FPM: float = 3000.0  # magnitude at/above which color saturates
+
+_VS_CLAMP_ABS_FPM: float = 3000.0  # magnitude for vertical speed color saturation
 
 
 @dataclass(slots=True)
@@ -601,26 +582,32 @@ class VerticalProfilePanel:
         y0 = h - panel_h
         panel_w = w
         self._panel_rect = (x0, y0, panel_w, panel_h)
+        # Resolve colors fresh each draw (theme live reload)
+        C_BG = _theme_color("vprof.bg", (18, 18, 18, 235))
+        C_BORDER = _theme_color("vprof.border", (64, 128, 200, 255))
+        C_TEXT = _theme_color("vprof.text", (240, 240, 240, 255))
+        C_MUTED = _theme_color("vprof.muted", (140, 140, 160, 255))
+        C_AXIS = _theme_color("vprof.axis", (90, 90, 90, 255))
+        C_TRACE = _theme_color("vprof.trace", (120, 200, 255, 255))
+        C_VS_NEG = _theme_color("vprof.vs.neg", (215, 60, 60, 255))
+        C_VS_POS = _theme_color("vprof.vs.pos", (60, 210, 90, 255))
+        C_VS_NEUTRAL = _theme_color("vprof.vs.neutral", (160, 160, 160, 255))
 
         for dy in range(panel_h):
-            canvas.line((x0, y0 + dy), (x0 + panel_w - 1, y0 + dy), color=COLOR_BG)
-        canvas.line((x0, y0), (x0 + panel_w - 1, y0), color=COLOR_BORDER)
-        canvas.line((x0, h - 1), (x0 + panel_w - 1, h - 1), color=COLOR_BORDER)
-        canvas.line((x0, y0), (x0, h - 1), color=COLOR_BORDER)
-        canvas.line(
-            (x0 + panel_w - 1, y0), (x0 + panel_w - 1, h - 1), color=COLOR_BORDER
-        )
+            canvas.line((x0, y0 + dy), (x0 + panel_w - 1, y0 + dy), color=C_BG)
+        canvas.line((x0, y0), (x0 + panel_w - 1, y0), color=C_BORDER)
+        canvas.line((x0, h - 1), (x0 + panel_w - 1, h - 1), color=C_BORDER)
+        canvas.line((x0, y0), (x0, h - 1), color=C_BORDER)
+        canvas.line((x0 + panel_w - 1, y0), (x0 + panel_w - 1, h - 1), color=C_BORDER)
 
         focus = state.focus
         if focus is None or not state.history_points:
-            canvas.text(
-                (x0 + 16, y0 + 16), "VERT PROFILE", size_px=14, color=COLOR_MUTED
-            )
+            canvas.text((x0 + 16, y0 + 16), "VERT PROFILE", size_px=14, color=C_MUTED)
             canvas.text(
                 (x0 + 16, y0 + 34),
                 "No climb/descent traffic",
                 size_px=14,
-                color=COLOR_TEXT,
+                color=C_TEXT,
             )
             return
 
@@ -645,13 +632,13 @@ class VerticalProfilePanel:
         if isinstance(vs, (int, float)) and math.isfinite(vs):
             mag = max(-_VS_CLAMP_ABS_FPM, min(_VS_CLAMP_ABS_FPM, float(vs)))
             t = (mag + _VS_CLAMP_ABS_FPM) / (2.0 * _VS_CLAMP_ABS_FPM)
-            r = int(round(_VS_COLOR_NEG[0] + t * (_VS_COLOR_POS[0] - _VS_COLOR_NEG[0])))
-            g = int(round(_VS_COLOR_NEG[1] + t * (_VS_COLOR_POS[1] - _VS_COLOR_NEG[1])))
-            b = int(round(_VS_COLOR_NEG[2] + t * (_VS_COLOR_POS[2] - _VS_COLOR_NEG[2])))
+            r = int(round(C_VS_NEG[0] + t * (C_VS_POS[0] - C_VS_NEG[0])))
+            g = int(round(C_VS_NEG[1] + t * (C_VS_POS[1] - C_VS_NEG[1])))
+            b = int(round(C_VS_NEG[2] + t * (C_VS_POS[2] - C_VS_NEG[2])))
             vs_color: Color = (r, g, b, 255)
             vs_label = f"{vs:+.0f}"
         else:
-            vs_color = _VS_COLOR_NEUTRAL
+            vs_color = C_VS_NEUTRAL
             vs_label = "--"
 
         # Distance / bearing center text.
@@ -678,10 +665,8 @@ class VerticalProfilePanel:
         mid_x = x0 + panel_w // 2 - mid_w // 2
 
         # Draw in z-order: left, center, right
-        canvas.text((left_x, header_y), callsign, size_px=header_font, color=COLOR_TEXT)
-        canvas.text(
-            (mid_x, header_y), mid_label, size_px=header_font, color=COLOR_MUTED
-        )
+        canvas.text((left_x, header_y), callsign, size_px=header_font, color=C_TEXT)
+        canvas.text((mid_x, header_y), mid_label, size_px=header_font, color=C_MUTED)
         canvas.text((vs_x, header_y), vs_label, size_px=header_font, color=vs_color)
 
         # Use only historical points for scaling; projection is excluded per
@@ -708,6 +693,12 @@ class VerticalProfilePanel:
         # not butt directly against the panel interior/top content.
         graph_y1 = y0 + 28 + 3
 
+        # Provide colors to axis draw helpers by temporarily assigning module
+        # names (helpers reference COLOR_AXIS / COLOR_MUTED). This keeps API
+        # simple without threading extra parameters everywhere.
+        global COLOR_AXIS, COLOR_MUTED
+        COLOR_AXIS = C_AXIS
+        COLOR_MUTED = C_MUTED
         self._draw_axes(
             canvas,
             graph_x0,
@@ -739,7 +730,7 @@ class VerticalProfilePanel:
             window_end,
             y_min,
             y_max,
-            COLOR_TRACE_ACTUAL,
+            C_TRACE,
         )
         # Current point marker removed per latest request.
 
