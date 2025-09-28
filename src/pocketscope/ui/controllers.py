@@ -11,8 +11,10 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
+import logging
 import math
 import os
+import time
 from bisect import bisect_right
 from dataclasses import dataclass
 from pathlib import Path
@@ -24,6 +26,8 @@ from pocketscope.core.geo import ecef_to_enu, geodetic_to_ecef
 from pocketscope.core.time import TimeSource
 from pocketscope.core.tracks import TrackService
 from pocketscope.ingest.adsb.playback_source import FilePlaybackSource
+from pocketscope.logging import get_registry
+from pocketscope.logging.telemetry import Sampler
 from pocketscope.map.data_provider import MapDataProvider
 from pocketscope.render.canvas import DisplayBackend
 from pocketscope.render.view_ppi import PpiView, TrackSnapshot
@@ -337,6 +341,52 @@ class UiController:
                 pass
 
     async def run(self) -> None:
+        logger = logging.getLogger(__name__)
+        registry = get_registry()
+        # Telemetry metric handles (created once; registry dedupes)
+        frames_total = registry.counter("ui_frames_total", "Total UI frames rendered")
+        frame_latency = registry.histogram(
+            "ui_frame_seconds",
+            buckets=(
+                0.002,
+                0.005,
+                0.008,
+                0.010,
+                0.016,
+                0.020,
+                0.033,
+                0.050,
+                0.1,
+                0.2,
+                0.5,
+            ),
+            description="Frame wall-clock duration",
+        )
+        collect_latency = registry.histogram(
+            "ui_collect_seconds",
+            buckets=(0.0005, 0.001, 0.002, 0.004, 0.008, 0.012, 0.02, 0.05),
+            description="Metric + snapshot collection duration",
+        )
+        render_latency = registry.histogram(
+            "ui_render_seconds",
+            buckets=(0.001, 0.002, 0.004, 0.008, 0.012, 0.02, 0.033, 0.05, 0.1),
+            description="Rendering (begin_frame->end_frame) duration",
+        )
+        sleep_latency = registry.histogram(
+            "ui_sleep_seconds",
+            buckets=(0.0005, 0.001, 0.002, 0.004, 0.008, 0.016, 0.03, 0.05, 0.1),
+            description="Frame pacing sleep duration",
+        )
+        fps_gauge = registry.gauge("ui_fps", "EMA frames/sec")
+        tracks_total_g = registry.gauge("ui_tracks_total", "Active tracks")
+        tracks_visible_g = registry.gauge(
+            "ui_tracks_visible", "Visible tracks passing filters"
+        )
+        range_nm_g = registry.gauge("ui_range_nm", "Current range NM")
+        nearest_range_g = registry.gauge(
+            "ui_nearest_range_nm", "Nearest aircraft range NM"
+        )
+        perf_sampler = Sampler(rate_per_sec=2.0)
         self._running = True
         dt_target = 1.0 / max(1e-6, float(self._cfg.target_fps))
         # Ensure pygame initialized for input
@@ -347,7 +397,9 @@ class UiController:
 
         try:
             while self._running:
+                frame_wall_start = time.perf_counter()
                 t0 = self._ts.monotonic()
+                phase_collect_start = time.perf_counter()
                 # Handle input
                 self._process_input()
                 # Ensure softkey action set reflects current settings screen visibility
@@ -383,8 +435,11 @@ class UiController:
                 now_wall = self._ts.wall_time()
                 self._update_sidebar(metrics, now_monotonic=t0, now_wall=now_wall)
                 snaps = self._build_snapshots(metrics)
+                collect_latency.observe(time.perf_counter() - phase_collect_start)
+                nearest_range_nm = None  # will be set in overlay section if available
 
                 # Render frame
+                render_phase_start = time.perf_counter()
                 canvas = self._display.begin_frame()
                 self._view.range_nm = float(self._cfg.range_nm)
                 # Apply rotation to view each frame
@@ -585,15 +640,48 @@ class UiController:
                 # repeatedly invoking backend hooks every frame.
 
                 self._display.end_frame()
+                render_latency.observe(time.perf_counter() - render_phase_start)
 
                 # Frame pacing
                 t1 = self._ts.monotonic()
                 remaining = dt_target - max(0.0, t1 - t0)
+                slept = 0.0
                 if remaining > 0:
+                    before_sleep = time.perf_counter()
                     await self._ts.sleep(remaining)
+                    slept = time.perf_counter() - before_sleep
                 else:
-                    # Yield to avoid starving other tasks
                     await asyncio.sleep(0)
+                if slept > 0:
+                    sleep_latency.observe(slept)
+                # Per-frame metrics
+                frame_latency.observe(time.perf_counter() - frame_wall_start)
+                frames_total.inc()
+                try:
+                    fps_gauge.set(self._fps_avg)
+                    tracks_total_g.set(float(self._total_aircraft_count))
+                    tracks_visible_g.set(float(self._visible_aircraft_count))
+                    range_nm_g.set(float(self._cfg.range_nm))
+                except Exception:
+                    pass
+                try:
+                    if "nearest_range_nm" in locals() and nearest_range_nm is not None:
+                        nearest_range_g.set(float(nearest_range_nm))
+                except Exception:
+                    pass
+                if perf_sampler.allow() and logger.isEnabledFor(logging.DEBUG):
+                    logger.debug(
+                        "ui.frame",
+                        extra={
+                            "frame_ms": round(
+                                (time.perf_counter() - frame_wall_start) * 1000.0, 3
+                            ),
+                            "tracks_total": self._total_aircraft_count,
+                            "tracks_visible": self._visible_aircraft_count,
+                            "range_nm": round(float(self._cfg.range_nm), 3),
+                            "fps_ema": round(self._fps_avg, 2),
+                        },
+                    )
         except asyncio.CancelledError:  # pragma: no cover - cooperative cancel
             pass
         finally:
@@ -1923,6 +2011,11 @@ class UiController:
                 if self._info_block_targets is None
                 else bool(icao and icao in self._info_block_targets)
             )
+            # Always force full info block visibility for the aircraft that is
+            # currently the vertical profile focus (highlighted in sidebar),
+            # regardless of the active info block policy or filtering.
+            if icao and icao == self._sidebar_focus_icao:
+                info_visible = True
             out.append(
                 TrackSnapshot(
                     icao=tr.icao24,

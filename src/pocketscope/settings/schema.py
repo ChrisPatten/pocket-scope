@@ -208,7 +208,15 @@ class Settings(BaseModel):
         surface as validation errors so the user can correct typos.
         """
         if isinstance(data, dict):
-            allowed = set(cls.model_fields.keys()) | {"track_length_mode"}
+            # Permit embedding logging + telemetry configuration in the same
+            # user settings.yml so deployments can manage a single file.
+            # These keys are ignored by this schema (handled by the separate
+            # logging/telemetry settings loader) but must not raise an error.
+            allowed = set(cls.model_fields.keys()) | {
+                "track_length_mode",
+                "logging",
+                "telemetry",
+            }
             unknown = set(data.keys()) - allowed
             if unknown:
                 raise ValueError(

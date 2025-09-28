@@ -13,6 +13,7 @@ import asyncio
 
 from pocketscope import __version__
 from pocketscope.app import live_view
+from pocketscope.boot import boot
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -42,6 +43,12 @@ def main(argv: list[str] | None = None) -> None:
         print(f"PocketScope {__version__}")
         return
 
+    # Initialize logging + telemetry (unified settings autodetected)
+    try:
+        boot(None)
+    except Exception as e:  # pragma: no cover - defensive init
+        print(f"[cli] logging init failed: {e}")
+
     # Run the async runner using asyncio.run when not already in an event loop
     try:
         print(f"[cli] Starting with args: {args}")
@@ -58,6 +65,11 @@ async def run_async(argv: list[str] | None = None) -> None:
     application without starting a nested event loop.
     """
     args = parse_args(argv)
+    # Ensure logging initialized if run_async used programmatically without main()
+    try:
+        boot(None)
+    except Exception:
+        pass
     # Support a top-level --version
     if hasattr(args, "version") and args.version:
         print(f"PocketScope {__version__}")
