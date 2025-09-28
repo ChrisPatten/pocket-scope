@@ -750,7 +750,9 @@ class PpiView:
             # by reversing the interpolation factor.
             if len(pts) < 2:
                 continue
-            head_rgba = ThemeManager.color("track.head")
+            head_rgba = ThemeManager.track_speed_color(
+                getattr(t, "ground_speed_kt", None)
+            )
             bg_rgba = ThemeManager.color("bg")
             hr, hg, hb, ha = head_rgba
             br, bg_, bb, ba = bg_rgba

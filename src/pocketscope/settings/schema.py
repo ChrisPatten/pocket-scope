@@ -112,7 +112,7 @@ class Settings(BaseModel):
     range_nm: PPI range in nautical miles.
     track_length_s: Trail length in seconds. Cycles among presets (15/45/120)
         in the UI but may be any positive float when edited directly in
-        settings.json.
+        settings.yml.
     demo_mode: When true a small ``DEMO`` badge is shown on the overlay.
     """
 
@@ -148,10 +148,10 @@ class Settings(BaseModel):
     north_up_lock: bool = Field(default=True)
     # When true the final rendered output will be flipped/rotated to match
     # display hardware that requires the framebuffer orientation to be
-    # inverted. This value is persisted to settings.json as ``flip_display``.
+    # inverted. This value is persisted to settings.yml as ``flip_display``.
     flip_display: bool = Field(default=False)
     # Display backlight brightness percentage (0-100). Persisted to
-    # settings.json as ``backlight_pct`` and applied to hardware when
+    # settings.yml as ``backlight_pct`` and applied to hardware when
     # supported.
     backlight_pct: float = Field(default=100.0)
     # Typography controls for PPI data-blocks (editable + persisted)

@@ -1,0 +1,221 @@
+# Default theme definitions for PocketScope.
+themes:
+  atc_classic:
+    palette:
+      bg: "#0A0D0A"
+      range.ring: "#1E4A1E"
+      range.tick: "#2B6A2B"
+      range.text: "#2B6A2B"
+      map.border: "#2F742F"
+      ac.level.fill: "#7CFF7C"
+      ac.level.stroke: "#C8FFC8"
+      ac.climb.fill: "#9AFF9A"
+      ac.desc.fill: "#66E966"
+      ac.pinned.stroke: "#FFFFFF"
+      ac.focus.stroke: "#D6FFD6"
+      label.text.primary: "#C8FFC8"
+      label.text.dim: "#86D986"
+      label.text.other: "#86D986"
+      label.halo: "#051005"
+      track.head: "#6EFF6E"
+      airport.marker: "#2B6A2B"
+      airport.text: "#2B6A2B"
+      status.bg: "#051305"
+      status.text: "#B9FFB9"
+      infobar.accent: "#FFFFFF"
+      vprof.bg: "#121212EB"
+      vprof.border: "#2B6A2B"
+      vprof.text: "#E0FFE0"
+      vprof.muted: "#8AD88A"
+      vprof.axis: "#3A6A3A"
+      vprof.trace: "#6EFF6E"
+      vprof.vs.pos: "#7CFF7C"
+      vprof.vs.neg: "#D73C3C"
+      vprof.vs.neutral: "#86D986"
+      sector.line: "#80808064"
+      sector.label: "#FFFFFFDC"
+      status.badge.live.bg: "#00A000"
+      status.badge.live.text: "#FFFFFF"
+      status.badge.delay.bg: "#FFC857"
+      status.badge.delay.text: "#000000"
+      status.badge.stale.bg: "#C80000"
+      status.badge.stale.text: "#FFFFFF"
+    track_speed_scale:
+      low:
+        value: 0
+        color: "#1F6B1F"
+      stops:
+        - value: 120
+          color: "#3E9F3E"
+        - value: 260
+          color: "#6EFF6E"
+        - value: 420
+          color: "#C8FF6E"
+      high:
+        value: 560
+        color: "#FFC857"
+
+  monokai:
+    palette:
+      bg: "#272822"
+      range.ring: "#4B4D44"
+      range.tick: "#5B5D54"
+      range.text: "#75715E"
+      map.border: "#5B5D54"
+      ac.level.fill: "#A6E22E"
+      ac.level.stroke: "#F8F8F2"
+      ac.climb.fill: "#66D9EF"
+      ac.desc.fill: "#FD971F"
+      ac.pinned.stroke: "#F8F8F2"
+      ac.focus.stroke: "#E6DB74"
+      label.text.primary: "#F8F8F2"
+      label.text.dim: "#CFCFC2"
+      label.text.other: "#A1A190"
+      label.halo: "#141411"
+      track.head: "#AE81FF"
+      airport.marker: "#5B5D54"
+      airport.text: "#5B5D54"
+      status.bg: "#1F201C"
+      status.text: "#E6DB74"
+      infobar.accent: "#66D9EF"
+      vprof.bg: "#1E1F1CEB"
+      vprof.border: "#5B5D54"
+      vprof.text: "#F8F8F2"
+      vprof.muted: "#A1A190"
+      vprof.axis: "#5B5D54"
+      vprof.trace: "#66D9EF"
+      vprof.vs.pos: "#A6E22E"
+      vprof.vs.neg: "#F92672"
+      vprof.vs.neutral: "#CFCFC2"
+      sector.line: "#75715E64"
+      sector.label: "#F8F8F2DC"
+      status.badge.live.bg: "#A6E22E"
+      status.badge.live.text: "#1B1C19"
+      status.badge.delay.bg: "#FD971F"
+      status.badge.delay.text: "#1B1C19"
+      status.badge.stale.bg: "#F92672"
+      status.badge.stale.text: "#FFFFFF"
+    track_speed_scale:
+      low:
+        value: 0
+        color: "#66D9EF"
+      stops:
+        - value: 160
+          color: "#A6E22E"
+        - value: 320
+          color: "#E6DB74"
+        - value: 480
+          color: "#FD971F"
+      high:
+        value: 620
+        color: "#F92672"
+
+  light_chart:
+    palette:
+      bg: "#E6E6E6"
+      range.ring: "#B0B0B0"
+      range.tick: "#A0A0A0"
+      range.text: "#606060"
+      map.border: "#909090"
+      ac.level.fill: "#005F99"
+      ac.level.stroke: "#000000"
+      ac.climb.fill: "#228B22"
+      ac.desc.fill: "#B22222"
+      ac.pinned.stroke: "#FF8C00"
+      ac.focus.stroke: "#000000"
+      label.text.primary: "#000000"
+      label.text.dim: "#404040"
+      label.text.other: "#404040"
+      label.halo: "#F0F0F0"
+      track.head: "#444444"
+      airport.marker: "#808080"
+      airport.text: "#606060"
+      status.bg: "#D0D0D0"
+      status.text: "#000000"
+      infobar.accent: "#005F99"
+      vprof.bg: "#F0F0F0EB"
+      vprof.border: "#A0A0A0"
+      vprof.text: "#000000"
+      vprof.muted: "#606060"
+      vprof.axis: "#808080"
+      vprof.trace: "#005F99"
+      vprof.vs.pos: "#228B22"
+      vprof.vs.neg: "#B22222"
+      vprof.vs.neutral: "#606060"
+      sector.line: "#A0A0A064"
+      sector.label: "#000000DC"
+      status.badge.live.bg: "#228B22"
+      status.badge.live.text: "#FFFFFF"
+      status.badge.delay.bg: "#FF8C00"
+      status.badge.delay.text: "#000000"
+      status.badge.stale.bg: "#B22222"
+      status.badge.stale.text: "#FFFFFF"
+    track_speed_scale:
+      low:
+        value: 0
+        color: "#005F99"
+      stops:
+        - value: 180
+          color: "#228B22"
+        - value: 340
+          color: "#FFD966"
+        - value: 460
+          color: "#FF8C00"
+      high:
+        value: 600
+        color: "#B22222"
+
+  vfr_sectional:
+    palette:
+      bg: "#EDE3CC"
+      range.ring: "#8A8F8F"
+      range.tick: "#717679"
+      range.text: "#5A5F61"
+      map.border: "#6B7EA4"
+      ac.level.fill: "#003E7E"
+      ac.level.stroke: "#000000"
+      ac.climb.fill: "#2E7D32"
+      ac.desc.fill: "#C62828"
+      ac.pinned.stroke: "#C2185B"
+      ac.focus.stroke: "#F2C84B"
+      label.text.primary: "#1A1A1A"
+      label.text.dim: "#4A4A4A"
+      label.text.other: "#4A4A4A"
+      label.halo: "#F6EFE0"
+      track.head: "#5B6D7C"
+      airport.marker: "#2F5DAA"
+      airport.text: "#2F5DAA"
+      status.bg: "#D8D2B8"
+      status.text: "#1A1A1A"
+      infobar.accent: "#C2185B"
+      vprof.bg: "#F5EBD5EB"
+      vprof.border: "#6B7EA4"
+      vprof.text: "#1A1A1A"
+      vprof.muted: "#6B6B6B"
+      vprof.axis: "#8A8F8F"
+      vprof.trace: "#2F5DAA"
+      vprof.vs.pos: "#2E7D32"
+      vprof.vs.neg: "#C62828"
+      vprof.vs.neutral: "#6B6B6B"
+      sector.line: "#6B7EA466"
+      sector.label: "#000000DC"
+      status.badge.live.bg: "#2E7D32"
+      status.badge.live.text: "#FFFFFF"
+      status.badge.delay.bg: "#F2C84B"
+      status.badge.delay.text: "#1A1A1A"
+      status.badge.stale.bg: "#C62828"
+      status.badge.stale.text: "#FFFFFF"
+    track_speed_scale:
+      low:
+        value: 0
+        color: "#2F5DAA"
+      stops:
+        - value: 200
+          color: "#2E7D32"
+        - value: 380
+          color: "#F2C84B"
+        - value: 520
+          color: "#C2185B"
+      high:
+        value: 660
+        color: "#C62828"

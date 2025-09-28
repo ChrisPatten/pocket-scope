@@ -26,7 +26,7 @@ def _isolate_settings_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> N
     """Force an isolated POCKETSCOPE_HOME per test.
 
     The stricter settings validation now raises on unknown keys; without
-    isolation a developer's real ~/.pocketscope/settings.json (which may
+    isolation a developer's real ~/.pocketscope/settings.yml (which may
     include experimental / deprecated fields) could cause unrelated tests
     to fail. This keeps the test environment hermetic.
     """

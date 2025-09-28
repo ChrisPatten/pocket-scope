@@ -12,6 +12,7 @@ from pocketscope.theme import (
     ColorTuple,
     Theme,
     ThemeManager,
+    TrackSpeedScale,
     hex_color,
     to_rgb565,
 )
@@ -20,6 +21,7 @@ __all__ = [
     "Color",
     "ColorTuple",
     "Theme",
+    "TrackSpeedScale",
     "ThemeManager",
     "hex_color",
     "to_rgb565",

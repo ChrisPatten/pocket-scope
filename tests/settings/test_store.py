@@ -1,10 +1,10 @@
 from __future__ import annotations
 
 import asyncio
-import json
 from pathlib import Path
 
 import pytest
+import yaml
 
 from pocketscope.settings.schema import Settings
 from pocketscope.settings.store import SettingsStore, SettingsLoadError
@@ -30,7 +30,7 @@ def test_unknown_field_raises(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -
     monkeypatch.setenv("POCKETSCOPE_HOME", str(tmp_path))
     p = SettingsStore.settings_path()
     p.parent.mkdir(parents=True, exist_ok=True)
-    p.write_text(json.dumps({"units": "nm_ft_kt", "bogus_field": 1}))
+    p.write_text(yaml.safe_dump({"units": "nm_ft_kt", "bogus_field": 1}))
     with pytest.raises(SettingsLoadError):
         SettingsStore.load()
 
@@ -40,7 +40,7 @@ def test_legacy_track_length_mode_allows(tmp_path: Path, monkeypatch: pytest.Mon
     p = SettingsStore.settings_path()
     p.parent.mkdir(parents=True, exist_ok=True)
     # Provide only legacy key; should migrate to numeric track_length_s
-    p.write_text(json.dumps({"track_length_mode": "medium"}))
+    p.write_text(yaml.safe_dump({"track_length_mode": "medium"}))
     s = SettingsStore.load()
     assert abs(s.track_length_s - 45.0) < 1e-6
 
@@ -73,5 +73,5 @@ async def test_save_debounced(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -
     SettingsStore.save_debounced(s, delay_s=0.1)
     await asyncio.sleep(0.2)
     assert len(calls) == 1
-    data = json.loads(SettingsStore.settings_path().read_text())
+    data = yaml.safe_load(SettingsStore.settings_path().read_text())
     assert data["units"] == "nm_ft_kt"

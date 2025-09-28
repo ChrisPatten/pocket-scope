@@ -80,7 +80,7 @@ tracks:
     trail_len_pinned_s: 180.0
   # Default expiry window for stale aircraft tracks (seconds). Tracks with
   # no updates older than this are removed. Tunable via settings screen
-  # (Track Expiry) and persisted in settings.json (track_expiry_s).
+  # (Track Expiry) and persisted in settings.yml (track_expiry_s).
   expiry_s: 300.0
 
 ppi:

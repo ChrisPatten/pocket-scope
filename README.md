@@ -18,9 +18,9 @@ PocketScope is a handheld Pi-powered ATC-style scope for decoding and displaying
 - **Time Abstraction**: Deterministic testing support with SimTimeSource and RealTimeSource
 - **Modular Design**: Clean separation between ingestion, processing, and visualization
 - **Rendering/UI**: Canvas API + multiple backends (Pygame, SPI TFT ILI9341, Web) with ATC-style data blocks, themed overlays (airports, sectors, state borders), deterministic golden-frame tests
-- **Persistent UI Settings**: Debounced JSON settings (units, default range, track length preset, demo mode, altitude filter incl. custom bounds, north-up lock, autoscale target, vertical profile config, theme + per‑key overrides) with soft key bar + settings screen
+- **Persistent UI Settings**: Debounced YAML settings (units, default range, track length preset, demo mode, altitude filter incl. custom bounds, north-up lock, autoscale target, vertical profile config, theme + per‑key overrides) with soft key bar + settings screen
 - **Screenshot & Automation Hooks**: Built‑in screenshot API (soft key, F12, SIGUSR1, or command file trigger) writing PNGs to `~/.pocketscope/screenshots`
-- **Live Theme Reload**: Editing `~/.pocketscope/settings.json` (theme / themeOverrides) hot‑reloads palette without restart
+- **Live Theme Reload**: Editing `~/.pocketscope/settings.yml` (theme / themeOverrides) hot‑reloads palette without restart
 
 Note on softkeys
 -----------------
@@ -93,7 +93,8 @@ Highlights:
 - Multiple built‑in themes: `atc_classic`, `monokai`, `light_chart`, `vfr_sectional`
 - Required palette keys enforced by tests (`tests/ui/test_theme.py`)
 - Per‑key overrides via `themeOverrides` in persisted settings (hex forms `#RGB`, `#RRGGBB`, `#RRGGBBAA`)
-- Live reload: modify `~/.pocketscope/settings.json` and colors update in the next frame (no restart)
+- Live reload: modify `~/.pocketscope/settings.yml` and colors update in the next frame (no restart)
+- Custom themes can be appended via `~/.pocketscope/themes.yml`; entries merge with the packaged catalog
 - 16‑bit RGB565 convenience (`ThemeManager.rgb565`) for TFT backends
 
 Quick start:
@@ -539,9 +540,9 @@ async def test_track_behavior():
 
 User-facing configuration is now persisted across runs:
 
-- `Settings` model (`settings/schema.py`) stored at `~/.pocketscope/settings.json` (override path with `POCKETSCOPE_HOME`).
+- `Settings` model (`settings/schema.py`) stored at `~/.pocketscope/settings.yml` (override path with `POCKETSCOPE_HOME`).
 - Debounced atomic writes via `SettingsStore` to minimize unnecessary disk I/O while adjusting controls rapidly.
-- Strict validation: unknown or invalid fields in an existing `settings.json` now raise an error instead of silently reverting to defaults. This makes typos immediately visible. To recover, fix or delete the offending `settings.json` (a new one with defaults will be created on next run). A legacy `track_length_mode` key is still accepted and automatically migrated to `track_length_s`.
+- Strict validation: unknown or invalid fields in an existing `settings.yml` now raise an error instead of silently reverting to defaults. This makes typos immediately visible. To recover, fix or delete the offending `settings.yml` (a new one with defaults will be created on next run). A legacy `track_length_mode` key is still accepted and automatically migrated to `track_length_s`.
 - `ConfigWatcher` publishes `cfg.changed` when the file mtime changes allowing hot reload (e.g. manual edit in an editor) without restarting.
 - Soft key bar (`ui/softkeys.py`) renders large tap/click targets (Zoom-/+, Units, Tracks, Demo, Settings) with auto font scaling.
 - Settings screen overlay (`ui/settings_screen.py`) toggled by Settings soft key or `s` key; edits are staged and flushed explicitly via Save (Back dismisses without forcing immediate write).
@@ -962,7 +963,7 @@ python -m pocketscope --playback tests/data/adsb_trace_airports.jsonl
 
 # Run with persistent settings + soft keys + settings screen
 python -m pocketscope --url http://127.0.0.1:8080/data/aircraft.json --range 20 --center 42.0,-71.0
-    # Interact via soft keys (click/tap) or press 's' for Settings. Settings stored in ~/.pocketscope/settings.json
+    # Interact via soft keys (click/tap) or press 's' for Settings. Settings stored in ~/.pocketscope/settings.yml
 
 # Headless mode (CI/tests): starts a lightweight runner without creating a GUI
 python -m pocketscope --headless --playback sample_data/demo_adsb.jsonl
@@ -1011,7 +1012,7 @@ Notes:
 | Theme (JSON only) | `theme` + `themeOverrides` (manual edit to settings file) | Hot reload |
 | North-up Lock | Enforce rotation 0°; unlock enables arrow rotation | Debounced save |
 
-Additional autoscale controls live in `~/.pocketscope/settings.json` (not yet surfaced in the on-screen Settings UI):
+Additional autoscale controls live in `~/.pocketscope/settings.yml` (not yet surfaced in the on-screen Settings UI):
 
 ```jsonc
 {
@@ -1132,7 +1133,7 @@ MIT License - see LICENSE file for details.
 - ✅ State boundary overlays (map border theme color)
 - ✅ Interactive UI controls (zoom, overlay toggle, keyboard/mouse input)
  - ✅ Soft key bar with autoscaling labels
- - ✅ Persistent JSON settings (units, range, track length, demo mode, altitude filter, north-up lock)
+ - ✅ Persistent YAML settings (units, range, track length, demo mode, altitude filter, north-up lock)
  - ✅ Settings screen overlay (staged edits + Back/Save softkeys)
  - ✅ Altitude filter banding & snapshot filtering
  - ✅ North-up lock & view rotation (arrow keys when unlocked)
