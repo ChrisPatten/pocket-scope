@@ -70,6 +70,7 @@ Bug reports and feature discussions are welcome via GitHub issues. Please refere
 - [Spatial utilities and GeoJSON ingestion](docs/spatial.md)
 - [Theme system reference](docs/theming.md)
 - [Screenshot automation](docs/screenshots.md)
+- [Logging & telemetry](docs/logging-and-telemetry.md)
 - [Systemd setup guide](docs/systemd-setup.md)
 - [Release notes](docs/releases/)
 - [Pull request guidelines](docs/pr/)

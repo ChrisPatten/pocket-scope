@@ -25,7 +25,11 @@ class HandlerConfig(BaseModel):
     @model_validator(mode="after")
     def validate_path(self) -> "HandlerConfig":
         if self.enabled and self.path is not None:
-            self.path = Path(self.path)
+            # Expand user home so settings can use '~/.pocketscope/...'
+            try:
+                self.path = Path(self.path).expanduser()
+            except Exception:
+                self.path = Path(self.path)
         return self
 
 

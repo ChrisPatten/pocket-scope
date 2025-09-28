@@ -238,7 +238,14 @@ class VerticalProfilePanel:
         for fb in fallback_entries:
             fb.is_fallback = True
 
-        pool = entries if entries else fallback_entries
+        # Rotation pool change (2025-09): previously only climbing/descending
+        # "eligible" aircraft (entries) were rotated unless none were
+        # available. Requirement update: rotate through ALL aircraft currently
+        # visible on screen (the caller now filters samples to in-range
+        # traffic). We therefore always build the pool from both lists while
+        # preserving the existing ordering heuristic of placing actively
+        # climbing/descending traffic ahead of level/on‑ground traffic.
+        pool = entries + fallback_entries
         pool_ids = [e.icao for e in pool]
         self._rotation_list = pool_ids
 
@@ -274,7 +281,6 @@ class VerticalProfilePanel:
                         )
                     elif len(pool_ids) > 1 and now_monotonic >= self._cycle_deadline:
                         self._advance_focus(now_monotonic, pool_ids)
-
         focus_entry = self._entry_for(pool, self._focus_icao)
         total_slots = len(pool_ids)
         if focus_entry is None and pool:
@@ -605,7 +611,7 @@ class VerticalProfilePanel:
             canvas.text((x0 + 16, y0 + 16), "VERT PROFILE", size_px=14, color=C_MUTED)
             canvas.text(
                 (x0 + 16, y0 + 34),
-                "No climb/descent traffic",
+                "No visible traffic",
                 size_px=14,
                 color=C_TEXT,
             )

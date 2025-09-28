@@ -57,7 +57,8 @@ def test_simple_labels_do_not_overlap_and_have_halo() -> None:
         baro_alt_ft=30000,
         geo_alt_ft=None,
         ground_speed_kt=400,
-        vertical_rate_fpm=0,
+        # Use a climb rate above deadband so label is rendered under new rules
+        vertical_rate_fpm=300,
     )
     t2 = TrackSnapshot(
         icao="abc222",
@@ -67,7 +68,8 @@ def test_simple_labels_do_not_overlap_and_have_halo() -> None:
         baro_alt_ft=31000,
         geo_alt_ft=None,
         ground_speed_kt=410,
-        vertical_rate_fpm=0,
+        # Use a descent rate below deadband so label is rendered under new rules
+        vertical_rate_fpm=-320,
     )
     view = PpiView(show_data_blocks=False, show_simple_labels=True)
     canvas = _FakeCanvas()

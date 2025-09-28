@@ -131,6 +131,18 @@ class SettingsStore:
         cls.ensure_home()
         tmp = path.with_suffix(".tmp")
         payload = settings.model_dump(mode="python")
+        # Preserve unified-config blocks (logging/telemetry) if user placed them
+        # in the same ~/.pocketscope/settings.yml file. These keys are ignored by
+        # the UI Settings model but should not be discarded on save; otherwise
+        # file/telemetry handlers silently stop working after the first write.
+        try:
+            if path.exists():
+                existing = _load_yaml(path)
+                for key in ("logging", "telemetry"):
+                    if key in existing and key not in payload:
+                        payload[key] = existing[key]
+        except Exception:  # pragma: no cover - preservation best effort
+            pass
         tmp.write_text(
             yaml.safe_dump(payload, sort_keys=False, allow_unicode=True),
             encoding="utf-8",

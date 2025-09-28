@@ -856,6 +856,14 @@ class PpiView:
                     vs = getattr(t, "vertical_rate_fpm", None)
                     arrow_symbol = ""
                     arrow_color_key: str | None = None
+                    # New behavior: suppress simple labels for non-focused
+                    # aircraft that are effectively level (no significant
+                    # climb/descent). We treat +/-200 fpm as the deadband
+                    # consistent with arrow logic.
+                    if not t.focused:
+                        if not isinstance(vs, (int, float)) or -200 < float(vs) < 200:
+                            # Skip adding a label for level, non-focused acft.
+                            continue
                     if not t.focused and isinstance(vs, (int, float)):
                         try:
                             if vs > 200:
