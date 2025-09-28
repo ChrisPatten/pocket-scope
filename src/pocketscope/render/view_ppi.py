@@ -778,25 +778,17 @@ class PpiView:
         # after layout without changing layout APIs.
         anchor_vs: Dict[Tuple[int, int], float | None] = {}
         # Collect simple labels for collision-aware post-pass rendering.
-        simple_label_candidates: list[tuple[int, int, str, bool]] = []
+        # Each entry: (gx, gy, text, focused, arrow_symbol, arrow_color_key)
+        simple_label_candidates: list[tuple[int, int, str, bool, str, str | None]] = []
         for pc in precomp:
             t = pc["track"]
             gx = pc["gx"]
             gy = pc["gy"]
             visible_for_label = pc["visible_for_label"]
 
-            # Determine aircraft fill based on vertical rate (climb/desc/level)
-            vs = getattr(t, "vertical_rate_fpm", None)
-            fill_key = "ac.level.fill"
-            try:
-                if isinstance(vs, (int, float)):
-                    if vs > 200:
-                        fill_key = "ac.climb.fill"
-                    elif vs < -200:
-                        fill_key = "ac.desc.fill"
-            except Exception:
-                pass
-            fill_color = ThemeManager.color(fill_key)
+            # Aircraft glyph fill: always use a single neutral level color.
+            # (Previously varied by climb/desc status; simplified per request.)
+            fill_color = ThemeManager.color("ac.level.fill")
             stroke_color = ThemeManager.color("ac.level.stroke")
             if t.pinned:
                 stroke_color = ThemeManager.color("ac.pinned.stroke")
@@ -858,11 +850,33 @@ class PpiView:
                 anchor_vs[(gx, gy)] = getattr(t, "vertical_rate_fpm", None)
             else:
                 if self.show_simple_labels:
-                    # Defer simple one-line label placement to collision-aware
-                    # post-pass. We collect (anchor, text, focused) tuples.
+                    # Collect simple one-line label candidates. Augment with
+                    # a vertical speed arrow (colored) for non-focused aircraft.
                     label_text = t.callsign or t.icao
+                    vs = getattr(t, "vertical_rate_fpm", None)
+                    arrow_symbol = ""
+                    arrow_color_key: str | None = None
+                    if not t.focused and isinstance(vs, (int, float)):
+                        try:
+                            if vs > 200:
+                                arrow_symbol = "▲"  # climb
+                                arrow_color_key = "ac.climb.fill"
+                            elif vs < -200:
+                                arrow_symbol = "▼"  # descent
+                                arrow_color_key = "ac.desc.fill"
+                        except Exception:
+                            pass
+                    # Store extended tuple components:
+                    # (gx, gy, text, focused, arrow_symbol, arrow_color_key)
                     simple_label_candidates.append(
-                        (gx, gy, label_text, bool(t.focused))
+                        (
+                            gx,
+                            gy,
+                            label_text,
+                            bool(t.focused),
+                            arrow_symbol,
+                            arrow_color_key,
+                        )
                     )
 
         # ------------------------------------------------------------------
@@ -871,6 +885,8 @@ class PpiView:
         if self.show_simple_labels and simple_label_candidates:
             # Deterministic ordering: sort by (focused desc so focused placed first
             # for minimal movement), then text, then anchor.
+            # simple_label_candidates entries:
+            # (ax, ay, text, focused, arrow_symbol, arrow_color_key)
             simple_label_candidates.sort(
                 key=lambda it: (not it[3], it[2], it[0], it[1])
             )
@@ -882,7 +898,7 @@ class PpiView:
             glyph_half = 5
             glyph_size = glyph_half * 2
             seen_glyphs: set[tuple[int, int]] = set()
-            for ax, ay, _text, _f in simple_label_candidates:
+            for ax, ay, _text, _f, _as, _ac in simple_label_candidates:
                 if (ax, ay) in seen_glyphs:
                     continue
                 seen_glyphs.add((ax, ay))
@@ -899,12 +915,25 @@ class PpiView:
                     ax + aw <= bx or bx + bw <= ax or ay + ah <= by or by + bh <= ay
                 )
 
-            placements_simple: list[tuple[int, int, int, int, str, bool]] = []
-            for ax, ay, text, focused in simple_label_candidates:
+            placements_simple: list[
+                tuple[int, int, int, int, str, bool, str, str | None]
+            ] = []
+            for (
+                ax,
+                ay,
+                text,
+                focused,
+                arrow_symbol,
+                arrow_color_key,
+            ) in simple_label_candidates:
                 # Initial candidate relative to glyph (matches legacy offset)
                 init_x = ax + 6
                 init_y = ay - label_h  # previously hard-coded -12 for 12px font
-                w_txt = len(text) * char_w
+                extra_chars = 0
+                if arrow_symbol:
+                    # Space + arrow
+                    extra_chars = 2
+                w_txt = (len(text) + extra_chars) * char_w
                 h_txt = label_h
                 # Clamp initial
                 if w_txt > 0 and h_txt > 0:
@@ -947,12 +976,23 @@ class PpiView:
                         break
                     attempts += 1
                 # Record and mark occupied
-                placements_simple.append((x, y, w_txt, h_txt, text, focused))
+                placements_simple.append(
+                    (x, y, w_txt, h_txt, text, focused, arrow_symbol, arrow_color_key)
+                )
                 occupied.append(box)
 
             # Draw halos and text
             halo_color = ThemeManager.color("label.halo")
-            for x, y, w_txt, h_txt, text, focused in placements_simple:
+            for (
+                x,
+                y,
+                w_txt,
+                h_txt,
+                text,
+                focused,
+                arrow_symbol,
+                arrow_color_key,
+            ) in placements_simple:
                 try:
                     for row in range(h_txt):
                         canvas.line(
@@ -970,6 +1010,20 @@ class PpiView:
                     size_px=self.label_font_px,
                     color=ThemeManager.color(color_key),
                 )
+                if arrow_symbol:
+                    # Draw arrow after a space following the text.
+                    arrow_x = x + 1 + len(text) * char_w + char_w  # space width
+                    arrow_color = (
+                        ThemeManager.color(arrow_color_key)
+                        if arrow_color_key
+                        else ThemeManager.color(color_key)
+                    )
+                    canvas.text(
+                        (arrow_x, y),
+                        arrow_symbol,
+                        size_px=self.label_font_px,
+                        color=arrow_color,
+                    )
 
         # Draw data blocks last (leader lines z=7, blocks z=8)
         if self.show_data_blocks and label_layout is not None:

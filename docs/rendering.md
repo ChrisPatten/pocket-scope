@@ -9,7 +9,7 @@ PocketScope renders the radar-style view using a layered canvas abstraction. Ren
 ## Layers & Views
 
 - **`render/layers/*.py`** – Each overlay (airports, sectors, aircraft, trails) lives in a dedicated layer class. Layers subscribe to bus topics or data services and render onto the canvas when asked.
-- **`render/view_ppi.py`** – The primary north-up plan position indicator. It draws range rings, ownship, aircraft glyphs, and data blocks using geometry helpers from `core/geo.py`.
+- **`render/view_ppi.py`** – The primary north-up plan position indicator. It draws range rings, ownship, aircraft glyphs, and data blocks using geometry helpers from `core/geo.py`. Aircraft glyph fill was simplified to always use the neutral `ac.level.fill` colour; vertical speed is now communicated (in "simple label" mode) via a small ▲ / ▼ arrow appended to the one-line label when climb/descent exceeds ±200 fpm (arrow coloured with `ac.climb.fill` / `ac.desc.fill`).
 - **`render/labels.py`** – Handles ATC-style label layout, collision avoidance, and typography controls (font size, gaps, and alignment).
 
 ## Input Handling

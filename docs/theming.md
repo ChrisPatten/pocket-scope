@@ -38,7 +38,7 @@ airport.marker, airport.text
 ### Aircraft & tracks
 ```
 ac.level.fill, ac.level.stroke
-ac.climb.fill, ac.desc.fill
+ac.climb.fill, ac.desc.fill   # used for vertical speed arrow indicators in simple labels
 ac.pinned.stroke, ac.focus.stroke
 track.head (trail fades head -> background color automatically)
 ```
@@ -61,12 +61,14 @@ vprof.vs.pos, vprof.vs.neg, vprof.vs.neutral
 ```
 
 Alpha: Any key may specify 8‑digit hex (e.g. `track.head` = `#6EFF6E80`). Trails
-fade smoothly from `track.head` toward the background color (`bg`). The former
-`track.tail` key and unused keys (`map.coast`, `compass.cardinal`, `compass.tick`,
-`infobar.bg`, `infobar.text`, `alert.bg`, `alert.text`) were removed as the related
-UI elements are no longer rendered. Overrides specifying removed keys are ignored;
-you can delete them from settings with no functional impact. When alpha is omitted
-it defaults to 255.
+fade smoothly from `track.head` toward the background color (`bg`). Aircraft glyphs
+now always use the neutral `ac.level.fill`; vertical rate dynamics are expressed via
+the optional label arrow (so adjusting `ac.climb.fill` / `ac.desc.fill` only affects
+that indicator, not the glyph body). The former `track.tail` key and unused keys
+(`map.coast`, `compass.cardinal`, `compass.tick`, `infobar.bg`, `infobar.text`,
+`alert.bg`, `alert.text`) were removed as the related UI elements are no longer
+rendered. Overrides specifying removed keys are ignored; you can delete them from
+settings with no functional impact. When alpha is omitted it defaults to 255.
 
 ## Adding a Theme
 1. Add a new entry to the `THEMES` dict in `pocketscope/theme.py` with all required keys.

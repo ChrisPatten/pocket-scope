@@ -16,6 +16,8 @@ from typing import Any
 from pocketscope.core.events import EventBus, pack
 from pocketscope.settings.store import SettingsStore
 
+# Lazy import inside method for ThemeManager to avoid unnecessary cost at import time.
+
 logger = logging.getLogger(__name__)
 
 
@@ -36,7 +38,11 @@ class ConfigWatcher:
     ) -> None:
         self._bus = bus
         self._config_path = SettingsStore.settings_path()
-        self._last_mtime: float | None = None
+        # User-level themes file (only this one; packaged + module-local are static)
+        home_dir = self._config_path.parent
+        self._theme_path = home_dir / "themes.yml"
+        self._last_cfg_mtime: float | None = None
+        self._last_theme_mtime: float | None = None
         self._last_config: dict[str, Any] = {}
         self._run_task: asyncio.Task[None] | None = None
         self._poll_task: asyncio.Task[None] | None = None
@@ -99,16 +105,76 @@ class ConfigWatcher:
 
     # Internals -----------------------------------------------------------------
     def _check_and_publish(self) -> None:
+        cfg_changed = False
+        theme_changed = False
+
         try:
-            mtime = os.path.getmtime(self._config_path)
+            cfg_mtime = os.path.getmtime(self._config_path)
         except OSError:
-            mtime = 0.0
-        if mtime and mtime != self._last_mtime:
-            self._last_mtime = mtime
+            cfg_mtime = 0.0
+        if cfg_mtime and cfg_mtime != self._last_cfg_mtime:
+            self._last_cfg_mtime = cfg_mtime
+            cfg_changed = True
+
+        try:
+            theme_mtime = os.path.getmtime(self._theme_path)
+        except OSError:
+            theme_mtime = 0.0
+        if theme_mtime and theme_mtime != self._last_theme_mtime:
+            self._last_theme_mtime = theme_mtime
+            theme_changed = True
+
+        if not (cfg_changed or theme_changed):
+            return
+
+        # Always attempt to reload settings (provides theme overrides) when
+        # either file changes for simplicity / correctness.
+        try:
+            settings = SettingsStore.load()
+        except Exception as e:  # pragma: no cover - defensive
+            logger.error("Settings reload failed: %s", e)
+            return
+
+        # Publish cfg.changed if settings file modified.
+        if cfg_changed:
             try:
-                settings = SettingsStore.load()
                 asyncio.create_task(
                     self._bus.publish("cfg.changed", pack(settings.model_dump()))
                 )
+            except Exception as e:  # pragma: no cover
+                logger.error("cfg.changed publish failed: %s", e)
+
+        # Theme reload & publish theme.changed if theme file modified OR if
+        # settings changed (since settings carry theme overrides & could alter
+        # effective palette). We treat both cases the same for simplicity.
+        if theme_changed or cfg_changed:
+            try:
+                from pocketscope.theme import ThemeManager
+
+                # settings may be pydantic model with model_dump
+                payload_settings: dict[str, Any]
+                if hasattr(settings, "model_dump"):
+                    payload_settings = settings.model_dump()
+                elif isinstance(settings, dict):
+                    payload_settings = settings
+                else:  # fallback
+                    payload_settings = {}
+                ThemeManager.reload(payload_settings)
+                theme_obj = ThemeManager.theme()
+                # Minimal palette export (hex strings as originally defined)
+                pal_export = {
+                    k: f"#{v.r:02X}{v.g:02X}{v.b:02X}{v.a:02X}" for k, v in theme_obj.palette.items()
+                }
+                asyncio.create_task(
+                    self._bus.publish(
+                        "theme.changed",
+                        pack(
+                            {
+                                "theme": theme_obj.name,
+                                "palette": pal_export,
+                            }
+                        ),
+                    )
+                )
             except Exception as e:  # pragma: no cover - defensive
-                logger.error("Settings reload failed: %s", e)
+                logger.error("Theme reload failed: %s", e)

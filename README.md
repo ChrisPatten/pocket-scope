@@ -10,6 +10,12 @@
 
 PocketScope is a handheld, Pi-powered ATC-style scope for decoding and displaying ADS-B traffic. The application is written in Python and designed for real-time sensor data processing, deterministic testing, and rapid prototyping.
 
+Recent rendering enhancements include simplified neutral aircraft glyph fill (consistent
+baseline colour for all aircraft) with lightweight climb / descent ▲ ▼ arrow indicators
+appended to simple labels (shown only when vertical rate exceeds ±200 fpm). Arrow colour
+follows the `ac.climb.fill` / `ac.desc.fill` palette keys while the glyph itself now
+always uses `ac.level.fill` for improved visual stability.
+
 - Event-driven architecture with deterministic simulation time
 - Modular ingestion, processing, and rendering pipelines
 - Multiple display backends (desktop, SPI TFT, web)
