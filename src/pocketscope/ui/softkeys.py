@@ -6,6 +6,7 @@ from typing import Callable, Dict, List, Tuple
 
 from pocketscope.render.canvas import Canvas, Color
 from pocketscope.settings.values import THEME
+from pocketscope.theme import ThemeManager
 
 _SK_THEME = (
     THEME.get("colors", {}).get("softkeys", {}) if isinstance(THEME, dict) else {}
@@ -170,34 +171,40 @@ class SoftKeyBar:
     def draw(self, canvas: Canvas) -> None:
         if not self._rects:
             self.layout()
+        try:
+            bg = ThemeManager.color("status.bg")  # reuse status backdrop for cohesion
+            txt = ThemeManager.color("status.text")
+            border = ThemeManager.color("infobar.accent")
+        except Exception:
+            bg, txt, border = _COLOR_BG, _COLOR_TEXT, self.border_color
         for (x, y, w, h), label in zip(self._rects, self.actions.keys()):
             # Button background fill (cheap vertical scanline fill).
             for dy in range(h):
-                canvas.line((x, y + dy), (x + w - 1, y + dy), color=_COLOR_BG)
+                canvas.line((x, y + dy), (x + w - 1, y + dy), color=bg)
             # border
             canvas.line(
                 (x, y),
                 (x + w - 1, y),
                 width=self.border_width,
-                color=self.border_color,
+                color=border,
             )  # top
             canvas.line(
                 (x, y + h - 1),
                 (x + w - 1, y + h - 1),
                 width=self.border_width,
-                color=self.border_color,
+                color=border,
             )  # bottom
             canvas.line(
                 (x, y),
                 (x, y + h - 1),
                 width=self.border_width,
-                color=self.border_color,
+                color=border,
             )  # left
             canvas.line(
                 (x + w - 1, y),
                 (x + w - 1, y + h - 1),
                 width=self.border_width,
-                color=self.border_color,
+                color=border,
             )  # right
 
             # Center the label using measurement (pygame-backed if available)
@@ -217,7 +224,7 @@ class SoftKeyBar:
                 (text_x, text_y),
                 label,
                 size_px=self.font_px,
-                color=_COLOR_TEXT,
+                color=txt,
             )
 
     # Measurement --------------------------------------------------------

@@ -1,0 +1,51 @@
+{
+  "type": "FeatureCollection",
+  "features": [
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [[
+          [-71.0002, 42.0001],
+          [-70.9998, 42.0001],
+          [-70.9998, 41.9999],
+          [-71.0002, 41.9999],
+          [-71.0002, 42.0001]
+        ]]
+      },
+      "properties": {
+        "GLOBAL_ID": "R1",
+        "AIRPORT_ID": "A1",
+        "DESIGNATOR": "01/19",
+        "LENGTH": 5000,
+        "WIDTH": 150,
+        "COMP_CODE": "ASPH",
+        "LIGHTACTV": 1,
+        "LIGHTINTNS": "MED"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [[
+          [-71.2003, 42.1002],
+          [-71.1997, 42.1002],
+          [-71.1997, 42.0998],
+          [-71.2003, 42.0998],
+          [-71.2003, 42.1002]
+        ]]
+      },
+      "properties": {
+        "GLOBAL_ID": "R2",
+        "AIRPORT_ID": "A2",
+        "DESIGNATOR": "05/23",
+        "LENGTH": 6000,
+        "WIDTH": 200,
+        "COMP_CODE": "CONC",
+        "LIGHTACTV": 0,
+        "LIGHTINTNS": null
+      }
+    }
+  ]
+}

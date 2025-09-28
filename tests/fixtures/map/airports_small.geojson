@@ -1,0 +1,35 @@
+{
+  "type": "FeatureCollection",
+  "features": [
+    {
+      "type": "Feature",
+      "geometry": { "type": "Point", "coordinates": [-71.0, 42.0] },
+      "properties": {
+        "GLOBAL_ID": "A1",
+        "IDENT": "TEST1",
+        "NAME": "Test Airport One",
+        "ICAO_ID": "KTS1",
+        "TYPE_CODE": "AIRPORT",
+        "SERVCITY": "Testville",
+        "STATE": "MA",
+        "COUNTRY": "US",
+        "ELEVATION": 120.0
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": { "type": "Point", "coordinates": [-71.2, 42.1] },
+      "properties": {
+        "GLOBAL_ID": "A2",
+        "IDENT": "TEST2",
+        "NAME": "Test Airport Two",
+        "ICAO_ID": "KTS2",
+        "TYPE_CODE": "AIRPORT",
+        "SERVCITY": "Sampletown",
+        "STATE": "MA",
+        "COUNTRY": "US",
+        "ELEVATION": 50.0
+      }
+    }
+  ]
+}

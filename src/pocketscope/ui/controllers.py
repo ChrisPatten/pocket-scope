@@ -9,8 +9,11 @@ inputs for zooming and quitting.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
+import math
 import os
+from bisect import bisect_right
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable, Optional, Sequence, cast
@@ -21,6 +24,7 @@ from pocketscope.core.geo import ecef_to_enu, geodetic_to_ecef
 from pocketscope.core.time import TimeSource
 from pocketscope.core.tracks import TrackService
 from pocketscope.ingest.adsb.playback_source import FilePlaybackSource
+from pocketscope.map.data_provider import MapDataProvider
 from pocketscope.render.canvas import DisplayBackend
 from pocketscope.render.view_ppi import PpiView, TrackSnapshot
 from pocketscope.settings.schema import Settings
@@ -29,15 +33,18 @@ from pocketscope.settings.values import (
     ALTITUDE_FILTER_BANDS,
     ALTITUDE_FILTER_CYCLE_ORDER,
     RANGE_LADDER_NM,
-    SETTINGS_SCREEN_CONFIG,
     TRACK_LENGTH_PRESETS_S,
     TRACK_SERVICE_DEFAULTS,
     UNITS_ORDER,
     ZOOM_LIMITS,
 )
-from pocketscope.ui.settings_screen import SettingsScreen
 from pocketscope.ui.softkeys import SoftKeyBar
 from pocketscope.ui.status_overlay import StatusOverlay
+from pocketscope.ui.vertical_profile import (
+    VerticalProfilePanel,
+    VerticalProfileSample,
+    VerticalProfileState,
+)
 
 if TYPE_CHECKING:
     from pocketscope.data.sectors import Sector
@@ -60,6 +67,21 @@ class UiConfig:
     overlay: bool = True
 
 
+@dataclass(slots=True)
+class _TrackMetric:
+    track: Any
+    last_point: Any
+    lat: float
+    lon: float
+    altitude_ft: float | None
+    distance_nm: float
+
+
+_SIDEBAR_MODES = {"vertical_profile", "hotkey_bar", "none"}
+_SIDEBAR_SIDES = {"left", "right"}
+_INFO_BLOCK_POLICIES = {"focus_and_closest", "all", "none"}
+
+
 class UiController:
     """Owns frame loop, input handling, and composite rendering for PPI UI."""
 
@@ -77,8 +99,7 @@ class UiController:
         airports: Optional[list[tuple[float, float, str]]] = None,
         sectors: Optional[object] = None,
         font_px: int = 12,
-        runways_sqlite: str | None = None,
-        runway_icons: bool = False,
+        map_provider: MapDataProvider | None = None,
     ) -> None:
         # Core references
         self._display = display
@@ -117,25 +138,28 @@ class UiController:
             disp_w, _disp_h = self._display.size()
         except Exception:
             disp_w = 300  # pragmatic fallback for headless environments
-        # Use persisted status font size when available
-        try:
-            status_px = int(getattr(self._settings, "status_font_px", font_px))
-        except Exception:
-            status_px = font_px
-        # Optional explicit top/bottom pads
-        try:
-            st = getattr(self._settings, "status_pad_top_px", None)
-            sb = getattr(self._settings, "status_pad_bottom_px", None)
-            if st is not None:
-                st = int(st)
-            if sb is not None:
-                sb = int(sb)
-        except Exception:
-            st = None
-            sb = None
-        self._overlay = StatusOverlay(
-            font_px=status_px, pad_top=st, pad_bottom=sb, width_px=disp_w
+        self._overlay = StatusOverlay(self._settings, width_px=disp_w)
+        self.primary_sidebar_mode = getattr(
+            self._settings, "primary_sidebar_mode", "vertical_profile"
         )
+        self.primary_sidebar_side = getattr(
+            self._settings, "primary_sidebar_side", "right"
+        )
+        self.info_blocks_policy = getattr(
+            self._settings, "info_blocks_policy", "focus_and_closest"
+        )
+        self._info_blocks_previous: str | None = None
+        self._info_blocks_prev_baseline: str = (
+            self.info_blocks_policy
+            if self.info_blocks_policy != "focus_and_closest"
+            else "all"
+        )
+        self._info_block_targets: set[str] | None = None
+        self._sidebar_focus_icao: str | None = None
+        self._sidebar_focus_pinned: bool = False
+        self._sidebar_closest_icao: str | None = None
+        self._vertical_profile: VerticalProfilePanel | None = None
+        self._sidebar_state: VerticalProfileState | None = None
         self._cfg.range_nm = float(self._settings.range_nm)
         self.units = self._settings.units
         self.track_length_s = float(getattr(self._settings, "track_length_s", 45.0))
@@ -155,6 +179,19 @@ class UiController:
         self.north_up_lock = getattr(self._settings, "north_up_lock", True)
         # Sector label visibility (persisted)
         self.sector_labels = bool(getattr(self._settings, "sector_labels", True))
+        self.autoscale_enabled = bool(
+            getattr(self._settings, "autoscale_enabled", False)
+        )
+        try:
+            self.autoscale_target_visible = int(
+                getattr(self._settings, "autoscale_target_visible", 12)
+            )
+        except Exception:
+            self.autoscale_target_visible = 12
+        self._autoscale_alt_override: tuple[float | None, float | None] | None = None
+        self._autoscale_range_nm: float | None = None
+        self._total_aircraft_count: int = 0
+        self._visible_aircraft_count: int = 0
         # Apply persisted trail length immediately so TrackService windows
         # reflect a user-provided custom value on startup (previously only
         # applied when cycling or after a cfg.changed hot‑reload event).
@@ -175,13 +212,9 @@ class UiController:
             # Best-effort; do not break initialization if backend missing hook
             pass
 
-        # Settings screen overlay (multiplier from configuration)
-        settings_font_px = int(
-            font_px * float(SETTINGS_SCREEN_CONFIG.get("font_multiplier", 1.2))
-        )
-        self._settings_screen = SettingsScreen(
-            self._settings, font_px=settings_font_px, pad_px=6
-        )
+        # Settings screen overlay placeholder (feature removed but attribute kept
+        # for backward compatibility with older code paths/tests referencing it).
+        self._settings_screen = None  # legacy placeholder
         self._apply_track_windows()
         # Apply persisted typography settings to active view if available
         try:
@@ -197,7 +230,13 @@ class UiController:
             pass
 
         # Softkeys (late-bound via set_softkeys)
+        # NOTE: Softkeys are disabled by default in this branch. The bar
+        # instance is stored in `_softkeys_backing` so it can be re-attached
+        # later without losing configuration. Use `enable_softkeys()` to
+        # attach at runtime.
         self._softkeys: SoftKeyBar | None = None
+        self._softkeys_backing: SoftKeyBar | None = None
+        self._softkeys_enabled: bool = False
         self._softkeys_base_actions: dict[str, Callable[[], None]] | None = None
 
         # Config change subscription & listener task
@@ -222,28 +261,9 @@ class UiController:
         )
 
         # Optional static data
-        self._airports: Optional[list[tuple[float, float, str]]] = (
-            list(airports) if airports else None
-        )
+        self._map_provider = map_provider
+        self._map_data: dict[str, Any] | None = None
         self._sectors = sectors  # typed only when TYPE_CHECKING
-
-        # Internal prefetch state to avoid scheduling IO every frame.
-        # Key is a tuple: (range_nm_rounded, rotation_deg_rounded, idents)
-        self._last_runway_prefetch_key: Optional[
-            tuple[float, float, tuple[str, ...]]
-        ] = None
-
-        # Runway DB path and flags for icon rendering and prefetching
-        self._runways_sqlite = runways_sqlite
-        self._runway_icons = bool(runway_icons)
-        self._runway_prefetcher = None
-        try:
-            if self._runways_sqlite and self._runway_icons:
-                from pocketscope.data.runways_store import RunwayPrefetcher
-
-                self._runway_prefetcher = RunwayPrefetcher(self._runways_sqlite)
-        except Exception:
-            self._runway_prefetcher = None
 
         # FPS tracking (EMA) + orientation
         self._prev_frame_t: Optional[float] = None
@@ -252,6 +272,21 @@ class UiController:
             self._rotation_deg: float = float(getattr(self._view, "rotation_deg", 0.0))
         except Exception:
             self._rotation_deg = 0.0
+
+        self._apply_info_blocks_policy()
+        self._apply_sidebar_mode(initial=True)
+        # External screenshot request flag (set by signal/file triggers)
+        self._screenshot_requested: bool = False
+        self._last_command_scan_ms: float = 0.0
+        try:
+            self._command_dir = Path.home() / ".pocketscope" / "commands"
+        except Exception:  # pragma: no cover - fallback path construction
+            self._command_dir = Path("./commands")
+        # Best effort create
+        try:
+            self._command_dir.mkdir(parents=True, exist_ok=True)
+        except Exception:
+            pass
 
     def set_softkeys(self, bar: SoftKeyBar) -> None:
         # Apply persisted softkey typography/padding when available
@@ -275,14 +310,31 @@ class UiController:
             bar.bar_height = None
         except Exception:
             pass
-        self._softkeys = bar
+        # Store backing instance so callers can supply the bar even when
+        # softkeys are intentionally disabled. If softkeys are enabled the
+        # bar will be attached and wired as before; otherwise we keep the
+        # instance available for future enablement.
+        self._softkeys_backing = bar
 
-        # Ensure Settings button is wired
-        def _toggle_settings() -> None:
-            self._settings_screen.on_key("s", self)
+        # Wire up appearance settings on the backing instance so layout is
+        # correct when later attached.
 
-        self._softkeys.actions["Settings"] = _toggle_settings
-        self._softkeys.layout()
+        # Ensure Settings button is wired on the backing bar as well
+        def _toggle_settings() -> None:  # pragma: no cover - settings removed
+            return
+
+        try:
+            self._softkeys_backing.actions["Settings"] = _toggle_settings
+        except Exception:
+            pass
+
+        # Attach only if enabled (default: disabled)
+        if self._softkeys_enabled:
+            self._softkeys = self._softkeys_backing
+            try:
+                self._softkeys.layout()
+            except Exception:
+                pass
 
     async def run(self) -> None:
         self._running = True
@@ -300,9 +352,37 @@ class UiController:
                 self._process_input()
                 # Ensure softkey action set reflects current settings screen visibility
                 self._sync_softkeys()
+                # External screenshot trigger polling (lightweight; every ~0.5s)
+                try:
+                    now_ms_poll = t0 * 1000.0
+                    if now_ms_poll - self._last_command_scan_ms > 500.0:
+                        self._last_command_scan_ms = now_ms_poll
+                        # Scan for files named 'screenshot' (any suffix allowed)
+                        if self._command_dir.exists():
+                            for p in list(self._command_dir.glob("screenshot*")):
+                                try:
+                                    p.unlink(missing_ok=True)
+                                except Exception:
+                                    pass
+                                # Queue a screenshot
+                                self._screenshot_requested = True
+                except Exception:
+                    pass
+                if self._screenshot_requested:
+                    try:
+                        path = self.screenshot()
+                        if path:
+                            print(f"[UiController] external screenshot -> {path}")
+                    except Exception:
+                        pass
+                    self._screenshot_requested = False
 
-                # Build snapshot of active tracks
-                snaps = self._build_snapshots()
+                metrics, tracks_active = self._collect_track_metrics()
+                self._total_aircraft_count = len(metrics)
+                self._apply_autoscale(metrics)
+                now_wall = self._ts.wall_time()
+                self._update_sidebar(metrics, now_monotonic=t0, now_wall=now_wall)
+                snaps = self._build_snapshots(metrics)
 
                 # Render frame
                 canvas = self._display.begin_frame()
@@ -312,35 +392,18 @@ class UiController:
                     if self.north_up_lock:
                         self._rotation_deg = 0.0  # enforce lock each frame
                     self._view.rotation_deg = float(self._rotation_deg) % 360.0
-                # Draw PPI view with occlusion rectangles
-                # Prefetch runways for visible airports when PPI state changes
-                try:
-                    if self._runway_prefetcher and self._airports:
-                        from pocketscope.core.geo import haversine_nm
-
-                        idents_to_prefetch: list[str] = []
-                        for lat, lon, ident in self._airports:
-                            if (
-                                haversine_nm(
-                                    self._center_lat, self._center_lon, lat, lon
-                                )
-                                <= self._cfg.range_nm
-                            ):
-                                idents_to_prefetch.append(str(ident).upper())
-
-                        # Create a compact prefetch key and keep each component on
-                        # its own line to satisfy line-length limits.
-                        range_key = round(float(self._cfg.range_nm), 3)
-                        rot_key = round(float(self._rotation_deg), 2)
-                        idents_key = tuple(sorted(idents_to_prefetch))
-                        key = (range_key, rot_key, idents_key)
-                        if key != self._last_runway_prefetch_key:
-                            if idents_to_prefetch:
-                                self._runway_prefetcher.prefetch(idents_to_prefetch)
-                            self._last_runway_prefetch_key = key
-                except Exception:
-                    # Do not allow prefetch failures to break the render loop
-                    pass
+                # Fetch map features near the current center when available
+                map_data = None
+                if self._map_provider is not None:
+                    try:
+                        extra_airports = getattr(self._settings, "extra_airports", [])
+                        map_data = self._map_provider.get_features_near(
+                            self._center_lat, self._center_lon, extra_airports
+                        )
+                    except Exception:
+                        map_data = self._map_data
+                if map_data is not None:
+                    self._map_data = map_data
 
                 self._view.draw(
                     canvas,
@@ -348,11 +411,9 @@ class UiController:
                     center_lat=self._center_lat,
                     center_lon=self._center_lon,
                     tracks=snaps,
-                    airports=self._airports,
+                    map_data=self._map_data,
                     sectors=cast("Optional[Sequence[Sector]]", self._sectors),
                     occlusions=self._compute_occlusions(),
-                    runway_sqlite=self._runways_sqlite,
-                    runway_icons=self._runway_icons,
                 )
 
                 # Diagnostics overlay
@@ -362,9 +423,107 @@ class UiController:
                         t0
                     )  # still computed to keep EMA warm
                     # Future: health flags derived from services; for now assume True
-                    clock_utc = self._fmt_clock(self._ts.wall_time())
+                    clock_utc = self._fmt_clock(now_wall)
+                    # Compute most recent track timestamp across active
+                    # tracks so the overlay can display the age of the
+                    # latest data. If no tracks exist, pass None.
+                    tracks = list(tracks_active)
+                    latest_ts: float | None = None
+                    try:
+                        for tr in tracks:
+                            try:
+                                t = tr.last_ts.timestamp()
+                                if latest_ts is None or t > latest_ts:
+                                    latest_ts = t
+                            except Exception:
+                                continue
+                    except Exception:
+                        tracks = []
+                        latest_ts = None
+
+                    # Compute nearest track distance (nm) and altitude (ft)
+                    nearest_range_nm = None
+                    nearest_alt_ft = None
+                    try:
+                        from math import asin, cos, radians, sin, sqrt
+
+                        def _haversine_nm(
+                            lat1: float, lon1: float, lat2: float, lon2: float
+                        ) -> float:
+                            R = 6371000.0
+                            dlat = radians(lat2 - lat1)
+                            dlon = radians(lon2 - lon1)
+                            a = (
+                                sin(dlat / 2) ** 2
+                                + cos(radians(lat1))
+                                * cos(radians(lat2))
+                                * sin(dlon / 2) ** 2
+                            )
+                            c = 2 * asin(min(1, sqrt(a)))
+                            meters = R * c
+                            nm = meters / 1852.0
+                            return nm
+
+                        center_lat = float(self._center_lat)
+                        center_lon = float(self._center_lon)
+                        if isinstance(tracks, (list, tuple)) and tracks:
+                            for tr in tracks:
+                                try:
+                                    if not tr.history:
+                                        continue
+                                    last = tr.history[-1]
+                                    lat = float(last[1])
+                                    lon = float(last[2])
+                                    alt = None
+                                    try:
+                                        # last[3] may be altitude sample
+                                        if isinstance(last[3], (int, float)):
+                                            alt = float(last[3])
+                                    except Exception:
+                                        alt = None
+                                    rng = None
+                                    # Prefer a view helper if available
+                                    try:
+                                        fn = getattr(
+                                            self._view, "great_circle_range_nm", None
+                                        )
+                                        if callable(fn):
+                                            _res = fn(
+                                                (lat, lon), (center_lat, center_lon)
+                                            )
+                                            try:
+                                                if isinstance(_res, (int, float)):
+                                                    rng = float(_res)
+                                                else:
+                                                    # try string-conversion fallback
+                                                    rng = float(str(_res))
+                                            except Exception:
+                                                rng = None
+                                    except Exception:
+                                        rng = None
+                                    if rng is None:
+                                        rng = _haversine_nm(
+                                            lat, lon, center_lat, center_lon
+                                        )
+                                    if rng is None:
+                                        continue
+                                    if (
+                                        nearest_range_nm is None
+                                        or rng < nearest_range_nm
+                                    ):
+                                        nearest_range_nm = rng
+                                        nearest_alt_ft = alt
+                                except Exception:
+                                    continue
+                    except Exception:
+                        nearest_range_nm = None
+                        nearest_alt_ft = None
+
+                    alt_min_ft, alt_max_ft = self.alt_filter
+
                     self._overlay.draw(
                         canvas,
+                        self._settings,
                         range_nm=self._cfg.range_nm,
                         clock_utc=clock_utc,
                         center_lat=self._center_lat,
@@ -372,14 +531,51 @@ class UiController:
                         gps_ok=True,
                         imu_ok=True,
                         decoder_ok=True,
-                        units=self.units,
-                        demo_mode=self.demo_mode,
+                        last_update_ts=latest_ts,
+                        ac_counts=(
+                            len(tracks) if isinstance(tracks, (list, tuple)) else None,
+                            self._visible_aircraft_count,
+                        ),
+                        nearest_range_nm=nearest_range_nm,
+                        nearest_alt_ft=nearest_alt_ft,
+                        alt_filter=self.alt_filter,
+                        # Only show autoscale marker when an autoscale
+                        # override is present and it imposes a finite
+                        # altitude cap (i.e. not math.inf).
+                        alt_filter_autoscale=(
+                            True
+                            if (
+                                getattr(self, "_autoscale_alt_override", None)
+                                is not None
+                                and getattr(self, "_autoscale_alt_override")[1]
+                                is not None
+                                and not (
+                                    isinstance(
+                                        getattr(self, "_autoscale_alt_override")[1],
+                                        float,
+                                    )
+                                    and math.isinf(
+                                        getattr(self, "_autoscale_alt_override")[1]
+                                    )
+                                )
+                            )
+                            else False
+                        ),
                     )
                 # Settings overlay drawn (softkey mapping already synced earlier)
-                if self._settings_screen.visible:
-                    self._settings_screen.draw(
-                        canvas, size=self._display.size(), controller=self
-                    )
+                # Settings screen removed
+                if (
+                    self.primary_sidebar_mode == "vertical_profile"
+                    and self._vertical_profile
+                ):
+                    try:
+                        self._vertical_profile.draw(
+                            canvas,
+                            size=self._display.size(),
+                            state=self._sidebar_state,
+                        )
+                    except Exception:
+                        pass
                 # Draw softkeys last (either restricted or full set)
                 if self._softkeys:
                     self._softkeys.draw(canvas)
@@ -409,6 +605,7 @@ class UiController:
 
         Rectangles are (x, y, w, h) in display coordinates. Covers:
         - Status overlay (top band) when enabled
+        - Vertical profile sidebar when active
         - SoftKeyBar (bottom band) when present
         """
         occ: list[tuple[int, int, int, int]] = []
@@ -426,6 +623,17 @@ class UiController:
                 occ.append((0, 0, w, panel_h))
         except Exception:
             pass
+        # Vertical profile sidebar
+        if (
+            self.primary_sidebar_mode == "vertical_profile"
+            and self._vertical_profile is not None
+        ):
+            try:
+                rect = self._vertical_profile.panel_rect()
+            except Exception:
+                rect = None
+            if rect is not None:
+                occ.append(rect)
         # Softkeys band
         try:
             if self._softkeys and getattr(self._softkeys, "_rects", None):
@@ -464,6 +672,166 @@ class UiController:
 
     def toggle_overlay(self) -> None:
         self._cfg.overlay = not self._cfg.overlay
+
+    def enable_softkeys(self) -> None:
+        """Attach the previously-set SoftKeyBar to the controller so it is
+        drawn and receives input. If no bar was provided via `set_softkeys`
+        this is a no-op.
+        """
+        try:
+            if self._softkeys_backing is None:
+                return
+            self._softkeys_enabled = True
+            self._softkeys = self._softkeys_backing
+            # Ensure actions mapping and layout are installed
+            try:
+                if self._softkeys_base_actions is None:
+                    # preserve existing mapping if present
+                    self._softkeys_base_actions = dict(self._softkeys.actions)
+            except Exception:
+                pass
+            try:
+                self._softkeys.layout()
+            except Exception:
+                pass
+        except Exception:
+            pass
+
+    def disable_softkeys(self) -> None:
+        """Detach the SoftKeyBar so it is not drawn or receives input.
+        The backing instance is preserved and can be re-attached with
+        `enable_softkeys()`.
+        """
+        try:
+            self._softkeys_enabled = False
+            # Keep backing, but detach runtime reference
+            self._softkeys = None
+            # Clear base_actions so when re-enabled we rebuild mapping
+            self._softkeys_base_actions = None
+        except Exception:
+            pass
+
+    # Sidebar / info-block configuration ---------------------------------
+    def _apply_sidebar_mode(self, *, initial: bool = False) -> None:
+        mode = self.primary_sidebar_mode
+        if mode == "vertical_profile":
+            if self._vertical_profile is None:
+                self._vertical_profile = VerticalProfilePanel(
+                    self._settings, side=self.primary_sidebar_side
+                )
+            else:
+                self._vertical_profile.refresh_settings(self._settings)
+                self._vertical_profile.set_side(self.primary_sidebar_side)
+            self.disable_softkeys()
+        elif mode == "hotkey_bar":
+            self._vertical_profile = None
+            if self._softkeys_backing is not None:
+                self.enable_softkeys()
+        else:
+            self._vertical_profile = None
+            self.disable_softkeys()
+        if not initial:
+            self._refresh_info_block_targets()
+
+    def _apply_info_blocks_policy(self) -> None:
+        try:
+            self._view.show_data_blocks = self.info_blocks_policy != "none"
+        except Exception:
+            pass
+        self._refresh_info_block_targets()
+
+    def _refresh_info_block_targets(
+        self,
+        *,
+        focus: str | None = None,
+        closest: str | None = None,
+    ) -> None:
+        policy = self.info_blocks_policy
+        focus_id = focus if focus is not None else self._sidebar_focus_icao
+        closest_id = closest if closest is not None else self._sidebar_closest_icao
+        if policy == "all":
+            self._info_block_targets = None
+        elif policy == "none":
+            self._info_block_targets = set()
+        else:
+            targets: set[str] = set()
+            if focus_id:
+                targets.add(focus_id)
+            if closest_id and closest_id != focus_id:
+                targets.add(closest_id)
+            self._info_block_targets = targets
+
+    def set_info_blocks_policy(self, policy: str, *, persist: bool = True) -> None:
+        if policy not in _INFO_BLOCK_POLICIES:
+            return
+        if policy == self.info_blocks_policy:
+            return
+        prev = self.info_blocks_policy
+        self.info_blocks_policy = policy
+        self._settings.info_blocks_policy = policy
+        if prev != "focus_and_closest":
+            self._info_blocks_prev_baseline = prev
+        if policy != "focus_and_closest":
+            self._info_blocks_prev_baseline = policy
+        self._apply_info_blocks_policy()
+        if persist:
+            SettingsStore.save_debounced(self._settings)
+
+    def cycle_info_blocks_policy(self, *, persist: bool = True) -> None:
+        order = ["focus_and_closest", "all", "none"]
+        idx = order.index(self.info_blocks_policy)
+        nxt = order[(idx + 1) % len(order)]
+        self.set_info_blocks_policy(nxt, persist=persist)
+
+    def set_primary_sidebar_mode(self, mode: str, *, persist: bool = True) -> None:
+        if mode not in _SIDEBAR_MODES:
+            return
+        if mode == self.primary_sidebar_mode:
+            return
+        prev_mode = self.primary_sidebar_mode
+        self.primary_sidebar_mode = mode
+        self._settings.primary_sidebar_mode = mode
+        self._apply_sidebar_mode()
+        if mode == "vertical_profile" and self.info_blocks_policy not in {
+            "focus_and_closest",
+            "none",
+        }:
+            self.set_info_blocks_policy("focus_and_closest", persist=persist)
+        if (
+            prev_mode == "vertical_profile"
+            and self.info_blocks_policy == "focus_and_closest"
+        ):
+            if (
+                self._info_blocks_prev_baseline
+                and self._info_blocks_prev_baseline != "focus_and_closest"
+            ):
+                self.set_info_blocks_policy(
+                    self._info_blocks_prev_baseline, persist=persist
+                )
+        if persist:
+            SettingsStore.save_debounced(self._settings)
+
+    def cycle_primary_sidebar_mode(self, *, persist: bool = True) -> None:
+        order = ["vertical_profile", "hotkey_bar", "none"]
+        idx = order.index(self.primary_sidebar_mode)
+        nxt = order[(idx + 1) % len(order)]
+        self.set_primary_sidebar_mode(nxt, persist=persist)
+
+    def set_primary_sidebar_side(self, side: str, *, persist: bool = True) -> None:
+        if side not in _SIDEBAR_SIDES:
+            return
+        if side == self.primary_sidebar_side:
+            return
+        self.primary_sidebar_side = side
+        self._settings.primary_sidebar_side = side
+        if self._vertical_profile is not None:
+            self._vertical_profile.set_side(side)
+        if persist:
+            SettingsStore.save_debounced(self._settings)
+
+    def toggle_primary_sidebar_side(self, *, persist: bool = True) -> None:
+        side = "left" if self.primary_sidebar_side == "right" else "right"
+        self.set_primary_sidebar_side(side, persist=persist)
 
     def cycle_units(self, *, persist: bool = True) -> None:
         order = list(UNITS_ORDER)
@@ -544,6 +912,48 @@ class UiController:
         if persist:
             SettingsStore.save_debounced(self._settings)
 
+    def _user_alt_filter_bounds(self) -> tuple[float | None, float | None]:
+        """Return user-requested altitude bounds, ignoring autoscale overrides."""
+        try:
+            custom_lo = getattr(self._settings, "altitude_min_ft", None)
+            custom_hi = getattr(self._settings, "altitude_max_ft", None)
+            if custom_lo is not None or custom_hi is not None:
+                return (
+                    float(custom_lo) if custom_lo is not None else None,
+                    float(custom_hi) if custom_hi is not None else None,
+                )
+        except (ValueError, TypeError):
+            # Fall back to band if settings values are invalid
+            pass
+
+        band = getattr(self, "altitude_filter", "All")
+        lo_hi = ALTITUDE_FILTER_BANDS.get(band, (None, None))
+        return lo_hi[0], lo_hi[1]
+
+    @property
+    def alt_filter(self) -> tuple[float | None, float | None]:
+        """Return active altitude filter bounds (min_ft, max_ft)."""
+        base_lo, base_hi = self._user_alt_filter_bounds()
+        if getattr(self, "autoscale_enabled", False):
+            # Explicitly type this local so static checkers do not treat
+            # getattr()'s result as Any and then complain about returning
+            # Any from a function declared to return a typed tuple.
+            override: tuple[float | None, float | None] | None = getattr(
+                self, "_autoscale_alt_override", None
+            )
+            if override is not None:
+                o_lo, o_hi = override
+                if o_lo is not None:
+                    base_lo = max(base_lo, o_lo) if base_lo is not None else float(o_lo)
+                if o_hi is not None:
+                    if math.isinf(o_hi):
+                        base_hi = None
+                    else:
+                        base_hi = (
+                            min(base_hi, o_hi) if base_hi is not None else float(o_hi)
+                        )
+        return base_lo, base_hi
+
     def _apply_track_windows(self) -> None:
         presets = list(TRACK_LENGTH_PRESETS_S)
         val = float(getattr(self, "track_length_s", presets[0]))
@@ -623,18 +1033,30 @@ class UiController:
                 if self._softkeys:
                     self._softkeys.on_key(pg.key.name(key))
                 # Route to settings screen (string form from pygame key)
-                if self._settings_screen.visible:
-                    self._settings_screen.on_key(pg.key.name(key), self)
-                    # If still visible after handling and not a toggle key,
-                    # swallow other bindings
-                    if self._settings_screen.visible and pg.key.name(key) not in {"s"}:
-                        if key in (pg.K_q, pg.K_ESCAPE):
-                            # settings screen handles quit to scope, not app
-                            continue
-                        # Do not process remaining key logic while menu open
+                # Settings screen removed: ignore settings hotkey
+                if pg.key.name(key) == "s":
+                    # Consume to avoid legacy behavior
+                    continue
+                # Allow quick screenshot via F12 when a pygame window is present.
+                try:
+                    if key == getattr(pg, "K_F12", None):
+                        # Default path mirrors touchscreen softkey behavior
+                        self.screenshot()
                         continue
-                elif pg.key.name(key) == "s":  # open via hotkey
-                    self._settings_screen.on_key("s", self)
+                except Exception:
+                    pass
+                sidebar_handled = False
+                if (
+                    self.primary_sidebar_mode == "vertical_profile"
+                    and self._vertical_profile is not None
+                ):
+                    try:
+                        sidebar_handled = self._vertical_profile.on_key(
+                            pg.key.name(key), self._ts.monotonic()
+                        )
+                    except Exception:
+                        sidebar_handled = False
+                if sidebar_handled:
                     continue
                 if key in (pg.K_LEFTBRACKET, pg.K_MINUS):
                     self.zoom_out()
@@ -647,22 +1069,22 @@ class UiController:
                 elif key == pg.K_o:
                     self.toggle_overlay()
                 elif key in (pg.K_q, pg.K_ESCAPE):
-                    if self._settings_screen.visible:
-                        self._settings_screen.visible = False
-                    else:
-                        self._running = False
+                    self._running = False
             elif ev.type == pg.MOUSEBUTTONDOWN:
                 x, y = ev.pos
                 # If settings screen visible, attempt to consume click first.
-                if self._settings_screen.visible:
+                # Settings screen removed: no mouse interception
+                if (
+                    self.primary_sidebar_mode == "vertical_profile"
+                    and self._vertical_profile is not None
+                ):
                     try:
-                        consumed = self._settings_screen.on_mouse(
-                            x, y, self._display.size(), self
-                        )
+                        if self._vertical_profile.on_mouse(
+                            x, y, ev.button, self._ts.monotonic()
+                        ):
+                            continue
                     except Exception:
-                        consumed = False
-                    if consumed:
-                        continue  # Do not allow click to fall through
+                        pass
                 if self._softkeys:
                     self._softkeys.on_mouse(x, y, ev.button == 1)
             elif ev.type == pg.MOUSEWHEEL:
@@ -670,6 +1092,58 @@ class UiController:
                     self.zoom_in()
                 elif getattr(ev, "y", 0) < 0:
                     self.zoom_out()
+
+    # ------------------------------------------------------------------
+    def screenshot(self, path: str | None = None) -> str | None:
+        """Capture the current display framebuffer to a PNG.
+
+        When running on the TFT (ILI9341) this grabs the last rendered
+        frame already cached in the backend. For other backends it
+        delegates to their ``save_png`` implementation. A timestamped
+        file path is generated when ``path`` is not provided.
+
+        Returns the path written (or ``None`` if the backend declined).
+        """
+        try:
+            # Lazy import to avoid hard dependency in minimal test envs
+            import datetime as _dt  # noqa: WPS433
+        except Exception:
+            _dt = None  # type: ignore
+        if path is None:
+            ts = "unknown"
+            if _dt is not None:
+                try:
+                    ts = _dt.datetime.utcnow().strftime("%Y%m%d-%H%M%S")
+                except Exception:
+                    ts = "unknown"
+            base = Path.home() / ".pocketscope" / "screenshots"
+            try:
+                base.mkdir(parents=True, exist_ok=True)
+            except Exception:
+                # Fall back to CWD if home not writable
+                base = Path.cwd() / "screenshots"
+                with contextlib.suppress(Exception):
+                    base.mkdir(parents=True, exist_ok=True)
+            path = str(base / f"pocketscope-{ts}.png")
+        try:
+            self._display.save_png(path)
+        except Exception as e:  # pragma: no cover - backend failure path
+            try:
+                print(f"[UiController] screenshot failed: {e}")
+            except Exception:
+                pass
+            return None
+        return path
+
+    # ------------------------------------------------------------------
+    def request_screenshot(self) -> None:
+        """Request a screenshot on the next frame boundary.
+
+        This is safe to call from signal handlers or external triggers; the
+        actual file write occurs inside the main UI loop to avoid unsafe
+        operations in the signal context.
+        """
+        self._screenshot_requested = True
 
     def _sync_softkeys(self) -> None:
         """Synchronize softkey actions with settings screen visibility.
@@ -684,17 +1158,14 @@ class UiController:
         """
         if not self._softkeys:
             return
-        if self._settings_screen.visible:
-            if self._softkeys_base_actions is None:
-                self._softkeys_base_actions = dict(self._softkeys.actions)
-                self._softkeys.actions = self._settings_screen.softkey_actions(self)
+        # Settings screen removed: ensure base actions remain intact
+        if self._softkeys_base_actions is not None:
+            self._softkeys.actions = dict(self._softkeys_base_actions)
+            self._softkeys_base_actions = None
+            try:
                 self._softkeys.layout()
-        else:
-            if self._softkeys_base_actions is not None:
-                # Restore full action set
-                self._softkeys.actions = dict(self._softkeys_base_actions)
-                self._softkeys_base_actions = None
-                self._softkeys.layout()
+            except Exception:
+                pass
 
     def _step_range(self, value: float, *, direction: int) -> float:
         # Discrete zoom ladder
@@ -748,6 +1219,21 @@ class UiController:
                 self.demo_mode = new.demo_mode
                 self.altitude_filter = getattr(new, "altitude_filter", "All")
                 self.north_up_lock = getattr(new, "north_up_lock", True)
+                self.autoscale_enabled = bool(
+                    getattr(new, "autoscale_enabled", self.autoscale_enabled)
+                )
+                try:
+                    self.autoscale_target_visible = int(
+                        getattr(
+                            new,
+                            "autoscale_target_visible",
+                            self.autoscale_target_visible,
+                        )
+                    )
+                except Exception:
+                    pass
+                self._autoscale_alt_override = None
+                self._autoscale_range_nm = None
                 # Mirror flip_display runtime state and notify backend
                 try:
                     self._flip_display = bool(getattr(new, "flip_display", False))
@@ -757,8 +1243,7 @@ class UiController:
                 except Exception:
                     pass
                 self._apply_track_windows()
-                # Refresh visible settings screen with external changes
-                self._settings_screen.refresh_from_controller(self._settings)
+                # Settings screen removed: no refresh
                 # Update central runtime config and notify listeners so
                 # renderers and other components can react to external
                 # settings changes dynamically. Notifications are deferred
@@ -766,6 +1251,77 @@ class UiController:
                 # synchronous timing hazards.
                 try:
                     _config.update_from_settings(self._settings)
+                except Exception:
+                    pass
+                # Live‑apply sidebar mode / side / info block policy changes.
+                # Previously these fields were only read during controller
+                # initialization, so editing settings.json while the app was
+                # running (e.g. to enable the vertical profile) had no
+                # visible effect until a restart. Applying them here lets
+                # users toggle these options via external config updates.
+                try:
+                    new_mode = getattr(
+                        new, "primary_sidebar_mode", self.primary_sidebar_mode
+                    )
+                    if (
+                        isinstance(new_mode, str)
+                        and new_mode in _SIDEBAR_MODES
+                        and new_mode != self.primary_sidebar_mode
+                    ):
+                        prev_mode = self.primary_sidebar_mode
+                        self.primary_sidebar_mode = new_mode
+                        # Rebuild / teardown vertical profile or softkeys
+                        self._apply_sidebar_mode()
+                        # Enforce policy constraints when entering/exiting
+                        if (
+                            new_mode == "vertical_profile"
+                            and self.info_blocks_policy
+                            not in {"focus_and_closest", "none"}
+                        ):
+                            # Preserve previous baseline so when user later
+                            # leaves vertical profile we can restore it if
+                            # focus_and_closest was only a temporary override.
+                            if self.info_blocks_policy != "focus_and_closest":
+                                self._info_blocks_prev_baseline = (
+                                    self.info_blocks_policy
+                                )
+                            self.info_blocks_policy = "focus_and_closest"
+                            self._apply_info_blocks_policy()
+                        if (
+                            prev_mode == "vertical_profile"
+                            and self.info_blocks_policy == "focus_and_closest"
+                            and self._info_blocks_prev_baseline
+                            and self._info_blocks_prev_baseline
+                            not in {"focus_and_closest"}
+                        ):
+                            # Restore prior baseline policy now that vertical
+                            # profile view is no longer active.
+                            self.info_blocks_policy = self._info_blocks_prev_baseline
+                            self._apply_info_blocks_policy()
+                    new_side = getattr(
+                        new, "primary_sidebar_side", self.primary_sidebar_side
+                    )
+                    if (
+                        isinstance(new_side, str)
+                        and new_side in _SIDEBAR_SIDES
+                        and new_side != self.primary_sidebar_side
+                    ):
+                        self.primary_sidebar_side = new_side
+                        if self._vertical_profile is not None:
+                            try:
+                                self._vertical_profile.set_side(new_side)
+                            except Exception:
+                                pass
+                    new_policy = getattr(
+                        new, "info_blocks_policy", self.info_blocks_policy
+                    )
+                    if (
+                        isinstance(new_policy, str)
+                        and new_policy in _INFO_BLOCK_POLICIES
+                        and new_policy != self.info_blocks_policy
+                    ):
+                        self.info_blocks_policy = new_policy
+                        self._apply_info_blocks_policy()
                 except Exception:
                     pass
                 # Apply backlight setting to display backend when present
@@ -837,75 +1393,460 @@ class UiController:
         except asyncio.CancelledError:
             pass
 
-    def _build_snapshots(self) -> list[TrackSnapshot]:
-        tracks = self._tracks.list_active()
-        band = self.altitude_filter
-        # Allow explicit min/max altitude override when present in settings
-        try:
-            custom_lo = getattr(self._settings, "altitude_min_ft", None)
-            custom_hi = getattr(self._settings, "altitude_max_ft", None)
-        except Exception:
-            custom_lo = custom_hi = None
-        if custom_lo is not None or custom_hi is not None:
-            lo, hi = custom_lo, custom_hi
+    def _update_sidebar(
+        self,
+        metrics: list[_TrackMetric],
+        *,
+        now_monotonic: float,
+        now_wall: float,
+    ) -> None:
+        if self.primary_sidebar_mode != "vertical_profile":
+            self._sidebar_state = None
+            self._sidebar_focus_icao = None
+            self._sidebar_closest_icao = None
+            self._sidebar_focus_pinned = False
+            self._refresh_info_block_targets()
+            return
+        if self._vertical_profile is None:
+            self._vertical_profile = VerticalProfilePanel(
+                self._settings, side=self.primary_sidebar_side
+            )
         else:
-            lo, hi = ALTITUDE_FILTER_BANDS.get(band, (None, None))
+            self._vertical_profile.refresh_settings(self._settings)
+            self._vertical_profile.set_side(self.primary_sidebar_side)
+        samples: list[VerticalProfileSample] = []
+        for metric in metrics:
+            track = metric.track
+            try:
+                last_ts = float(track.last_ts.timestamp())
+            except Exception:
+                try:
+                    last_ts = float(metric.last_point[0].timestamp())
+                except Exception:
+                    last_ts = now_wall
+            altitude = metric.altitude_ft
+            if altitude is None:
+                try:
+                    altitude = track.state.get("geo_alt")
+                except Exception:
+                    altitude = None
+                if altitude is None:
+                    try:
+                        altitude = track.state.get("baro_alt")
+                    except Exception:
+                        altitude = None
+                if not isinstance(altitude, (int, float)):
+                    altitude = None
+                elif not math.isfinite(float(altitude)):
+                    altitude = None
+                else:
+                    altitude = float(altitude)
+            dist = metric.distance_nm
+            if isinstance(dist, (int, float)) and not math.isfinite(dist):
+                dist_val: float | None = None
+            else:
+                dist_val = float(dist)
+            samples.append(
+                VerticalProfileSample(
+                    icao=track.icao24,
+                    callsign=getattr(track, "callsign", None),
+                    lat=metric.lat,
+                    lon=metric.lon,
+                    altitude_ft=altitude,
+                    last_ts=last_ts,
+                    distance_nm=dist_val,
+                    track=track,
+                )
+            )
+        state = self._vertical_profile.update(
+            samples,
+            center_lat=self._center_lat,
+            center_lon=self._center_lon,
+            now_monotonic=now_monotonic,
+            now_wall=now_wall,
+        )
+        self._sidebar_state = state
+        self._sidebar_focus_icao = state.focus.icao if state.focus else None
+        self._sidebar_focus_pinned = state.pinned
+        self._sidebar_closest_icao = state.closest.icao if state.closest else None
+        self._refresh_info_block_targets(
+            focus=self._sidebar_focus_icao, closest=self._sidebar_closest_icao
+        )
+
+    def _collect_track_metrics(self) -> tuple[list[_TrackMetric], list[Any]]:
+        try:
+            active = self._tracks.list_active()
+        except Exception:
+            return ([], [])
+        metrics: list[_TrackMetric] = []
+        for tr in active:
+            history = getattr(tr, "history", None)
+            if not history:
+                continue
+            try:
+                last = history[-1]
+                lat = float(last[1])
+                lon = float(last[2])
+            except Exception:
+                continue
+            altitude_ft = self._altitude_for_filter(tr, last)
+            distance_nm = self._distance_nm(lat, lon)
+            metrics.append(
+                _TrackMetric(
+                    track=tr,
+                    last_point=last,
+                    lat=lat,
+                    lon=lon,
+                    altitude_ft=altitude_ft,
+                    distance_nm=distance_nm,
+                )
+            )
+        return metrics, list(active)
+
+    def _has_full_datablock(self, metric: _TrackMetric) -> bool:
+        alt_val = metric.altitude_ft
+        if alt_val is None or not math.isfinite(float(alt_val)):
+            return False
+
+        try:
+            state = metric.track.state
+        except Exception:
+            return False
+
+        alt_state: float | None = None
+        try:
+            geo_alt = state.get("geo_alt")
+        except Exception:
+            geo_alt = None
+        if isinstance(geo_alt, (int, float)) and math.isfinite(float(geo_alt)):
+            alt_state = float(geo_alt)
+        else:
+            try:
+                baro_alt = state.get("baro_alt")
+            except Exception:
+                baro_alt = None
+            if isinstance(baro_alt, (int, float)) and math.isfinite(float(baro_alt)):
+                alt_state = float(baro_alt)
+        if alt_state is None:
+            return False
+
+        try:
+            heading = state.get("track_deg")
+        except Exception:
+            heading = None
+        if not isinstance(heading, (int, float)) or not math.isfinite(float(heading)):
+            return False
+
+        try:
+            speed = state.get("ground_speed")
+        except Exception:
+            speed = None
+        if not isinstance(speed, (int, float)) or not math.isfinite(float(speed)):
+            return False
+        if abs(float(speed)) < 0.1:
+            return False
+
+        return True
+
+    @staticmethod
+    def _altitude_for_filter(tr: Any, last_point: Any) -> float | None:
+        alt_for_filter: float | None = None
+        try:
+            geo_alt = tr.state.get("geo_alt")
+        except Exception:
+            geo_alt = None
+        try:
+            baro_alt = tr.state.get("baro_alt")
+        except Exception:
+            baro_alt = None
+        if isinstance(geo_alt, (int, float)):
+            alt_for_filter = float(geo_alt)
+        elif isinstance(baro_alt, (int, float)):
+            alt_for_filter = float(baro_alt)
+        else:
+            try:
+                if isinstance(last_point[3], (int, float)):
+                    alt_for_filter = float(last_point[3])
+            except Exception:
+                pass
+        return alt_for_filter
+
+    def _distance_nm(self, lat: float, lon: float) -> float:
+        try:
+            tx, ty, tz = geodetic_to_ecef(lat, lon, 0.0)
+            e, n, _ = ecef_to_enu(tx, ty, tz, self._center_lat, self._center_lon, 0.0)
+            return math.hypot(e, n) / 1852.0
+        except Exception:
+            return math.inf
+
+    def _autoscale_alt_threshold(
+        self, metrics: list[_TrackMetric], range_limit: float, target: int
+    ) -> float | None:
+        alts = sorted(
+            float(m.altitude_ft)
+            for m in metrics
+            if m.altitude_ft is not None
+            and math.isfinite(m.distance_nm)
+            and m.distance_nm <= range_limit + 1e-6
+        )
+        if not alts:
+            return None
+        idx = min(len(alts), max(1, target)) - 1
+        threshold = alts[idx] + 0.999
+        return threshold
+
+    def _apply_autoscale(self, metrics: list[_TrackMetric]) -> None:
+        self._autoscale_range_nm = None
+        if not getattr(self, "autoscale_enabled", False):
+            self._autoscale_alt_override = None
+            return
+
+        user_lo, user_hi = self._user_alt_filter_bounds()
+
+        def _eligible_for_autoscale(
+            m: _TrackMetric, *, ignore_hi: bool = False
+        ) -> bool:
+            if not math.isfinite(m.distance_nm):
+                return False
+            # Previously autoscale only considered tracks with a "full"
+            # datablock (heading + speed + altitude). The requirement has
+            # been relaxed so that any track with a valid altitude and
+            # distance is considered for autoscale decisions. This allows
+            # earlier scaling reactions even when some metadata has not
+            # yet been decoded.
+            alt = m.altitude_ft
+            if alt is None:
+                return False
+            if user_lo is not None and alt < user_lo:
+                return False
+            if not ignore_hi and user_hi is not None and alt >= user_hi:
+                return False
+            return True
+
+        cfg_min = float(self._cfg.min_range_nm)
+        cfg_max = float(self._cfg.max_range_nm)
+        try:
+            user_range = float(self._settings.range_nm)
+        except Exception:
+            user_range = float(self._cfg.range_nm)
+
+        target = max(1, int(getattr(self, "autoscale_target_visible", 12)))
+
+        autoscale_min_range = getattr(self._settings, "autoscale_min_range_nm", None)
+        autoscale_max_range = getattr(self._settings, "autoscale_max_range_nm", None)
+        try:
+            if autoscale_min_range is not None:
+                autoscale_min_range = float(autoscale_min_range)
+        except Exception:
+            autoscale_min_range = None
+        try:
+            if autoscale_max_range is not None:
+                autoscale_max_range = float(autoscale_max_range)
+        except Exception:
+            autoscale_max_range = None
+
+        eligible_metrics = [m for m in metrics if _eligible_for_autoscale(m)]
+        extended_metrics = [
+            m for m in metrics if _eligible_for_autoscale(m, ignore_hi=True)
+        ]
+
+        if not eligible_metrics:
+            # No eligible aircraft -> reset overrides and clamp range inside bounds
+            clamped = max(cfg_min, min(user_range, cfg_max))
+            self._autoscale_alt_override = None
+            self._cfg.range_nm = clamped
+            self._autoscale_range_nm = clamped
+            return
+
+        distances = sorted(m.distance_nm for m in eligible_metrics)
+        max_distance = distances[-1] if distances else 0.0
+        extended_distances = sorted(m.distance_nm for m in extended_metrics)
+        max_distance_extended = extended_distances[-1] if extended_distances else 0.0
+
+        def count_for_range(r: float) -> int:
+            if not distances:
+                return 0
+            return bisect_right(distances, r + 1e-9)
+
+        step_nm = 5.0
+
+        def _ceil_to_step(val: float) -> float:
+            if step_nm <= 0:
+                return val
+            try:
+                if val <= 0:
+                    return 0.0
+                return math.ceil((val - 1e-6) / step_nm) * step_nm
+            except Exception:
+                return val
+
+        limit_upper = cfg_max
+        if autoscale_max_range is not None:
+            limit_upper = min(limit_upper, autoscale_max_range)
+        if limit_upper < cfg_min:
+            limit_upper = cfg_min
+
+        if user_range < 50.0:
+            # Treat user range as minimum (lower bound)
+            lower_bound = max(cfg_min, user_range)
+            if autoscale_min_range is not None:
+                lower_bound = max(lower_bound, autoscale_min_range)
+            max_distance_total = max(max_distance, max_distance_extended)
+            raw_upper = max(lower_bound, max_distance_total)
+            upper_bound = min(cfg_max, _ceil_to_step(raw_upper))
+            if autoscale_max_range is not None:
+                upper_bound = min(upper_bound, autoscale_max_range)
+        else:
+            # Treat user range as maximum (upper bound)
+            lower_bound = cfg_min
+            if autoscale_min_range is not None:
+                lower_bound = max(lower_bound, autoscale_min_range)
+            upper_bound_candidate = max(max_distance, max_distance_extended, user_range)
+            upper_bound = min(
+                cfg_max, _ceil_to_step(max(lower_bound, upper_bound_candidate))
+            )
+            if autoscale_max_range is not None:
+                upper_bound = min(upper_bound, autoscale_max_range)
+            limit_upper = min(limit_upper, user_range)
+
+        if max_distance_extended > max_distance and limit_upper >= lower_bound:
+            upper_bound = limit_upper
+        else:
+            upper_bound = min(upper_bound, limit_upper)
+
+        if lower_bound > upper_bound:
+            lower_bound, upper_bound = upper_bound, lower_bound
+
+        current_range = max(lower_bound, min(self._cfg.range_nm, upper_bound))
+        base_range = max(lower_bound, min(user_range, upper_bound))
+
+        ladder_vals: set[float] = {lower_bound, upper_bound, base_range, current_range}
+        try:
+            start = math.ceil((lower_bound + 1e-6) / step_nm) * step_nm
+        except Exception:
+            start = lower_bound
+        val = start
+        while val <= upper_bound + 1e-6:
+            ladder_vals.add(round(val, 6))
+            val += step_nm
+
+        candidates = sorted(ladder_vals)
+        counts: dict[float, int] = {r: count_for_range(r) for r in candidates}
+        base_count = counts.get(base_range, count_for_range(base_range))
+
+        self._autoscale_alt_override = None
+        selected_range = current_range
+
+        if user_range < 50.0:
+            # Lower-bound mode: zoom out to reach target, altitude filter only at base
+            if base_count > target:
+                selected_range = base_range
+                threshold = self._autoscale_alt_threshold(
+                    eligible_metrics, base_range, target
+                )
+                if threshold is not None:
+                    self._autoscale_alt_override = (None, threshold)
+            else:
+                chosen: float | None = None
+                for candidate in candidates:
+                    if candidate < base_range:
+                        continue
+                    if counts[candidate] >= target:
+                        chosen = candidate
+                        break
+                if chosen is None:
+                    selected_range = upper_bound
+                else:
+                    selected_range = chosen
+        else:
+            # Upper-bound mode: treat user range as cap; zoom in to shed traffic first
+            if base_count <= target:
+                selected_range = base_range
+            else:
+                chosen = None
+                for candidate in reversed(candidates):
+                    if candidate > base_range:
+                        continue
+                    if counts[candidate] <= target:
+                        chosen = candidate
+                        break
+                if chosen is None:
+                    selected_range = lower_bound
+                else:
+                    selected_range = max(lower_bound, chosen)
+                final_count = counts.get(
+                    selected_range, count_for_range(selected_range)
+                )
+                if final_count > target:
+                    threshold = self._autoscale_alt_threshold(
+                        eligible_metrics, selected_range, target
+                    )
+                    if threshold is not None:
+                        self._autoscale_alt_override = (None, threshold)
+
+        selected_range = max(lower_bound, min(selected_range, upper_bound))
+
+        if (
+            user_hi is not None
+            and selected_range >= limit_upper - 1e-6
+            and self._autoscale_alt_override is None
+        ):
+            base_upper_count = count_for_range(limit_upper)
+            if extended_distances:
+                extended_count = bisect_right(extended_distances, limit_upper + 1e-6)
+                if extended_count > base_upper_count and base_upper_count < target:
+                    self._autoscale_alt_override = (None, math.inf)
+
+        self._autoscale_range_nm = selected_range
+        self._cfg.range_nm = selected_range
+
+    def _build_snapshots(
+        self, metrics: list[_TrackMetric] | None = None
+    ) -> list[TrackSnapshot]:
+        if metrics is None:
+            metrics, _ = self._collect_track_metrics()
+        lo, hi = self.alt_filter
         out: list[TrackSnapshot] = []
+        visible_count = 0
+        range_limit = float(self._cfg.range_nm)
         # Precompute center ECEF once per frame (avoid repetition inside loop)
         _ox, _oy, _oz = geodetic_to_ecef(self._center_lat, self._center_lon, 0.0)
-        for tr in tracks:
-            if not tr.history:
+        for metric in metrics:
+            tr = metric.track
+            last = metric.last_point
+            lat = metric.lat
+            lon = metric.lon
+            alt_for_filter = metric.altitude_ft
+            if alt_for_filter is None and (lo is not None or hi is not None):
                 continue
-            last = tr.history[-1]
-            lat, lon = float(last[1]), float(last[2])
-            # Determine altitude used for filtering. Preference order:
-            # geo_alt, then baro_alt, then last trail altitude sample.
-            alt_for_filter: float | None = None
-            _ga = tr.state.get("geo_alt")
-            _ba = tr.state.get("baro_alt")
-            if isinstance(_ga, (int, float)):
-                alt_for_filter = float(_ga)
-            elif isinstance(_ba, (int, float)):
-                alt_for_filter = float(_ba)
-            else:
-                try:
-                    if isinstance(last[3], (int, float)):
-                        alt_for_filter = float(last[3])
-                except Exception:
-                    pass
-            if (custom_lo is not None or custom_hi is not None) or band != "All":
-                if alt_for_filter is None:
-                    # Exclude tracks lacking altitude when filtering active
-                    continue
-                if lo is not None and alt_for_filter < lo:
-                    continue
-                if hi is not None and alt_for_filter >= hi:
-                    continue
-            # Course
+            if lo is not None and alt_for_filter is not None and alt_for_filter < lo:
+                continue
+            if hi is not None and alt_for_filter is not None and alt_for_filter >= hi:
+                continue
+            if (
+                self._has_full_datablock(metric)
+                and math.isfinite(metric.distance_nm)
+                and metric.distance_nm <= range_limit + 1e-6
+            ):
+                visible_count += 1
             course = None
-            v = tr.state.get("track_deg")
+            try:
+                v = tr.state.get("track_deg")
+            except Exception:
+                v = None
             if isinstance(v, (int, float)):
                 course = float(v)
-            # Dynamic trail window & thinning ---------------------------------
-            # We render up to *track_length_s* seconds of trail, selecting
-            # points by timestamp (not just count) so custom long lengths
-            # (e.g. 600s) display correctly. When the resulting window has
-            # more than MAX_POINTS we thin the *older* portion while keeping
-            # a dense recent tail for visual fidelity of current motion.
             try:
                 window_s = float(getattr(self, "track_length_s", 60.0))
             except Exception:
                 window_s = 60.0
-            # Compute cutoff timestamp
             try:
                 end_ts = last[0].timestamp()
             except Exception:
-                # Fallback: skip dynamic behaviour if timestamp missing
                 end_ts = None
             hist = tr.history
             if end_ts is not None:
                 cutoff = end_ts - window_s
-                # Find first index >= cutoff (linear scan; history lengths are modest)
                 start_idx = 0
                 for i, pt in enumerate(hist):
                     try:
@@ -916,13 +1857,15 @@ class UiController:
                         continue
                 window_pts = hist[start_idx:]
             else:
-                window_pts = hist[-int(window_s) :]
+                try:
+                    window_pts = hist[-int(window_s) :]
+                except Exception:
+                    window_pts = hist
 
-            MAX_POINTS = 600  # hard cap for rendering performance
-            RECENT_DENSE = 300  # keep this many newest points unthinned when thinning
+            MAX_POINTS = 600
+            RECENT_DENSE = 300
             pts_sel = window_pts
             if len(pts_sel) > MAX_POINTS:
-                # Keep last RECENT_DENSE verbatim; thin older portion uniformly.
                 dense = pts_sel[-RECENT_DENSE:]
                 older = pts_sel[:-RECENT_DENSE]
                 if older:
@@ -931,15 +1874,13 @@ class UiController:
                         target_old = 1
                     step = max(1, int(len(older) / target_old))
                     thinned_old = older[::step]
-                    # Ensure we don't exceed MAX_POINTS (trim oldest if necessary)
                     combined = thinned_old + dense
                     if len(combined) > MAX_POINTS:
                         combined = combined[-MAX_POINTS:]
                     pts_sel = combined
                 else:
-                    pts_sel = dense  # degenerate case
+                    pts_sel = dense
 
-            # Convert selected points to ENU
             trail_enu: list[tuple[float, float]] = []
             for _, la, lon_pt, _alt in pts_sel:
                 try:
@@ -950,11 +1891,38 @@ class UiController:
                     trail_enu.append((e, n))
                 except Exception:
                     continue
-            # Optional kinematics
-            geo_alt = tr.state.get("geo_alt")
-            baro_alt = tr.state.get("baro_alt")
-            gs = tr.state.get("ground_speed")
-            vr = tr.state.get("vertical_rate")
+            try:
+                geo_alt = tr.state.get("geo_alt")
+            except Exception:
+                geo_alt = None
+            try:
+                baro_alt = tr.state.get("baro_alt")
+            except Exception:
+                baro_alt = None
+            try:
+                gs = tr.state.get("ground_speed")
+            except Exception:
+                gs = None
+            try:
+                vr = tr.state.get("vertical_rate")
+            except Exception:
+                vr = None
+            icao = getattr(tr, "icao24", None)
+            # Focus semantics: both the actively selected (sidebar focus)
+            # and the nearest (closest) vertical profile aircraft are
+            # considered "Focus" for rendering (info block & styling).
+            is_focus = bool(
+                icao
+                and (
+                    (icao == self._sidebar_focus_icao)
+                    or (icao == self._sidebar_closest_icao)
+                )
+            )
+            info_visible = (
+                True
+                if self._info_block_targets is None
+                else bool(icao and icao in self._info_block_targets)
+            )
             out.append(
                 TrackSnapshot(
                     icao=tr.icao24,
@@ -973,8 +1941,13 @@ class UiController:
                     vertical_rate_fpm=(
                         float(vr) if isinstance(vr, (int, float)) else None
                     ),
+                    focused=is_focus,
+                    pinned=is_focus and self._sidebar_focus_pinned,
+                    info_block_visible=info_visible,
                 )
             )
+        self._total_aircraft_count = len(metrics)
+        self._visible_aircraft_count = visible_count
         return out
 
     def _update_fps(self, t0: float) -> tuple[float, float]:

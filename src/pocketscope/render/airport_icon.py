@@ -10,6 +10,10 @@ from __future__ import annotations
 import math
 from typing import Any, Dict, List, Tuple
 
+# The renderer now respects the active theme's 'airport.marker' color so that
+# runway depictions visually integrate with configured airport styling.
+from pocketscope.theme import ThemeManager  # lazy internal load ok
+
 
 class AirportIconRenderer:
     def __init__(self, canvas: Any):
@@ -83,12 +87,27 @@ class AirportIconRenderer:
             except Exception:
                 pass
             # Optionally suppress short runways
+            base_col = ThemeManager.color("airport.marker")
+            # Unpack components explicitly (mypy: ColorTuple -> ints)
+            cr, cg, cb, ca = (
+                int(base_col[0]),
+                int(base_col[1]),
+                int(base_col[2]),
+                int(base_col[3]),
+            )
             if emphasize_major and frac < 0.4:
-                # draw faint thin marker or skip
-                col = (140, 140, 140, 160)
+                # Minor/short runway: same hue but reduced alpha for subtlety;
+                # always reduce
+                reduced_alpha = int(round((ca if ca > 0 else 255) * 0.55))
+                if reduced_alpha >= ca:
+                    reduced_alpha = (
+                        max(0, min(254, ca - 80)) if ca >= 120 else max(30, ca // 2)
+                    )
+                col = (cr, cg, cb, reduced_alpha)
                 w = max(1, int(line_px - 1))
             else:
-                col = (220, 220, 220, 255)
+                # Major/primary runway: full themed color (force full alpha for clarity)
+                col = (cr, cg, cb, 255)
                 w = line_px if lm >= longest else max(1, int(line_px))
 
             angle_rad = math.radians(90.0 - bearing)
@@ -102,8 +121,5 @@ class AirportIconRenderer:
             except Exception:
                 pass
 
-        # Draw small central dot as reference
-        try:
-            self.canvas.filled_circle((cx, cy), 3, color=(180, 180, 180, 255))
-        except Exception:
-            pass
+        # Removed central dot when runway icons are drawn (requirement).
+        # Intentionally left blank.

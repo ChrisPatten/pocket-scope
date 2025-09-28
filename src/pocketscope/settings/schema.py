@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import Any
+
 from pydantic import BaseModel, Field, field_validator, model_validator
 
 from .values import (
@@ -11,6 +13,93 @@ from .values import (
     TRACK_SERVICE_DEFAULTS,
     UNITS_ORDER,
 )
+
+_SIDEBAR_MODES = {"vertical_profile", "hotkey_bar", "none"}
+_SIDEBAR_SIDES = {"left", "right"}
+_INFO_BLOCK_POLICIES = {"focus_and_closest", "all", "none"}
+
+
+class _VsHysteresis(BaseModel):
+    enter: int = Field(default=220)
+    exit: int = Field(default=180)
+
+    @model_validator(mode="after")
+    def _check_bounds(self) -> "_VsHysteresis":
+        ent = int(self.enter)
+        ext = int(self.exit)
+        if ent <= 0 or ext < 0:
+            raise ValueError("vertical profile hysteresis must be positive")
+        if ent <= ext:
+            raise ValueError("vertical profile hysteresis enter must exceed exit")
+        self.enter = ent
+        self.exit = ext
+        return self
+
+
+class VerticalProfileSettings(BaseModel):
+    @model_validator(mode="before")
+    @classmethod
+    def _chk_unknown(cls, data: Any) -> Any:  # pragma: no cover - trivial
+        """Reject unknown keys for vertical_profile block to surface typos."""
+        if isinstance(data, dict):
+            allowed = set(cls.model_fields.keys())
+            unknown = set(data.keys()) - allowed
+            if unknown:
+                raise ValueError(
+                    "Unknown vertical_profile setting(s): " + ", ".join(sorted(unknown))
+                )
+        return data
+
+    cycle_interval_sec: int = Field(default=60)
+    vs_threshold_fpm: int = Field(default=200)
+    vs_hysteresis: _VsHysteresis = Field(default_factory=_VsHysteresis)
+    auto_resume_after_manual_ms: int = Field(default=30000)
+    show_time_to_crossing: bool = Field(default=True)
+    height_fraction: float = Field(default=0.35)
+
+    @field_validator("cycle_interval_sec")
+    @classmethod
+    def _chk_cycle_interval(cls, v: int) -> int:  # pragma: no cover - trivial
+        try:
+            val = int(v)
+        except Exception:
+            raise ValueError("cycle_interval_sec must be an integer") from None
+        if val < 30 or val > 120:
+            raise ValueError("cycle_interval_sec must be between 30 and 120")
+        return val
+
+    @field_validator("vs_threshold_fpm")
+    @classmethod
+    def _chk_vs_threshold(cls, v: int) -> int:  # pragma: no cover - trivial
+        try:
+            val = int(v)
+        except Exception:
+            raise ValueError("vs_threshold_fpm must be an integer") from None
+        if val <= 0:
+            raise ValueError("vs_threshold_fpm must be > 0")
+        return val
+
+    @field_validator("auto_resume_after_manual_ms")
+    @classmethod
+    def _chk_auto_resume(cls, v: int) -> int:  # pragma: no cover - trivial
+        try:
+            val = int(v)
+        except Exception:
+            raise ValueError("auto_resume_after_manual_ms must be an integer") from None
+        if val < 0:
+            raise ValueError("auto_resume_after_manual_ms must be >= 0")
+        return val
+
+    @field_validator("height_fraction")
+    @classmethod
+    def _chk_height_fraction(cls, v: float) -> float:  # pragma: no cover - trivial
+        try:
+            val = float(v)
+        except Exception:
+            raise ValueError("height_fraction must be numeric") from None
+        if not 0.1 <= val <= 0.6:
+            raise ValueError("height_fraction must be between 0.1 and 0.6")
+        return val
 
 
 class Settings(BaseModel):
@@ -29,6 +118,10 @@ class Settings(BaseModel):
 
     units: str = Field(default=UNITS_ORDER[0])
     range_nm: float = Field(default=10.0)
+    autoscale_enabled: bool = Field(default=False)
+    autoscale_target_visible: int = Field(default=12)
+    autoscale_min_range_nm: float | None = Field(default=None)
+    autoscale_max_range_nm: float | None = Field(default=None)
     track_length_s: float = Field(
         default=(
             TRACK_LENGTH_PRESETS_S[1]
@@ -89,6 +182,39 @@ class Settings(BaseModel):
     track_expiry_s: float = Field(
         default=float(TRACK_SERVICE_DEFAULTS.get("expiry_s", 300.0))
     )
+    # Additional airport identifiers to display beyond 3-letter alpha codes.
+    # This allows display of airports with numeric or longer identifiers.
+    extra_airports: list[str] = Field(default_factory=list)
+    # Primary sidebar UI mode (vertical profile, hotkey bar, none)
+    primary_sidebar_mode: str = Field(default="vertical_profile")
+    primary_sidebar_side: str = Field(default="right")
+    info_blocks_policy: str = Field(default="focus_and_closest")
+    vertical_profile: VerticalProfileSettings = Field(
+        default_factory=VerticalProfileSettings
+    )
+    # Theme selection + per-key overrides (hex strings). Theme palette
+    # lookups are handled by ui.theme.ThemeManager. Backward compatible:
+    # missing fields fall back to atc_classic with no overrides.
+    theme: str = Field(default="atc_classic")
+    themeOverrides: dict[str, str] = Field(default_factory=dict)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _chk_unknown(cls, data: Any) -> Any:  # pragma: no cover - trivial
+        """Reject unknown root-level keys except allowed legacy extras.
+
+        We allow the legacy ``track_length_mode`` so that older persisted
+        settings files still migrate cleanly; all other unexpected keys
+        surface as validation errors so the user can correct typos.
+        """
+        if isinstance(data, dict):
+            allowed = set(cls.model_fields.keys()) | {"track_length_mode"}
+            unknown = set(data.keys()) - allowed
+            if unknown:
+                raise ValueError(
+                    "Unknown settings field(s): " + ", ".join(sorted(unknown))
+                )
+        return data
 
     @field_validator("units")
     @classmethod
@@ -108,6 +234,22 @@ class Settings(BaseModel):
             raise ValueError("track_length_s must be > 0")
         return v
 
+    @field_validator("extra_airports")
+    @classmethod
+    def _chk_extra_airports(
+        cls, v: list[str]
+    ) -> list[str]:  # pragma: no cover - trivial
+        if not isinstance(v, list):
+            raise ValueError("extra_airports must be a list")
+        result = []
+        for item in v:
+            if isinstance(item, str):
+                # Normalize to uppercase and strip whitespace
+                normalized = str(item).strip().upper()
+                if normalized:
+                    result.append(normalized)
+        return result
+
     @field_validator("track_expiry_s")
     @classmethod
     def _chk_te(cls, v: float) -> float:  # pragma: no cover - trivial
@@ -118,6 +260,30 @@ class Settings(BaseModel):
         if v <= 0:
             raise ValueError("track_expiry_s must be > 0 (seconds)")
         return v
+
+    @field_validator("autoscale_target_visible")
+    @classmethod
+    def _chk_autoscale_target(cls, v: int) -> int:  # pragma: no cover - trivial
+        try:
+            v = int(v)
+        except Exception:
+            raise ValueError("autoscale_target_visible must be an integer") from None
+        if v <= 0:
+            raise ValueError("autoscale_target_visible must be >= 1")
+        return v
+
+    @field_validator("autoscale_min_range_nm", "autoscale_max_range_nm")
+    @classmethod
+    def _chk_autoscale_range(cls, v: float | None) -> float | None:
+        if v is None:
+            return None
+        try:
+            fv = float(v)
+        except Exception:
+            raise ValueError("autoscale range limits must be numeric or null") from None
+        if fv <= 0:
+            raise ValueError("autoscale range limits must be > 0")
+        return fv
 
     @field_validator("altitude_filter")
     @classmethod
@@ -156,6 +322,36 @@ class Settings(BaseModel):
             raise ValueError("backlight_pct must be between 0 and 100")
         return v
 
+    @field_validator("primary_sidebar_mode")
+    @classmethod
+    def _chk_sidebar_mode(cls, v: str) -> str:  # pragma: no cover - trivial
+        if v not in _SIDEBAR_MODES:
+            raise ValueError(
+                "invalid primary_sidebar_mode: must be one of "
+                + ", ".join(sorted(_SIDEBAR_MODES))
+            )
+        return v
+
+    @field_validator("primary_sidebar_side")
+    @classmethod
+    def _chk_sidebar_side(cls, v: str) -> str:  # pragma: no cover - trivial
+        if v not in _SIDEBAR_SIDES:
+            raise ValueError(
+                "invalid primary_sidebar_side: must be one of "
+                + ", ".join(sorted(_SIDEBAR_SIDES))
+            )
+        return v
+
+    @field_validator("info_blocks_policy")
+    @classmethod
+    def _chk_info_blocks_policy(cls, v: str) -> str:  # pragma: no cover - trivial
+        if v not in _INFO_BLOCK_POLICIES:
+            raise ValueError(
+                "invalid info_blocks_policy: must be one of "
+                + ", ".join(sorted(_INFO_BLOCK_POLICIES))
+            )
+        return v
+
     @model_validator(mode="after")
     def _chk_alt_range(self) -> "Settings":  # pragma: no cover - trivial
         if (
@@ -165,6 +361,14 @@ class Settings(BaseModel):
         ):
             raise ValueError(
                 "altitude_min_ft must be < altitude_max_ft when both are set"
+            )
+        if (
+            self.autoscale_min_range_nm is not None
+            and self.autoscale_max_range_nm is not None
+            and self.autoscale_min_range_nm > self.autoscale_max_range_nm
+        ):
+            raise ValueError(
+                "autoscale_min_range_nm must be <= autoscale_max_range_nm when both are set"  # noqa:E501
             )
         # Migration: if legacy track_length_mode present in input data, map to numeric
         # value using old canonical mapping (short=15, medium=45, long=120) unless

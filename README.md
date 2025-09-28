@@ -17,8 +17,24 @@ PocketScope is a handheld Pi-powered ATC-style scope for decoding and displaying
 - **Event-Driven System**: Async EventBus with bounded queues and backpressure handling
 - **Time Abstraction**: Deterministic testing support with SimTimeSource and RealTimeSource
 - **Modular Design**: Clean separation between ingestion, processing, and visualization
-- **Rendering/UI**: Canvas API + multiple backends (Pygame, SPI TFT ILI9341, Web) with ATC-style data blocks, sector + airports overlays, deterministic golden-frame tests
-- **Persistent UI Settings**: Debounced JSON settings (units, default range, track length preset, demo mode, altitude filter incl. custom bounds, north-up lock) with soft key bar + settings screen
+- **Rendering/UI**: Canvas API + multiple backends (Pygame, SPI TFT ILI9341, Web) with ATC-style data blocks, themed overlays (airports, sectors, state borders), deterministic golden-frame tests
+- **Persistent UI Settings**: Debounced JSON settings (units, default range, track length preset, demo mode, altitude filter incl. custom bounds, north-up lock, autoscale target, vertical profile config, theme + per‑key overrides) with soft key bar + settings screen
+- **Screenshot & Automation Hooks**: Built‑in screenshot API (soft key, F12, SIGUSR1, or command file trigger) writing PNGs to `~/.pocketscope/screenshots`
+- **Live Theme Reload**: Editing `~/.pocketscope/settings.json` (theme / themeOverrides) hot‑reloads palette without restart
+
+Note on softkeys
+-----------------
+
+In the current development branch the SoftKeyBar is intentionally disabled by default at runtime (the code remains present). To provide the bar to the controller call `set_softkeys(bar)` as before and then call `enable_softkeys()` on the `UiController` instance to attach it at runtime. This makes it easy to temporarily disable softkeys for profiling or simplified UI runs without removing the code.
+
+Example:
+
+```python
+# create and configure SoftKeyBar as usual
+ui.set_softkeys(bar)
+# attach it so it draws and receives input
+ui.enable_softkeys()
+```
 
 ### Data Sources
 - **ADS-B**: File-based playback with deterministic timing and live polling of dump1090 `aircraft.json`
@@ -30,54 +46,88 @@ PocketScope is a handheld Pi-powered ATC-style scope for decoding and displaying
 
 ### Infrastructure
 - **Record/Replay System**: JSONL-based event recording and deterministic replay
-- **Platform Abstraction**: Display, input, and I/O abstraction layers (now includes SPI TFT + touch & WebSocket/web page backends)
+- **Platform Abstraction**: Display, input, and I/O abstraction layers (SPI TFT + touch, Pygame, WebSocket/web page backends)
 - **Layered Rendering**: Composable visualization pipeline built on a minimal Canvas API
 - **Comprehensive Testing**: Full test suite (core, UI, rendering, platform drivers)
+- **Runtime Config Reload**: `ConfigWatcher` propagates settings + theme changes (range, filters, palette) live
 
 ### Navigation & Geodesy
 - **WGS‑84 Helpers**: Great‑circle distance (NM), initial bearing, destination point
 - **Frames**: Geodetic⇄ECEF conversion and ECEF→ENU local tangent plane
 - **Mapping**: ENU→screen north‑up mapping and range/bearing convenience APIs
 
-# PocketScope
+Mapping and spatial utilities
+-----------------------------
 
-<!-- Badges -->
-[![Version](https://img.shields.io/github/v/tag/ChrisPatten/pocket-scope?label=version)](https://github.com/ChrisPatten/pocket-scope/tags)
-[![Release](https://img.shields.io/github/v/release/ChrisPatten/pocket-scope)](https://github.com/ChrisPatten/pocket-scope/releases)
-<!-- Uncomment once published to PyPI: -->
-<!-- [![PyPI](https://img.shields.io/pypi/v/pocketscope)](https://pypi.org/project/pocketscope/) -->
+PocketScope includes a small spatial utility module for common mapping tasks
+and lightweight GeoJSON <-> WKB conversion helpers used by the bundled
+GeoJSON ingestion tool. See docs/spatial.md for details on:
 
-**Current Version:** 0.1.1 *(pi-display branch adds embedded SPI TFT + touch + web UI backends)*
+- computing haversine distances and approximate bounding boxes
+- converting GeoJSON geometries to a minimal WKB bytes format stored in
+    the SQLite map DB
+- reading WKB back to GeoJSON-like dicts and deriving polygon centroids
+- registering a HAV_MILES SQL function on a sqlite3.Connection for fast
+    distance queries inside SQL
 
-PocketScope is a handheld Pi-powered ATC-style scope for decoding and displaying ADS-B traffic. Built with Python, it features a modular, event-driven architecture designed for real-time sensor data processing, deterministic testing, and rapid prototyping.
+There is also a command-line ingestion helper that converts GeoJSON feature
+collections (airports, runways, states) into a spatially indexed SQLite DB
+ready for fast map lookups. Example:
 
-## Features
+```bash
+python -m pocketscope.data.ingest_geojson_to_sqlite \
+    --airports data/airports.geojson \
+    --runways data/runways.geojson \
+    --states data/states.geojson \
+    --out ./build/map.db --replace
+```
 
-### Core Architecture
-- **Event-Driven System**: Async EventBus with bounded queues and backpressure handling
-- **Time Abstraction**: Deterministic testing support with SimTimeSource and RealTimeSource
-- **Modular Design**: Clean separation between ingestion, processing, and visualization
-- **Rendering/UI**: Canvas API + multiple backends (Pygame, SPI TFT ILI9341, Web) with ATC-style data blocks, sector + airports overlays, deterministic golden-frame tests
-- **Persistent UI Settings**: Debounced JSON settings (units, default range, track length preset, demo mode, altitude filter incl. custom bounds, north-up lock) with soft key bar + settings screen
+For full details on the spatial helpers and the ingestion tool, see
+`docs/spatial.md`.
 
-### Data Sources
-- **ADS-B**: File-based playback with deterministic timing and live polling of dump1090 `aircraft.json`
-- **Aircraft Tracking**: Real-time track maintenance with ring-buffer trails, state aggregation, and expiry management
-- **GPS**: Position and navigation data (NMEA serial)
-- **IMU**: Inertial measurement unit integration (9-axis sensors)
-- **Airports**: Static airport reference data from JSON files with identifier, lat/lon positioning
-- **Sector Data**: ARTCC sector polygon overlays (JSON/GeoJSON format)
+## Theming & Palette
 
-### Infrastructure
-- **Record/Replay System**: JSONL-based event recording and deterministic replay
-- **Platform Abstraction**: Display, input, and I/O abstraction layers (now includes SPI TFT + touch & WebSocket/web page backends)
-- **Layered Rendering**: Composable visualization pipeline built on a minimal Canvas API
-- **Comprehensive Testing**: Full test suite (core, UI, rendering, platform drivers)
+PocketScope ships with a unified theme system (`pocketscope.theme`) replacing ad‑hoc color constants.
 
-### Navigation & Geodesy
-- **WGS‑84 Helpers**: Great‑circle distance (NM), initial bearing, destination point
-- **Frames**: Geodetic⇄ECEF conversion and ECEF→ENU local tangent plane
-- **Mapping**: ENU→screen north‑up mapping and range/bearing convenience APIs
+Highlights:
+- Multiple built‑in themes: `atc_classic`, `monokai`, `light_chart`, `vfr_sectional`
+- Required palette keys enforced by tests (`tests/ui/test_theme.py`)
+- Per‑key overrides via `themeOverrides` in persisted settings (hex forms `#RGB`, `#RRGGBB`, `#RRGGBBAA`)
+- Live reload: modify `~/.pocketscope/settings.json` and colors update in the next frame (no restart)
+- 16‑bit RGB565 convenience (`ThemeManager.rgb565`) for TFT backends
+
+Quick start:
+```python
+from pocketscope.theme import ThemeManager
+ThemeManager.load({
+    "theme": "atc_classic",
+    "themeOverrides": {"range.ring": "#2C7A2C"}
+})
+ring_col = ThemeManager.color("range.ring")  # (r,g,b,a)
+```
+
+Full reference: see `docs/theming.md`.
+
+### Newly Themed Elements
+- Airports (marker + text) and runway icons
+- Sector lines + labels
+- State / regional boundaries (`map.border`)
+- Simple & data block label halos/text tiers
+- Vertical profile panel (background, borders, gradients, climb/descent colors)
+- Status overlay + soft key bar + status badges (live/delay/stale)
+- Track trail head color + smooth background fade
+
+## Screenshots & External Triggers
+
+Screenshots can be captured without stopping the app:
+- Soft key labeled `Shot`
+- Keyboard `F12` (desktop window)
+- `SIGUSR1` signal to the live viewer process (service-friendly)
+- Dropping a file named `screenshot` (any suffix) into `~/.pocketscope/commands/`
+
+All screenshots write timestamped PNGs to `~/.pocketscope/screenshots/` (auto‑created). The API is accessible via `UiController.screenshot(path=None)`; `UiController.request_screenshot()` defers capture to the next safe frame (used by signal/command triggers). See `docs/screenshots.md` for examples.
+
+<!-- (Removed duplicated introductory block to avoid redundancy) -->
 
 ## Architecture Overview
 
@@ -491,6 +541,7 @@ User-facing configuration is now persisted across runs:
 
 - `Settings` model (`settings/schema.py`) stored at `~/.pocketscope/settings.json` (override path with `POCKETSCOPE_HOME`).
 - Debounced atomic writes via `SettingsStore` to minimize unnecessary disk I/O while adjusting controls rapidly.
+- Strict validation: unknown or invalid fields in an existing `settings.json` now raise an error instead of silently reverting to defaults. This makes typos immediately visible. To recover, fix or delete the offending `settings.json` (a new one with defaults will be created on next run). A legacy `track_length_mode` key is still accepted and automatically migrated to `track_length_s`.
 - `ConfigWatcher` publishes `cfg.changed` when the file mtime changes allowing hot reload (e.g. manual edit in an editor) without restarting.
 - Soft key bar (`ui/softkeys.py`) renders large tap/click targets (Zoom-/+, Units, Tracks, Demo, Settings) with auto font scaling.
 - Settings screen overlay (`ui/settings_screen.py`) toggled by Settings soft key or `s` key; edits are staged and flushed explicitly via Save (Back dismisses without forcing immediate write).
@@ -921,31 +972,22 @@ Notes:
 - Requires a GUI-capable environment for normal operation; if the window doesn't appear, check `SDL_VIDEODRIVER` and system display settings.
 - For automated tests and CI, prefer `--headless` with a playback file to avoid requiring a display.
 
-### Airports Overlay
+### Airports & Runways Overlay
 
 - Layer: `src/pocketscope/render/airports_layer.py`
-- Data helper: `src/pocketscope/data/airports.py` provides:
-    - `load_airports_json(path) -> list[Airport]` to load `{identifier, lat, lon}` arrays
-    - `nearest_airports(lat, lon, airports, max_nm=50.0, k=3)` for simple nearest selection using haversine distance
-- Live viewer flags:
-        - `--airports PATH` to specify an airports file (defaults to `sample_data/airports.json` when present)
-- Rendering rules:
-    - 5x5 px square markers (dim gray), ident labels in white, clamped on-screen
-    - Range-based culling at current PPI range
+- Runway icon renderer: `render/airport_icon.py` (scaled, themed; minor runways alpha‑reduced)
+- Data helper: `src/pocketscope/data/airports.py` provides loading + nearest helpers
+- Live viewer flag: `--airports PATH` (auto-detects `sample_data/airports.json`)
+- Themed Colors: `airport.marker`, `airport.text` (see theming docs)
+- Range-based culling + collision‑aware label placement; simple labels avoid trail/text halos.
+    Runway icons scaled down (`max_px=24`, `scale≈0.35`) for less clutter.
 
-### Sector Polygons Overlay
+### Sector Polygons & State Boundaries
 
-- Layer: `src/pocketscope/render/sectors_layer.py`
-- Data helper: `src/pocketscope/data/sectors.py` provides:
-    - `load_sectors_json(path) -> list[Sector]` to load sector polygon data from JSON or GeoJSON
-    - Support for both simple JSON format (`{name, points: [{lat, lon}]}`) and GeoJSON FeatureCollection
-    - Automatic format detection and robust parsing with error handling
-- Live viewer flags:
-    - `--sectors PATH` to specify a sectors file (defaults to `sample_data/artcc.json` when present)
-- Rendering rules:
-    - Translucent polygon outlines with configurable color and transparency
-    - Uses ENU local tangent plane projection for accurate rendering
-    - Efficient clipping and range-based rendering optimization
+- Sector Layer: `render/sectors_layer.py` now theme-aware (`sector.line`, `sector.label`).
+- State / Regional boundaries: drawn from map provider (`map.border` color) above sectors but below airports; ingest via `--states` in SQLite builder or `--states` GeoJSON passed to ingestion tool.
+- Live viewer: use `--sectors PATH`; state borders included automatically when present in map DB / map data.
+- Efficient culling (2× range) and projection via ENU; duplicate closing vertex auto-handled.
 
 ### UI and Controls
 
@@ -954,6 +996,7 @@ Notes:
     - `[` or `-`: zoom out; `]` or `=`: zoom in; `o`: toggle overlay (airports/sectors)
     - `s`: toggle Settings screen; `u`: cycle units; `t`: cycle track length; `d`: toggle demo mode
     - Arrow Left / Right: rotate when north-up lock disabled; `q` / `ESC`: quit; mouse wheel: zoom in/out.
+    - `F12` or soft key `Shot`: capture screenshot (saved to `~/.pocketscope/screenshots/`).
     - Target FPS and range ladder are configurable via `UiConfig`.
 
 #### Settings Screen Fields
@@ -965,9 +1008,33 @@ Notes:
 | Track Length | Trail retention preset (15s / 45s / 120s; pinned = next tier) | Debounced save |
 | Altitude Filter | Visibility band (All, 0–5k, 5–10k, 10–20k, >20k) | Debounced save |
 | Demo Mode | Loop JSONL trace + DEMO badge + temporary recenter | Debounced save |
+| Theme (JSON only) | `theme` + `themeOverrides` (manual edit to settings file) | Hot reload |
 | North-up Lock | Enforce rotation 0°; unlock enables arrow rotation | Debounced save |
 
-Custom altitude filter bounds (user-defined min/max) are supported and tested (`tests/ui/test_altitude_filter_custom_bounds.py`).
+Additional autoscale controls live in `~/.pocketscope/settings.json` (not yet surfaced in the on-screen Settings UI):
+
+```jsonc
+{
+  "autoscale_enabled": true,
+  "autoscale_target_visible": 12
+}
+```
+
+- `autoscale_enabled`: when true, the controller starts from your saved zoom level and dynamically prefers zoom or altitude filters to keep roughly the target number of aircraft visible. It never writes the derived zoom/altitude back to disk.
+- `autoscale_target_visible`: desired count of aircraft on screen (default 12). Autoscale first tightens the max altitude band when you have more than the target at your chosen zoom. When fewer than the target are visible, it zooms out across the configured range ladder before falling back to altitude filtering.
+
+The status overlay now reports aircraft totals as `AC:<total>(<visible>)` so you can verify what autoscale is doing without leaving the main scope view.
+
+Custom altitude filter bounds (user-defined min/max) are supported and tested (`tests/ui/test_altitude_filter_custom_bounds.py`). Theme edits also hot reload; for example:
+
+```jsonc
+{
+    "theme": "monokai",
+    "themeOverrides": {"range.ring": "#4CAF50"}
+}
+```
+
+See `docs/theming.md` for all palette keys.
 
 ## File Formats
 
@@ -1060,8 +1127,9 @@ MIT License - see LICENSE file for details.
 - ✅ Rendering/UI foundation: Canvas API, Pygame + SPI TFT + Web display/input backends
 - ✅ PPI view with rings, ownship, trails, and labels
 - ✅ ATC-style data blocks with leader lines and collision avoidance
-- ✅ Airports overlay with range-based culling and auto-detection
-- ✅ Sector polygon overlays with JSON/GeoJSON support and transparency
+- ✅ Airports overlay with range-based culling, themed colors & runway icons
+- ✅ Sector polygon overlays (JSON/GeoJSON) + themed colors
+- ✅ State boundary overlays (map border theme color)
 - ✅ Interactive UI controls (zoom, overlay toggle, keyboard/mouse input)
  - ✅ Soft key bar with autoscaling labels
  - ✅ Persistent JSON settings (units, range, track length, demo mode, altitude filter, north-up lock)
@@ -1074,7 +1142,9 @@ MIT License - see LICENSE file for details.
 - ✅ Development tooling and quality checks
 - ✅ Live viewer (desktop/web/embedded) to visualize real traffic
 - ✅ Embedded hardware drivers (ILI9341 display + XPT2046 touch) with tests
-- ✅ Label layout prevents overlap with aircraft glyphs
+- ✅ Label layout prevents overlap with aircraft glyphs & themed halos
+- ✅ Theme system with live reload + multiple built-in themes
+- ✅ Screenshot API (soft key, F12, SIGUSR1, command file)
 - ✅ Runtime config module (`config.py`) merges persisted settings + CLI overrides
 
 **Next Steps**:

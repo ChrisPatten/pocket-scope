@@ -8,7 +8,18 @@ import os
 from pathlib import Path
 from typing import ClassVar
 
+from pydantic import ValidationError
+
 from .schema import Settings
+
+
+class SettingsLoadError(Exception):
+    """Raised when settings.json exists but cannot be parsed or validated.
+
+    This differentiates between a missing settings file (which is treated as
+    "use defaults") and a present-but-bad file, which should surface as an
+    actionable error to the caller / end user.
+    """
 
 
 class SettingsStore:
@@ -35,14 +46,36 @@ class SettingsStore:
 
     @classmethod
     def load(cls) -> Settings:
-        """Load settings from disk, returning defaults on error."""
+        """Load settings from disk.
+
+        Behavior:
+        - If the settings file does not yet exist, return a Settings instance
+          populated with defaults (this preserves first‑run UX).
+        - If the file exists but cannot be read, parsed as JSON, or validated
+          against the Settings schema, raise SettingsLoadError with context.
+        """
         path = cls.settings_path()
         cls.ensure_home()
-        try:
-            data = json.loads(path.read_text())
-            return Settings.model_validate(data)
-        except Exception:
+        if not path.exists():  # First run: no file yet -> defaults
             return Settings()
+        try:
+            raw = path.read_text()
+        except Exception as e:  # IO error
+            raise SettingsLoadError(f"Failed to read settings file: {path}: {e}") from e
+        try:
+            data = json.loads(raw)
+        except Exception as e:  # JSON parse error
+            raise SettingsLoadError(f"Invalid JSON in settings file {path}: {e}") from e
+        try:
+            return Settings.model_validate(data)
+        except ValidationError as e:  # Schema validation error
+            raise SettingsLoadError(
+                f"Settings validation failed for {path}: {e}"
+            ) from e
+        except Exception as e:  # Any other unexpected error
+            raise SettingsLoadError(
+                f"Unexpected error validating settings file {path}: {e}"
+            ) from e
 
     @classmethod
     def save(cls, settings: Settings) -> None:

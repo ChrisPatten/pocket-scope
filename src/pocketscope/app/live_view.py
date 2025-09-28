@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import signal
 from collections.abc import Iterable
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Awaitable, Protocol, Type, cast
@@ -17,11 +18,11 @@ from pocketscope.core.geo import ecef_to_enu, geodetic_to_ecef
 from pocketscope.core.models import AircraftTrack
 from pocketscope.core.time import RealTimeSource
 from pocketscope.core.tracks import TrackService
-from pocketscope.data.airports import load_airports_json
-from pocketscope.data.runways_store import RunwayPrefetcher, build_sqlite_from_geojson
+from pocketscope.data.cache import LRUCache
 from pocketscope.data.sectors import load_sectors_json
 from pocketscope.ingest.adsb.json_source import Dump1090JsonSource
 from pocketscope.ingest.adsb.playback_source import FilePlaybackSource
+from pocketscope.map.data_provider import MapDataProvider
 from pocketscope.platform.display.pygame_backend import PygameDisplayBackend
 from pocketscope.platform.display.web_backend import WebDisplayBackend
 from pocketscope.render.view_ppi import PpiView, TrackSnapshot
@@ -184,26 +185,17 @@ async def main_async(args: argparse.Namespace) -> None:
         label_line_gap_px=args.block_line_gap_px,
     )
 
-    airports = None
-    sectors = None
-    airports_path: str | None = None
-    if args.airports:
-        airports_path = args.airports
-    else:
-        # Try package assets/airports.json automatically (src/pocketscope/assets)
-        try_default1 = Path(__file__).resolve().parents[1] / "assets" / "airports.json"
-        try_default2 = Path.cwd() / "src" / "pocketscope" / "assets" / "airports.json"
-        if try_default1.exists():
-            airports_path = str(try_default1)
-        elif try_default2.exists():
-            airports_path = str(try_default2)
-
-    if airports_path:
+    map_provider: MapDataProvider | None = None
+    map_db_path = Path(args.map_db).expanduser()
+    if map_db_path.exists():
         try:
-            aps = load_airports_json(airports_path)
-            airports = [(ap.lat, ap.lon, ap.ident) for ap in aps]
+            map_provider = MapDataProvider(str(map_db_path), cache=LRUCache())
         except Exception as e:
-            print(f"[live_view] Failed to load airports: {e}")
+            print(f"[live_view] Failed to initialize map provider: {e}")
+    else:
+        print(f"[live_view] Map database not found: {map_db_path}")
+
+    sectors = None
 
     # Sectors: optional path, default to sample_data/artcc.json if present
     sectors_path: str | None = None
@@ -240,12 +232,9 @@ async def main_async(args: argparse.Namespace) -> None:
         cfg=UiConfig(range_nm=float(args.range), overlay=True, target_fps=30.0),
         center_lat=float(args.center[0]),
         center_lon=float(args.center[1]),
-        airports=airports,
         sectors=sectors,
         font_px=args.font_px,
-        # Pass runway config through controller for later use
-        runways_sqlite=getattr(args, "runways_sqlite", None),
-        runway_icons=bool(getattr(args, "runway_icons", False)),
+        map_provider=map_provider,
     )
     bar = SoftKeyBar(
         display.size(),
@@ -260,9 +249,27 @@ async def main_async(args: argparse.Namespace) -> None:
             "-": ui.zoom_out,
             "Settings": lambda: None,
             "+": ui.zoom_in,
+            # Screenshot softkey: only visible/useful on TFT but harmless elsewhere
+            # (layout engine will size accordingly). Writes timestamped file to
+            # ~/.pocketscope/screenshots and logs the destination.
+            "Shot": lambda: print(f"[live_view] screenshot -> {ui.screenshot()}"),
         },
     )
     ui.set_softkeys(bar)
+
+    # Install a SIGUSR1 handler to request screenshot when running as a service.
+    def _sigusr1_handler(
+        _sig: int, _frm: Any
+    ) -> None:  # pragma: no cover - signal path
+        try:
+            ui.request_screenshot()
+        except Exception:
+            pass
+
+    try:
+        signal.signal(getattr(signal, "SIGUSR1"), _sigusr1_handler)
+    except Exception:
+        pass
     watcher = ConfigWatcher(bus, poll_hz=2.0)
     asyncio.create_task(watcher.run())
 
@@ -285,11 +292,14 @@ async def main_async(args: argparse.Namespace) -> None:
 
                         def _dispatch_press(x: int, y: int) -> None:
                             consumed_local = False
-                            # Settings overlay takes precedence
+                            # Settings overlay (legacy) takes precedence if present.
+                            settings_screen = getattr(ui, "_settings_screen", None)
                             try:
-                                if ui._settings_screen.visible:
+                                if settings_screen is not None and getattr(
+                                    settings_screen, "visible", False
+                                ):
                                     try:
-                                        consumed_local = ui._settings_screen.on_mouse(
+                                        consumed_local = settings_screen.on_mouse(
                                             x, y, display.size(), ui
                                         )
                                     except Exception:
@@ -329,17 +339,6 @@ async def main_async(args: argparse.Namespace) -> None:
                 await asyncio.sleep(0.01)
 
         asyncio.create_task(_touch_forwarder())
-
-    # Build runways sqlite on-demand (first run) if geojson provided
-    runways_sqlite = getattr(args, "runways-sqlite", None)
-    runways_geojson = getattr(args, "runways-geojson", None)
-    try:
-        if runways_geojson and runways_sqlite:
-            # Build if necessary; function already checks meta
-            build_sqlite_from_geojson(runways_geojson, runways_sqlite)
-            RunwayPrefetcher(runways_sqlite)
-    except Exception as e:
-        print(f"[live_view] Failed to prepare runways DB: {e}")
 
     _print_help()
     # Start track maintenance (spawns internal tasks and returns immediately).
@@ -430,12 +429,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="Additional gap between data block lines in px (default: -5)",
     )
     p.add_argument(
-        "--airports",
+        "--map-db",
         type=str,
-        default=None,
-        help=(
-            "Path to airports.json; defaults to sample_data/airports.json if present"
-        ),
+        default=str(Path.home() / ".pocketscope" / "pocketscope.db"),
+        help="Path to PocketScope map SQLite database",
     )
     p.add_argument(
         "--sectors",
@@ -445,24 +442,6 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
             "Path to sectors file (simple JSON or GeoJSON FeatureCollection);"
             " defaults to assets/us_states.json if present"
         ),
-    )
-    p.add_argument(
-        "--runways-geojson",
-        type=str,
-        default=None,
-        help="Path to source runways GeoJSON to build sqlite from",
-    )
-    p.add_argument(
-        "--runways-sqlite",
-        type=str,
-        default=str(Path.home() / ".pocketscope" / "runways.sqlite"),
-        help="Path to runways sqlite cache (default: ~/.pocketscope/runways.sqlite)",
-    )
-    p.add_argument(
-        "--runway-icons",
-        dest="runway_icons",
-        action="store_true",
-        help="Enable runway-oriented airport icons",
     )
     p.add_argument(
         "--web-ui",

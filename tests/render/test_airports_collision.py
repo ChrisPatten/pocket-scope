@@ -4,8 +4,6 @@ Test script to verify airport label collision avoidance with range ring labels.
 """
 
 import unittest
-
-from pocketscope.data.airports import Airport
 from pocketscope.render.airports_layer import AirportsLayer
 
 
@@ -44,7 +42,7 @@ class TestCollisionAvoidance(unittest.TestCase):
     def test_collision_detection(self):
         """Test that airport labels avoid range ring exclusion zones."""
         # Create a mock airport at the center
-        airports = [Airport(ident="TEST", lat=42.0, lon=-71.0)]
+        airports = [{"ident": "TEST", "lat": 42.0, "lon": -71.0}]
 
         # Define exclusion zones that would block the default NE position
         # Default airport label would be at marker_pos + (6, -8)
@@ -90,7 +88,7 @@ class TestCollisionAvoidance(unittest.TestCase):
 
     def test_no_collision_default_position(self):
         """Test that airport labels use default position when no collision."""
-        airports = [Airport(ident="TEST", lat=42.0, lon=-71.0)]
+        airports = [{"ident": "TEST", "lat": 42.0, "lon": -71.0}]
 
         # No exclusions - should use default NE position
         exclusions = []
