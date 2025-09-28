@@ -17,40 +17,6 @@ PocketScope is a handheld, Pi-powered ATC-style scope for decoding and displayin
 
 Comprehensive architecture and feature documentation now lives in [`docs/overview.md`](docs/overview.md) along with the rest of the [documentation set](#documentation).
 
-## Getting Started
-
-### Prerequisites
-- Python 3.11+
-- Git
-- Recommended: a virtual environment for local development
-
-### Installation
-
-```bash
-git clone https://github.com/ChrisPatten/pocket-scope.git
-cd pocket-scope
-python -m venv .venv
-source .venv/bin/activate  # Windows: .venv\Scripts\activate
-pip install -e ".[dev]"
-pre-commit install
-```
-
-### Running the Application
-
-PocketScope exposes a CLI entry point once installed in editable mode:
-
-```bash
-pocketscope --help                      # Discover available options
-pocketscope --version                   # Show version information
-pocketscope \
-    --url http://127.0.0.1:8080/data/aircraft.json \
-    --center 42.0,-71.0 \
-    --range 60                          # Live ADS-B ingest
-pocketscope --playback sample_data/demo_adsb.jsonl --loop
-```
-
-If you prefer not to install the console script, run the module directly:
-
 ```bash
 python -m pocketscope [options]
 ```
@@ -105,3 +71,4 @@ Bug reports and feature discussions are welcome via GitHub issues. Please refere
 ## License
 
 PocketScope is distributed under the MIT License. See [LICENSE](LICENSE) for details.
+

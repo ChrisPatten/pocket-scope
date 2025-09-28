@@ -1255,7 +1255,7 @@ class UiController:
                     pass
                 # Live‑apply sidebar mode / side / info block policy changes.
                 # Previously these fields were only read during controller
-                # initialization, so editing settings.json while the app was
+                # initialization, so editing settings.yml while the app was
                 # running (e.g. to enable the vertical profile) had no
                 # visible effect until a restart. Applying them here lets
                 # users toggle these options via external config updates.

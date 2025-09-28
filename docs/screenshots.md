@@ -71,7 +71,7 @@ See `tests/ui/test_screenshot.py` for the stub display test ensuring `UiControll
 Related Theme Keys
 ------------------
 
-Screenshots naturally include any active theme; modify `theme` / `themeOverrides` in `settings.json` to immediately change captured color palettes.
+Screenshots naturally include any active theme; modify `theme` / `themeOverrides` in `settings.yml` to immediately change captured color palettes.
 
 See Also
 --------
