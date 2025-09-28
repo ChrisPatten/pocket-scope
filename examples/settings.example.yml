@@ -1,0 +1,48 @@
+logging:
+  level: INFO
+  style: json
+  utc: true
+  propagate: false
+  context_fields:
+    - session_id
+    - request_id
+    - range_nm
+    - focus_icao
+  redactions:
+    - pattern: "(lat|lon)=([0-9\.-]+)"
+      replacement: "\1=<redacted>"
+  sampling:
+    debug_qps: 20
+    duplicate_suppression_window_sec: 5
+  handlers:
+    console:
+      enabled: true
+      level: DEBUG
+    file:
+      enabled: true
+      path: /run/pocketscope/logs/pocketscope.log
+      rotate:
+        max_bytes: 5242880
+        backup_count: 3
+    journald:
+      enabled: true
+  loggers:
+    pocketscope: INFO
+    pocketscope.ingest: DEBUG
+    pocketscope.ui: INFO
+telemetry:
+  enabled: true
+  exporters:
+    prometheus:
+      enabled: false
+      host: 127.0.0.1
+      port: 9100
+    otlp:
+      enabled: false
+      endpoint: "http://127.0.0.1:4317"
+  fps_target: 5
+  thresholds:
+    gps_stale_sec: 300
+    decoder_offline_warn_sec: 3
+    temp_warn_c: 75
+    temp_crit_c: 85
