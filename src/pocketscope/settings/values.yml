@@ -11,7 +11,7 @@ ranges:
     min_gap_fraction: 0.10
     max_inner_rings: 3
     legacy_special_cases:
-      "10.0": [2, 5, 10]
+      "10.0": [5, 10]
     min_exp: -2
 
 altitude_filters:

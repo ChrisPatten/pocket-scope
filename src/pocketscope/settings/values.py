@@ -40,7 +40,7 @@ _FALLBACK_AUTO_RING_CFG = {
     "nice_pattern": [1, 2, 5],
     "min_gap_fraction": 0.10,
     "max_inner_rings": 3,
-    "legacy_special_cases": {"10.0": [2.0, 5.0, 10.0]},
+    "legacy_special_cases": {"10.0": [5.0, 10.0]},
     "min_exp": -2,
 }
 

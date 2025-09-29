@@ -266,11 +266,9 @@ class PpiView:
 
         Rules / Rationale
         -----------------
-        - Use a 1–2–5 decade pattern to pick "nice" distances.
         - Always include the outermost ring at exactly ``self.range_nm``.
-        - Limit to at most 4 rings (including outer) to reduce clutter.
-        - Preserve legacy default for 10 NM => [2, 5, 10] (golden test stability).
-        - Never include rings spaced closer than 10% of outer range.
+        - Include one inner ring at halfway between max range and ownship.
+        - Preserve legacy default for 10 NM => [5, 10] (golden test stability).
         - Distances are strictly increasing and > 0.
         """
         rng = max(0.1, float(self.range_nm))
@@ -286,45 +284,9 @@ class PpiView:
         except Exception:  # pragma: no cover - defensive
             pass
 
-        ring_list: List[float] = []
-        # Generate candidate nice numbers up to range using configured pattern.
-        import math
-
-        exp_min = int(AUTO_RING_CONFIG.get("min_exp", -2))
-        exp_max = int(math.floor(math.log10(rng))) + 1
-        candidates: List[float] = []
-        for e in range(exp_min, exp_max + 1):
-            scale = 10**e
-            pattern = AUTO_RING_CONFIG.get("nice_pattern", [1, 2, 5])
-            try:
-                bases = [int(b) for b in pattern]
-            except Exception:
-                bases = [1, 2, 5]
-            for base in bases:
-                val = base * scale
-                if 0 < val < rng * 0.9999:  # below outer ring
-                    candidates.append(val)
-        # Deduplicate and sort
-        candidates = sorted({round(c, 6) for c in candidates})
-        # Filter: remove candidates closer than configured fraction of
-        # outer range to avoid visual clutter.
-        filtered: List[float] = []
-        min_gap = rng * float(AUTO_RING_CONFIG.get("min_gap_fraction", 0.10))
-        last = 0.0
-        for c in candidates:
-            if c - last >= min_gap:
-                filtered.append(c)
-                last = c
-        # Ensure we don't exceed configured number of inner rings; keep largest
-        max_inner = int(AUTO_RING_CONFIG.get("max_inner_rings", 3))
-        ring_list = filtered[-max_inner:]
-        # Always append the exact outer range (if not already)
-        if not ring_list or abs(ring_list[-1] - rng) > 1e-6:
-            ring_list.append(rng)
-        # Guarantee strictly increasing
-        ring_list = [r for r in ring_list if r > 0]
-        ring_list = sorted(ring_list)
-        return ring_list
+        # Always return just two rings: halfway and max range
+        half_range = rng / 2.0
+        return [half_range, rng]
 
     def draw(
         self,
