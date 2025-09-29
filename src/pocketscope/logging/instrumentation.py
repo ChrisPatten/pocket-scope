@@ -21,9 +21,7 @@ def _levelno(level: str | int) -> int:
     return getattr(logging, level.upper(), logging.INFO)
 
 
-def _summarize_args(
-    args: tuple[Any, ...], kwargs: dict[str, Any], redact: set[str]
-) -> dict[str, Any]:
+def _summarize_args(args: tuple[Any, ...], kwargs: dict[str, Any], redact: set[str]) -> dict[str, Any]:
     summary: dict[str, Any] = {}
     for idx, arg in enumerate(args):
         key = f"arg{idx}"
@@ -60,9 +58,7 @@ def log_call(
         @functools.wraps(func)
         def wrapper(*args: P.args, **kwargs: P.kwargs) -> T:
             enabled = logger.isEnabledFor(levelno)
-            start = (
-                time.perf_counter() if enabled or min_duration_ms is not None else 0.0
-            )
+            start = time.perf_counter() if enabled or min_duration_ms is not None else 0.0
             try:
                 result = func(*args, **kwargs)
             except Exception:
@@ -190,9 +186,7 @@ def span(name: str, **fields: Any) -> Iterator[None]:
     else:
         duration_ms = (time.perf_counter() - start) * 1000.0
         if logger.isEnabledFor(logging.DEBUG):
-            logger.debug(
-                "span.finish", extra={**fields, "duration_ms": round(duration_ms, 3)}
-            )
+            logger.debug("span.finish", extra={**fields, "duration_ms": round(duration_ms, 3)})
 
 
 __all__ = ["log_call", "measure_latency", "count_exceptions", "span"]

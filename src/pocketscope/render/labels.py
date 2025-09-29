@@ -142,9 +142,7 @@ class DataBlockFormatter:
 
     def format_standard(self, t: TrackSnapshot) -> Tuple[str, str, str]:
         ident = (t.callsign or t.icao24).upper()
-        alt = self._format_alt_hundreds(
-            t.geo_alt_ft, t.baro_alt_ft, t.vertical_rate_fpm
-        )
+        alt = self._format_alt_hundreds(t.geo_alt_ft, t.baro_alt_ft, t.vertical_rate_fpm)
         line2 = alt
         line3 = self._format_brg_spd(t)
         return (ident, line2, line3)
@@ -152,9 +150,7 @@ class DataBlockFormatter:
     def format_expanded(self, t: TrackSnapshot) -> Tuple[str, str, str]:
         ident = (t.callsign or t.icao24).upper()
         left = f"{ident} | {t.icao24.upper()}"
-        alt = self._format_alt_hundreds(
-            t.geo_alt_ft, t.baro_alt_ft, t.vertical_rate_fpm
-        )
+        alt = self._format_alt_hundreds(t.geo_alt_ft, t.baro_alt_ft, t.vertical_rate_fpm)
         vs = 0 if t.vertical_rate_fpm is None else int(round(t.vertical_rate_fpm))
         line2 = f"{alt} | {vs:+d}"
         brg_spd = self._format_brg_spd(t)
@@ -343,9 +339,7 @@ class DataBlockLayout:
                         b2x: int,
                         b2y: int,
                     ) -> bool:
-                        def orient(
-                            px: int, py: int, qx: int, qy: int, rx_: int, ry_: int
-                        ) -> int:
+                        def orient(px: int, py: int, qx: int, qy: int, rx_: int, ry_: int) -> int:
                             return (qx - px) * (ry_ - py) - (qy - py) * (rx_ - px)
 
                         o1: int = orient(a1x, a1y, a2x, a2y, b1x, b1y)
@@ -361,9 +355,7 @@ class DataBlockLayout:
                                     q1, q2 = q2, q1
                                 return not (p2 < q1 or q2 < p1)
 
-                            return overlap(a1x, a2x, b1x, b2x) and overlap(
-                                a1y, a2y, b1y, b2y
-                            )
+                            return overlap(a1x, a2x, b1x, b2x) and overlap(a1y, a2y, b1y, b2y)
                         return (o1 > 0) != (o2 > 0) and (o3 > 0) != (o4 > 0)
 
                     # Rectangle edges
@@ -389,8 +381,7 @@ class DataBlockLayout:
                     ]
                     cx2, cy2 = min(
                         candidates,
-                        key=lambda q: (q[0] - ax) * (q[0] - ax)
-                        + (q[1] - ay) * (q[1] - ay),
+                        key=lambda q: (q[0] - ax) * (q[0] - ax) + (q[1] - ay) * (q[1] - ay),
                     )
                     return int(cx2), int(cy2)
 
@@ -418,9 +409,7 @@ class DataBlockLayout:
                     if not collides and block_bboxes:
                         lx, ly = leader_attach(x, y)
                         for bx, by, bw_, bh_ in block_bboxes:
-                            if _segment_intersects_rect(
-                                ax, ay, lx, ly, bx, by, bw_, bh_
-                            ):
+                            if _segment_intersects_rect(ax, ay, lx, ly, bx, by, bw_, bh_):
                                 collides = True
                                 break
                     attempts += 1

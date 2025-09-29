@@ -28,11 +28,7 @@ from pocketscope.theme import ThemeManager
 
 
 def _coerce_color(val: object, fallback: tuple[int, int, int, int]) -> Color:
-    if (
-        isinstance(val, (list, tuple))
-        and len(val) == 4
-        and all(isinstance(c, (int, float)) for c in val)
-    ):
+    if isinstance(val, (list, tuple)) and len(val) == 4 and all(isinstance(c, (int, float)) for c in val):
         r, g, b, a = (int(val[0]), int(val[1]), int(val[2]), int(val[3]))
         return (r, g, b, a)
     return fallback
@@ -67,9 +63,7 @@ class AirportsLayer:
         return (x, y)
 
     @staticmethod
-    def _intersects_exclusions(
-        x: int, y: int, w: int, h: int, exclusions: list[tuple[int, int, int, int]]
-    ) -> bool:
+    def _intersects_exclusions(x: int, y: int, w: int, h: int, exclusions: list[tuple[int, int, int, int]]) -> bool:
         """Check if a rectangle intersects with any exclusion zone."""
         if not exclusions:
             return False
@@ -129,9 +123,7 @@ class AirportsLayer:
         for tx, ty in positions:
             txc, tyc = self._clamp_label(tx, ty, tw, label_h, W, H)
             candidates.append((txc, tyc))
-            if not avoid_rects or not self._intersects_exclusions(
-                txc, tyc, tw, label_h, avoid_rects
-            ):
+            if not avoid_rects or not self._intersects_exclusions(txc, tyc, tw, label_h, avoid_rects):
                 return (txc, tyc)
 
         # Second pass: if all canonical positions collide, do a small spiral
@@ -147,9 +139,7 @@ class AirportsLayer:
                 dx = [step * r, 0, -step * r, 0][dir_idx]
                 dy = [0, step * r, 0, -step * r][dir_idx]
                 nx, ny = self._clamp_label(base_x + dx, base_y + dy, tw, label_h, W, H)
-                if not avoid_rects or not self._intersects_exclusions(
-                    nx, ny, tw, label_h, avoid_rects
-                ):
+                if not avoid_rects or not self._intersects_exclusions(nx, ny, tw, label_h, avoid_rects):
                     return (nx, ny)
                 attempts += 1
 
@@ -261,9 +251,7 @@ class AirportsLayer:
 
             sx, sy = to_screen(lat, lon)
             runway_entries = (
-                [dict(x) for x in runways_by_ident.get(ident_str, [])]
-                if runways_by_ident is not None
-                else []
+                [dict(x) for x in runways_by_ident.get(ident_str, [])] if runways_by_ident is not None else []
             )
             if runway_entries:
                 try:

@@ -25,7 +25,7 @@ import os
 import sys
 import time
 from datetime import datetime, timezone
-from typing import Any, Dict
+from typing import Any, Dict, cast
 
 from pocketscope.core.events import EventBus, pack, unpack
 from pocketscope.core.models import AdsbMessage
@@ -33,18 +33,33 @@ from pocketscope.core.time import RealTimeSource
 from pocketscope.core.tracks import TrackService
 from pocketscope.ingest.adsb.json_source import Dump1090JsonSource
 
-# Configure logging
-logging.basicConfig(
-    level=logging.DEBUG,
-    format="%(asctime)s.%(msecs)03d [%(levelname)s] %(name)s: %(message)s",
-    datefmt="%H:%M:%S",
-)
+"""Instrumentation helper script.
 
-# Silence some noisy loggers unless we want full debug
-debug_level = int(os.environ.get("DEBUG_LEVEL", "1"))
-if debug_level < 3:
-    logging.getLogger("aiohttp").setLevel(logging.WARNING)
-    logging.getLogger("asyncio").setLevel(logging.WARNING)
+The main application configures logging via settings.yml (and environment
+overrides). To avoid conflicting with that configuration, this script no
+longer force-calls logging.basicConfig(). If you still want a quick ad-hoc
+standalone run with a simple formatter you can export:
+
+    POCKETSCOPE_TOOL_FORCE_BASIC_LOG=1
+
+before invoking it. Otherwise it will reuse the existing pocket‑scope
+logging configuration established by pocketscope.boot.boot().
+"""
+
+if os.environ.get("POCKETSCOPE_TOOL_FORCE_BASIC_LOG"):
+    logging.basicConfig(
+        level=logging.DEBUG,
+        format="%(asctime)s.%(msecs)03d [%(levelname)s] %(name)s: %(message)s",
+        datefmt="%H:%M:%S",
+    )
+    # Optional noise suppression mirror of previous behaviour
+    debug_level = int(os.environ.get("DEBUG_LEVEL", "1"))
+    if debug_level < 3:
+        try:
+            logging.getLogger("aiohttp").setLevel(logging.WARNING)
+            logging.getLogger("asyncio").setLevel(logging.WARNING)
+        except Exception:
+            pass
 
 logger = logging.getLogger(__name__)
 
@@ -313,20 +328,30 @@ class InstrumentedDump1090Source(Dump1090JsonSource):
             valid_aircraft += 1
 
             # Field extraction
+            # Coerce/normalize fields to the expected types for AdsbMessage
+            callsign = ac.get("flight", "").strip() or None
+            lat = self._coerce_float(ac.get("lat"))
+            lon = self._coerce_float(ac.get("lon"))
+            baro_alt = self._coerce_float(ac.get("alt_baro"))
+            geo_alt = self._coerce_float(ac.get("alt_geom"))
+            ground_speed = self._coerce_float(ac.get("gs"))
+            track_deg = self._coerce_float(ac.get("track"))
+            vertical_rate = self._coerce_float(ac.get("baro_rate"))
+            squawk = ac.get("squawk") if isinstance(ac.get("squawk"), str) else None
+            nic = self._coerce_int(ac.get("nic"))
+            nacp = self._coerce_int(ac.get("nac_p"))
             fields = {
-                "callsign": ac.get("flight", "").strip() or None,
-                "lat": self._coerce_float(ac.get("lat")),
-                "lon": self._coerce_float(ac.get("lon")),
-                "baro_alt": self._coerce_float(ac.get("alt_baro")),
-                "geo_alt": self._coerce_float(ac.get("alt_geom")),
-                "ground_speed": self._coerce_float(ac.get("gs")),
-                "track_deg": self._coerce_float(ac.get("track")),
-                "vertical_rate": self._coerce_float(ac.get("baro_rate")),
-                "squawk": ac.get("squawk")
-                if isinstance(ac.get("squawk"), str)
-                else None,
-                "nic": self._coerce_int(ac.get("nic")),
-                "nacp": self._coerce_int(ac.get("nac_p")),
+                "callsign": callsign,
+                "lat": lat,
+                "lon": lon,
+                "baro_alt": baro_alt,
+                "geo_alt": geo_alt,
+                "ground_speed": ground_speed,
+                "track_deg": track_deg,
+                "vertical_rate": vertical_rate,
+                "squawk": squawk,
+                "nic": nic,
+                "nacp": nacp,
             }
 
             if debug_level >= 2:
@@ -334,20 +359,21 @@ class InstrumentedDump1090Source(Dump1090JsonSource):
 
             # Create message
             try:
+                # Use the local variables (already coerced) to satisfy type checker
                 msg = AdsbMessage(
                     ts=ts,
                     icao24=icao,
-                    callsign=fields["callsign"],
-                    lat=fields["lat"],
-                    lon=fields["lon"],
-                    baro_alt=fields["baro_alt"],
-                    geo_alt=fields["geo_alt"],
-                    ground_speed=fields["ground_speed"],
-                    track_deg=fields["track_deg"],
-                    vertical_rate=fields["vertical_rate"],
-                    squawk=fields["squawk"],
-                    nic=fields["nic"],
-                    nacp=fields["nacp"],
+                    callsign=callsign,
+                    lat=lat,
+                    lon=lon,
+                    baro_alt=baro_alt,
+                    geo_alt=geo_alt,
+                    ground_speed=ground_speed,
+                    track_deg=track_deg,
+                    vertical_rate=vertical_rate,
+                    squawk=squawk,
+                    nic=nic,
+                    nacp=nacp,
                     src="JSON",
                 )
 
@@ -541,21 +567,22 @@ class TestRunner:
 
         logger.info("=== FINAL TEST STATISTICS ===")
         logger.info("Total runtime: %.2fs", runtime)
-        logger.info("Messages received: %d", self.stats["messages_received"])
-        logger.info("Unique aircraft seen: %d", len(self.stats["total_aircraft_seen"]))
-        logger.info(
-            "Message rate: %.2f msg/s", self.stats["messages_received"] / runtime
-        )
+        # Cast stats to concrete local types so static checker understands usage
+        from typing import cast
 
-        if self.stats["total_aircraft_seen"]:
-            logger.info(
-                "Aircraft ICAOs: %s",
-                sorted(list(self.stats["total_aircraft_seen"]))[:10],
-            )
+        messages_received: int = cast(int, self.stats.get("messages_received") or 0)
+        total_aircraft_seen: set = cast(set, self.stats.get("total_aircraft_seen") or set())
+        logger.info("Messages received: %d", messages_received)
+        logger.info("Unique aircraft seen: %d", len(total_aircraft_seen))
+        logger.info("Message rate: %.2f msg/s", messages_received / max(1.0, runtime))
 
-        if self.stats["errors"]:
-            logger.info("Errors encountered: %d", len(self.stats["errors"]))
-            for error in self.stats["errors"][:5]:  # Show first 5 errors
+        if total_aircraft_seen:
+            logger.info("Aircraft ICAOs: %s", sorted(list(total_aircraft_seen))[:10])
+
+        errs: list | None = cast(list | None, self.stats.get("errors"))
+        if errs:
+            logger.info("Errors encountered: %d", len(errs))
+            for error in errs[:5]:  # Show first 5 errors
                 logger.info("  %s", error)
 
 

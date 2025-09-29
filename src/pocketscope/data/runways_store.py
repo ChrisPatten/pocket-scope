@@ -132,9 +132,7 @@ def build_sqlite_from_geojson(geojson_path: str, sqlite_path: str) -> None:
 
     inserted = 0
     # Load airports asset for GUID -> ICAO mapping by proximity when needed
-    airports_asset_path = os.path.normpath(
-        os.path.join(os.path.dirname(__file__), "..", "assets", "airports.json")
-    )
+    airports_asset_path = os.path.normpath(os.path.join(os.path.dirname(__file__), "..", "assets", "airports.json"))
     airports_list: List[Dict[str, Any]] = []
     try:
         with open(airports_asset_path, "r", encoding="utf8") as af:
@@ -144,10 +142,7 @@ def build_sqlite_from_geojson(geojson_path: str, sqlite_path: str) -> None:
     for feat in features:
         props = feat.get("properties") or {}
         # normalize property keys to lowercase for forgiving matching
-        props = {
-            str(k).lower(): v
-            for k, v in (props.items() if isinstance(props, dict) else {})
-        }
+        props = {str(k).lower(): v for k, v in (props.items() if isinstance(props, dict) else {})}
         geom = feat.get("geometry") or {}
         airport_ident = (
             str(
@@ -175,9 +170,7 @@ def build_sqlite_from_geojson(geojson_path: str, sqlite_path: str) -> None:
 
         # If looks like a GUID (contains hyphen) and we have an airports
         # asset, attempt to map by proximity.
-        if (
-            "-" in raw_ident or len(raw_ident) > 6 and not raw_ident.isalpha()
-        ) and airports_list:
+        if ("-" in raw_ident or len(raw_ident) > 6 and not raw_ident.isalpha()) and airports_list:
             # compute a representative point for the runway: midpoint of
             # endpoints if available, otherwise centroid of polygon ring
             rep_lat = rep_lon = None
@@ -186,20 +179,12 @@ def build_sqlite_from_geojson(geojson_path: str, sqlite_path: str) -> None:
                 if isinstance(geom, dict):
                     gtype_local = (geom.get("type") or "").lower()
                     coords_local = geom.get("coordinates")
-                    if (
-                        gtype_local == "linestring"
-                        and isinstance(coords_local, list)
-                        and len(coords_local) >= 2
-                    ):
+                    if gtype_local == "linestring" and isinstance(coords_local, list) and len(coords_local) >= 2:
                         a = coords_local[0]
                         b = coords_local[-1]
                         rep_lat = (a[1] + b[1]) / 2.0
                         rep_lon = (a[0] + b[0]) / 2.0
-                    elif (
-                        gtype_local == "polygon"
-                        and isinstance(coords_local, list)
-                        and coords_local
-                    ):
+                    elif gtype_local == "polygon" and isinstance(coords_local, list) and coords_local:
                         ring = coords_local[0]
                         # centroid-like average of ring vertices
                         s_lat = s_lon = 0.0
@@ -255,21 +240,11 @@ def build_sqlite_from_geojson(geojson_path: str, sqlite_path: str) -> None:
 
         # Determine runway ident and attributes
         # prefer common lowercase keys in the normalized props dict
-        rwy_ident = (
-            props.get("rwy_ident")
-            or props.get("ref")
-            or props.get("name")
-            or props.get("designator")
-        )
+        rwy_ident = props.get("rwy_ident") or props.get("ref") or props.get("name") or props.get("designator")
         surface = props.get("surface") or props.get("surf")
         width = props.get("width") or props.get("width_m")
         lighted = int(
-            bool(
-                props.get("lighted")
-                or props.get("lights")
-                or props.get("has_lights")
-                or props.get("lightactv")
-            )
+            bool(props.get("lighted") or props.get("lights") or props.get("has_lights") or props.get("lightactv"))
         )
 
         lat1 = lon1 = lat2 = lon2 = None
@@ -278,12 +253,7 @@ def build_sqlite_from_geojson(geojson_path: str, sqlite_path: str) -> None:
 
         coords = geom.get("coordinates") if isinstance(geom, dict) else None
         gtype = (geom.get("type") if isinstance(geom, dict) else None) or ""
-        if (
-            isinstance(gtype, str)
-            and gtype.lower() == "linestring"
-            and isinstance(coords, list)
-            and len(coords) >= 2
-        ):
+        if isinstance(gtype, str) and gtype.lower() == "linestring" and isinstance(coords, list) and len(coords) >= 2:
             # Expect [lon, lat] pairs; take first/last
             try:
                 lon1, lat1 = coords[0][0], coords[0][1]
@@ -294,12 +264,7 @@ def build_sqlite_from_geojson(geojson_path: str, sqlite_path: str) -> None:
                 bearing = float(initial_bearing_deg(lat1, lon1, lat2, lon2))
             except Exception:
                 lat1 = lon1 = lat2 = lon2 = None
-        elif (
-            isinstance(gtype, str)
-            and gtype.lower() == "polygon"
-            and isinstance(coords, list)
-            and coords
-        ):
+        elif isinstance(gtype, str) and gtype.lower() == "polygon" and isinstance(coords, list) and coords:
             # For polygon runway footprints, take exterior ring and pick the two
             # vertices that are farthest apart as runway endpoints.
             try:
@@ -366,11 +331,7 @@ def build_sqlite_from_geojson(geojson_path: str, sqlite_path: str) -> None:
                     length_m = None
 
         if bearing is None:
-            b = (
-                props.get("bearing_true")
-                or props.get("bearing")
-                or props.get("heading")
-            )
+            b = props.get("bearing_true") or props.get("bearing") or props.get("heading")
             if b is not None:
                 try:
                     pb = _safe_float(b)
@@ -448,9 +409,7 @@ def _connect(sqlite_path: str) -> sqlite3.Connection:
 
 
 @functools.lru_cache(maxsize=512)
-def get_runways_for_airport_cached(
-    sqlite_path: str, airport_ident: str
-) -> Tuple[str, Tuple[Dict[str, Any], ...]]:
+def get_runways_for_airport_cached(sqlite_path: str, airport_ident: str) -> Tuple[str, Tuple[Dict[str, Any], ...]]:
     """Cached single-airport fetch. Returns tuple (ident, tuple(rows))."""
     if not airport_ident:
         return (airport_ident, tuple())
@@ -464,16 +423,12 @@ def get_runways_for_airport_cached(
     return (ident, out)
 
 
-def get_runways_for_airport(
-    sqlite_path: str, airport_ident: str
-) -> List[Dict[str, Any]]:
+def get_runways_for_airport(sqlite_path: str, airport_ident: str) -> List[Dict[str, Any]]:
     """Return runways for an airport ident (case-insensitive). Uses an LRU cache."""
     return list(get_runways_for_airport_cached(sqlite_path, airport_ident)[1])
 
 
-def get_runways_for_airports(
-    sqlite_path: str, airport_idents: List[str]
-) -> Dict[str, List[Dict[str, Any]]]:
+def get_runways_for_airports(sqlite_path: str, airport_idents: List[str]) -> Dict[str, List[Dict[str, Any]]]:
     """Batch-fetch runways for multiple airport idents. Returns map ident->list.
 
     Uses a single SQL query with an IN (...) clause. Normalizes idents to

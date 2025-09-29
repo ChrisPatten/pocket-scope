@@ -186,9 +186,7 @@ class Dump1090JsonSource:
             This prevents 'coroutine ignored GeneratorExit' and unclosed
             ClientSession warnings observed in tests.
             """
-            timeout = aiohttp.ClientTimeout(
-                total=self._timeout_s, connect=self._connect_timeout_s
-            )
+            timeout = aiohttp.ClientTimeout(total=self._timeout_s, connect=self._connect_timeout_s)
             connector_args: dict[str, Any] = {"ssl": self._verify_tls}
             if self._force_ipv4:
                 connector_args["family"] = socket.AF_INET
@@ -238,7 +236,33 @@ class Dump1090JsonSource:
         max_backoff = 2.0
         while not self._stop_event.is_set():
             try:
-                await self._poll_once()
+                started = time.perf_counter()
+                size_bytes = await self._poll_once()
+                elapsed = time.perf_counter() - started
+                if logger.isEnabledFor(logging.INFO):
+                    logger.info(
+                        "dump1090.poll ms=%.2f interval_s=%.2f bytes=%d errors=%d",
+                        elapsed * 1000.0,
+                        self._interval,
+                        size_bytes,
+                        self._consec_errors,
+                        extra={
+                            "duration_ms": round(elapsed * 1000.0, 3),
+                            "interval_s": round(self._interval, 3),
+                            "bytes": size_bytes,
+                            "consec_errors": self._consec_errors,
+                        },
+                    )
+                # Warn on slow polls ( > 80% of timeout )
+                if elapsed > self._timeout_s * 0.8 and logger.isEnabledFor(logging.WARNING):
+                    logger.warning(
+                        f"dump1090.poll.slow ms={elapsed*1000.0:.2f} timeout_s={self._timeout_s} bytes={size_bytes}",
+                        extra={
+                            "duration_ms": round(elapsed * 1000.0, 3),
+                            "timeout_s": self._timeout_s,
+                            "bytes": size_bytes,
+                        },
+                    )
                 backoff = 0.2
                 if self._consec_errors:
                     logger.info(
@@ -288,7 +312,7 @@ class Dump1090JsonSource:
     # still active when cancellation arrives, preserving legacy test
     # expectations.
 
-    async def _poll_once(self) -> bool:
+    async def _poll_once(self) -> int:
         assert self._session is not None
         headers: dict[str, str] = {}
         if self._cache.etag:
@@ -324,7 +348,7 @@ class Dump1090JsonSource:
         start = time.monotonic()
         async with self._session.get(self._url, headers=headers) as resp:
             if resp.status == 304:
-                return False
+                return 0
             resp.raise_for_status()
 
             etag = resp.headers.get("ETag")
@@ -337,6 +361,7 @@ class Dump1090JsonSource:
             text = await resp.text()
             elapsed = time.monotonic() - start
             if elapsed > self._timeout_s * 0.8:
+                # Retain existing DEBUG path; WARNING emitted by caller.
                 logger.debug(
                     "dump1090 poll slow: %.3fs (timeout %.2fs) size=%d bytes",
                     elapsed,
@@ -345,7 +370,7 @@ class Dump1090JsonSource:
                 )
             data = json.loads(text)
             self._handle_payload(data)
-            return True
+            return len(text)
 
     def _handle_payload(self, data: dict[str, Any]) -> None:
         now_s = _coerce_float(data.get("now"))
@@ -409,6 +434,4 @@ class Dump1090JsonSource:
             msg_dict["ts"] = msg.ts.isoformat()
             # Use run_coroutine_threadsafe to publish from the worker thread's
             # loop to the main thread's loop.
-            asyncio.run_coroutine_threadsafe(
-                self._bus.publish(self._topic, pack(msg_dict)), self._main_loop
-            )
+            asyncio.run_coroutine_threadsafe(self._bus.publish(self._topic, pack(msg_dict)), self._main_loop)

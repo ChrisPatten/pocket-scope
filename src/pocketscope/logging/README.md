@@ -47,4 +47,4 @@ if sampler.allow():
     logger.debug("hot loop stats", extra={"fps": fps})
 ```
 
-See `examples/settings.example.yml` for a full configuration reference.
+See `src/pocketscope/settings/settings.yml` for the default configuration and examples.

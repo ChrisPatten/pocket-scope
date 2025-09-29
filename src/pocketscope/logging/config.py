@@ -14,7 +14,7 @@ from typing import Any, Dict, Iterable, Optional
 
 import yaml
 
-from pocketscope.settings_schema import HandlerConfig, Settings
+from pocketscope.settings.schema import HandlerConfig, LoggingOnlySettings, Settings
 
 from .context import new_session_id, set_context
 from .telemetry import configure_telemetry, disable_telemetry
@@ -29,23 +29,22 @@ def _home_settings_path() -> Path:
 
 _env_settings_raw = os.environ.get("POCKETSCOPE_SETTINGS")
 DEFAULT_SETTINGS_LOCATIONS: tuple[Path, ...] = (
-    *(
-        (Path(_env_settings_raw).expanduser(),)
-        if _env_settings_raw and _env_settings_raw.strip()
-        else ()
-    ),
+    *((Path(_env_settings_raw).expanduser(),) if _env_settings_raw and _env_settings_raw.strip() else ()),
     _home_settings_path(),
     Path.cwd() / "settings.yml",
     Path(__file__).resolve().parents[1] / "settings.yml",
 )
 
-runtime_settings: Settings | None = None
+runtime_settings: "LoggingOnlySettings | Settings | None" = None
 runtime_checksum: str | None = None
 
 
 @dataclass(slots=True)
 class LoadedSettings:
-    settings: Settings
+    # Historically this loader returned a compact LoggingOnlySettings shape.
+    # Accept either the full Settings model or the compact LoggingOnlySettings
+    # to keep call-sites flexible.
+    settings: "LoggingOnlySettings | Settings"
     path: Path | None
     checksum: str
 
@@ -120,11 +119,30 @@ def load_settings(path: str | Path | None = None) -> LoadedSettings:
         data = _yaml_to_dict(settings_path)
         checksum.update(settings_path.read_bytes())
     data = _apply_env_overrides(data)
-    settings = Settings.model_validate(data)
+    # If the user provided a top-level UI `target_fps`, prefer it as the
+    # canonical anchor for telemetry unless telemetry explicitly configures
+    # its own `fps_target`. This preserves backward compatibility while
+    # centralizing the FPS anchor.
+    try:
+        if "target_fps" in data:
+            top_fps = data.get("target_fps")
+            if top_fps is not None:
+                telemetry_block = data.get("telemetry")
+                if telemetry_block is None or "fps_target" not in telemetry_block:
+                    # Ensure telemetry block exists and set an integer fps target
+                    data.setdefault("telemetry", {})["fps_target"] = int(round(float(top_fps)))
+    except Exception:
+        # Best-effort only; don't fail settings parsing for odd values.
+        pass
+    # The logging initializer historically accepted a compact mapping that
+    # only contained "logging" and "telemetry" keys. Strip out unrelated
+    # root-level keys before validating to preserve that behaviour and avoid
+    # failing on application-specific extras (e.g., POCKETSCOPE_HOME injected
+    # by tests or other tools).
+    filtered = {k: v for k, v in data.items() if k in ("logging", "telemetry")}
+    settings = LoggingOnlySettings.model_validate(filtered)
     checksum.update(settings.model_dump_json().encode("utf-8"))
-    return LoadedSettings(
-        settings=settings, path=settings_path, checksum=checksum.hexdigest()
-    )
+    return LoadedSettings(settings=settings, path=settings_path, checksum=checksum.hexdigest())
 
 
 def _context_fields(settings: Settings) -> Dict[str, Any]:
@@ -158,9 +176,7 @@ def _build_filters(settings: Settings) -> Dict[str, Any]:
         },
         "dedupe": {
             "()": "pocketscope.logging.filters.DuplicateFilter",
-            "window_seconds": (
-                settings.logging.sampling.duplicate_suppression_window_sec
-            ),
+            "window_seconds": (settings.logging.sampling.duplicate_suppression_window_sec),
         },
         "redact": {
             "()": "pocketscope.logging.filters.RedactionFilter",
@@ -191,9 +207,7 @@ def _build_console_handler(settings: Settings) -> tuple[Dict[str, Any], Dict[str
     except Exception:
         pass
     formatter = (
-        _json_formatter_settings(settings)
-        if settings.logging.style == "json"
-        else _human_formatter_settings(use_color)
+        _json_formatter_settings(settings) if settings.logging.style == "json" else _human_formatter_settings(use_color)
     )
     console_handler = settings.logging.handlers.get("console", HandlerConfig())
     console_level = console_handler.level or settings.logging.level
@@ -213,9 +227,7 @@ def _build_file_handler(
         return None, {}
     _ensure_parent(handler_cfg.path)
     formatter = (
-        _json_formatter_settings(settings)
-        if settings.logging.style == "json"
-        else _human_formatter_settings(False)
+        _json_formatter_settings(settings) if settings.logging.style == "json" else _human_formatter_settings(False)
     )
     rotate = handler_cfg.rotate
     handler: Dict[str, Any] = {
@@ -328,24 +340,40 @@ def init_logging_and_telemetry(settings_path: str | Path | None = None) -> Setti
     runtime_settings = loaded.settings
     runtime_checksum = loaded.checksum
 
-    _context_fields(runtime_settings)
-    dict_config = _build_dict_config(runtime_settings)
+    # Some callers expect the full Settings model; when we have the compact
+    # LoggingOnlySettings shape, convert by validating into the full Settings
+    # model where necessary. For simplicity, attempt a model validation when
+    # the object does not have the required attributes.
+    from pocketscope.settings import schema as _schema_mod
+
+    settings_obj: Settings
+
+    if isinstance(runtime_settings, _schema_mod.LoggingOnlySettings):
+        # Build a minimal Settings object by embedding the logging/telemetry
+        # blocks into the full Settings model defaults. This is a shallow
+        # conversion used only during logging initialization.
+        settings_obj = Settings.model_validate(
+            {
+                **Settings().model_dump(),
+                "logging": runtime_settings.logging.model_dump(),
+                "telemetry": runtime_settings.telemetry.model_dump(),
+            }
+        )
+    else:
+        settings_obj = runtime_settings
+
+    _context_fields(settings_obj)
+    dict_config = _build_dict_config(settings_obj)
     logging.config.dictConfig(dict_config)
     try:
-        logging.getLogger(__name__).info(
-            "logging.init settings_path=%s checksum=%s", loaded.path, runtime_checksum
-        )
+        logging.getLogger(__name__).info("logging.init settings_path=%s checksum=%s", loaded.path, runtime_checksum)
     except Exception:
         pass
 
     # Post-config diagnostics (INFO level intentionally so visible by default)
     try:
         root_logger = logging.getLogger()
-        file_handlers = [
-            h
-            for h in root_logger.handlers
-            if h.__class__.__name__ == "RotatingFileHandler"
-        ]
+        file_handlers = [h for h in root_logger.handlers if h.__class__.__name__ == "RotatingFileHandler"]
         lg = logging.getLogger(__name__)
         if file_handlers:
             import os
@@ -366,12 +394,12 @@ def init_logging_and_telemetry(settings_path: str | Path | None = None) -> Setti
     except Exception:  # pragma: no cover - diagnostics should never break init
         pass
 
-    if runtime_settings.telemetry.enabled:
-        configure_telemetry(runtime_settings.telemetry)
+    if settings_obj.telemetry.enabled:
+        configure_telemetry(settings_obj.telemetry)
     else:
         disable_telemetry()
 
-    return runtime_settings
+    return settings_obj
 
 
 __all__ = [

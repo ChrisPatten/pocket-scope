@@ -38,18 +38,14 @@ def _load_yaml(path: Path | Traversable) -> Mapping[str, Any]:
         try:
             text = path.read_text(encoding="utf-8")
         except Exception as exc:  # pragma: no cover - pass through as load error
-            raise SettingsLoadError(
-                f"Failed to read settings file: {path}: {exc}"
-            ) from exc
+            raise SettingsLoadError(f"Failed to read settings file: {path}: {exc}") from exc
     else:
         if not path.is_file():
             return {}
         try:
             text = path.read_text(encoding="utf-8")
         except Exception as exc:  # pragma: no cover - pass through as load error
-            raise SettingsLoadError(
-                "Failed to read packaged settings defaults"
-            ) from exc
+            raise SettingsLoadError("Failed to read packaged settings defaults") from exc
     try:
         data = yaml.safe_load(text) or {}
     except Exception as exc:
@@ -116,13 +112,9 @@ class SettingsStore:
         try:
             return Settings.model_validate(data)
         except ValidationError as e:  # Schema validation error
-            raise SettingsLoadError(
-                f"Settings validation failed for {path}: {e}"
-            ) from e
+            raise SettingsLoadError(f"Settings validation failed for {path}: {e}") from e
         except Exception as e:  # Any other unexpected error
-            raise SettingsLoadError(
-                f"Unexpected error validating settings file {path}: {e}"
-            ) from e
+            raise SettingsLoadError(f"Unexpected error validating settings file {path}: {e}") from e
 
     @classmethod
     def save(cls, settings: Settings) -> None:

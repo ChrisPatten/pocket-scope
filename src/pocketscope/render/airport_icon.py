@@ -100,9 +100,7 @@ class AirportIconRenderer:
                 # always reduce
                 reduced_alpha = int(round((ca if ca > 0 else 255) * 0.55))
                 if reduced_alpha >= ca:
-                    reduced_alpha = (
-                        max(0, min(254, ca - 80)) if ca >= 120 else max(30, ca // 2)
-                    )
+                    reduced_alpha = max(0, min(254, ca - 80)) if ca >= 120 else max(30, ca // 2)
                 col = (cr, cg, cb, reduced_alpha)
                 w = max(1, int(line_px - 1))
             else:

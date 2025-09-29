@@ -11,19 +11,13 @@ from typing import Dict, Iterable, Tuple
 class RateLimitFilter(logging.Filter):
     """Token bucket rate limiting per log level."""
 
-    def __init__(
-        self, *, debug_qps: float = 0.0, limits: Dict[int, float] | None = None
-    ) -> None:
+    def __init__(self, *, debug_qps: float = 0.0, limits: Dict[int, float] | None = None) -> None:
         super().__init__()
         self._limits = limits or {}
         if debug_qps:
             self._limits[logging.DEBUG] = debug_qps
-        self._tokens: Dict[int, float] = {
-            level: limit for level, limit in self._limits.items()
-        }
-        self._last_check: Dict[int, float] = {
-            level: time.monotonic() for level in self._limits
-        }
+        self._tokens: Dict[int, float] = {level: limit for level, limit in self._limits.items()}
+        self._last_check: Dict[int, float] = {level: time.monotonic() for level in self._limits}
 
     def filter(self, record: logging.LogRecord) -> bool:
         limit = self._limits.get(record.levelno)
@@ -95,13 +89,10 @@ class RedactionFilter(logging.Filter):
         if isinstance(record.msg, str):
             record.msg = self._apply(record.msg)
         if isinstance(record.args, tuple):
-            record.args = tuple(
-                self._apply(arg) if isinstance(arg, str) else arg for arg in record.args
-            )
+            record.args = tuple(self._apply(arg) if isinstance(arg, str) else arg for arg in record.args)
         elif isinstance(record.args, dict):
             record.args = {
-                key: self._apply(value) if isinstance(value, str) else value
-                for key, value in record.args.items()
+                key: self._apply(value) if isinstance(value, str) else value for key, value in record.args.items()
             }
         return True
 

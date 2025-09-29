@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from typing import Any
+from pathlib import Path
+from typing import Any, Callable, Dict, List, Literal, Optional, cast
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
@@ -13,6 +14,97 @@ from .values import (
     TRACK_SERVICE_DEFAULTS,
     UNITS_ORDER,
 )
+
+# --- Logging and Telemetry models (migrated from settings_schema.py) ---
+
+LogLevel = Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"]
+LogStyle = Literal["json", "human"]
+
+
+class RotateSettings(BaseModel):
+    max_bytes: int = Field(5 * 1024 * 1024, ge=0)
+    backup_count: int = Field(3, ge=0, le=10)
+
+
+class HandlerConfig(BaseModel):
+    enabled: bool = True
+    level: Optional[LogLevel] = None
+    path: Optional[Path] = None
+    rotate: Optional[RotateSettings] = None
+
+    @model_validator(mode="after")
+    def validate_path(self) -> "HandlerConfig":
+        if self.enabled and self.path is not None:
+            try:
+                self.path = Path(self.path).expanduser()
+            except Exception:
+                self.path = Path(self.path)
+        return self
+
+
+class SamplingConfig(BaseModel):
+    debug_qps: int = Field(20, ge=0)
+    duplicate_suppression_window_sec: int = Field(5, ge=0)
+
+
+class RedactionRule(BaseModel):
+    pattern: str
+    replacement: str
+
+
+class LoggingSettings(BaseModel):
+    level: LogLevel = "INFO"
+    style: LogStyle = "json"
+    utc: bool = True
+    propagate: bool = False
+    context_fields: List[str] = Field(
+        default_factory=lambda: [
+            "session_id",
+            "request_id",
+        ]
+    )
+    redactions: List[RedactionRule] = Field(default_factory=list)
+    sampling: SamplingConfig = Field(default_factory=cast(Callable[[], SamplingConfig], SamplingConfig))
+    handlers: Dict[str, HandlerConfig] = Field(default_factory=dict)
+    loggers: Dict[str, LogLevel] = Field(default_factory=dict)
+
+
+class PrometheusExporterSettings(BaseModel):
+    enabled: bool = False
+    host: str = "127.0.0.1"
+    port: int = Field(9100, ge=0, le=65535)
+
+
+class OtlpExporterSettings(BaseModel):
+    enabled: bool = False
+    endpoint: str = "http://127.0.0.1:4317"
+
+
+class ExportersSettings(BaseModel):
+    prometheus: PrometheusExporterSettings = Field(
+        default_factory=cast(Callable[[], PrometheusExporterSettings], PrometheusExporterSettings)
+    )
+    otlp: OtlpExporterSettings = Field(default_factory=cast(Callable[[], OtlpExporterSettings], OtlpExporterSettings))
+
+
+class TelemetryThresholds(BaseModel):
+    gps_stale_sec: int = Field(300, ge=0)
+    decoder_offline_warn_sec: int = Field(3, ge=0)
+    temp_warn_c: int = Field(75, ge=0)
+    temp_crit_c: int = Field(85, ge=0)
+
+
+class TelemetrySettings(BaseModel):
+    enabled: bool = True
+    exporters: ExportersSettings = Field(default_factory=ExportersSettings)
+    fps_target: int = Field(5, ge=1)
+    thresholds: TelemetryThresholds = Field(
+        default_factory=cast(Callable[[], TelemetryThresholds], TelemetryThresholds)
+    )
+    sampler_interval_sec: float = Field(1.0, ge=0.1)
+
+
+# --- end migrated logging/telemetry models ---
 
 _SIDEBAR_MODES = {"vertical_profile", "hotkey_bar", "none"}
 _SIDEBAR_SIDES = {"left", "right"}
@@ -45,9 +137,7 @@ class VerticalProfileSettings(BaseModel):
             allowed = set(cls.model_fields.keys())
             unknown = set(data.keys()) - allowed
             if unknown:
-                raise ValueError(
-                    "Unknown vertical_profile setting(s): " + ", ".join(sorted(unknown))
-                )
+                raise ValueError("Unknown vertical_profile setting(s): " + ", ".join(sorted(unknown)))
         return data
 
     cycle_interval_sec: int = Field(default=60)
@@ -123,11 +213,7 @@ class Settings(BaseModel):
     autoscale_min_range_nm: float | None = Field(default=None)
     autoscale_max_range_nm: float | None = Field(default=None)
     track_length_s: float = Field(
-        default=(
-            TRACK_LENGTH_PRESETS_S[1]
-            if len(TRACK_LENGTH_PRESETS_S) > 1
-            else TRACK_LENGTH_PRESETS_S[0]
-        )
+        default=(TRACK_LENGTH_PRESETS_S[1] if len(TRACK_LENGTH_PRESETS_S) > 1 else TRACK_LENGTH_PRESETS_S[0])
     )
     demo_mode: bool = Field(default=False)
     # Altitude filter band. One of:
@@ -155,15 +241,9 @@ class Settings(BaseModel):
     # supported.
     backlight_pct: float = Field(default=100.0)
     # Typography controls for PPI data-blocks (editable + persisted)
-    label_font_px: int = Field(
-        default=int(PPI_CONFIG.get("typography", {}).get("label_font_px", 12))
-    )
-    label_line_gap_px: int = Field(
-        default=int(PPI_CONFIG.get("typography", {}).get("line_gap_px", 2))
-    )
-    label_block_pad_px: int = Field(
-        default=int(PPI_CONFIG.get("typography", {}).get("block_pad_px", 2))
-    )
+    label_font_px: int = Field(default=int(PPI_CONFIG.get("typography", {}).get("label_font_px", 12)))
+    label_line_gap_px: int = Field(default=int(PPI_CONFIG.get("typography", {}).get("line_gap_px", 2)))
+    label_block_pad_px: int = Field(default=int(PPI_CONFIG.get("typography", {}).get("block_pad_px", 2)))
     # Status overlay font size (separate from PPI label font)
     status_font_px: int = Field(default=12)
     # Optional explicit top/bottom padding for status overlay. When None the
@@ -176,12 +256,15 @@ class Settings(BaseModel):
     softkeys_pad_y: int = Field(default=2)
     # Sector label visibility
     sector_labels: bool = Field(default=True)
+    # Target frames-per-second anchor used by the UI and telemetry/logging
+    # monitoring. This value is the single source-of-truth persisted to
+    # settings.yml and is used throughout the runtime as the target FPS
+    # for pacing, decimation and alert thresholds.
+    target_fps: float = Field(default=10.0)
     # Track expiry window (seconds). When >0, tracks older than this are
     # removed by TrackService. Exposed in settings screen as Track Expiry.
     # Defaults to service default (300s) but may be customized.
-    track_expiry_s: float = Field(
-        default=float(TRACK_SERVICE_DEFAULTS.get("expiry_s", 300.0))
-    )
+    track_expiry_s: float = Field(default=float(TRACK_SERVICE_DEFAULTS.get("expiry_s", 300.0)))
     # Additional airport identifiers to display beyond 3-letter alpha codes.
     # This allows display of airports with numeric or longer identifiers.
     extra_airports: list[str] = Field(default_factory=list)
@@ -189,14 +272,17 @@ class Settings(BaseModel):
     primary_sidebar_mode: str = Field(default="vertical_profile")
     primary_sidebar_side: str = Field(default="right")
     info_blocks_policy: str = Field(default="focus_and_closest")
-    vertical_profile: VerticalProfileSettings = Field(
-        default_factory=VerticalProfileSettings
-    )
+    vertical_profile: VerticalProfileSettings = Field(default_factory=VerticalProfileSettings)
     # Theme selection + per-key overrides (hex strings). Theme palette
     # lookups are handled by ui.theme.ThemeManager. Backward compatible:
     # missing fields fall back to atc_classic with no overrides.
     theme: str = Field(default="atc_classic")
     themeOverrides: dict[str, str] = Field(default_factory=dict)
+    # Unified logging and telemetry configuration. These were previously
+    # defined in a separate settings_schema module; they are embedded here
+    # so a single `settings.yml` contains all runtime configuration.
+    logging: LoggingSettings = Field(default_factory=cast(Callable[[], LoggingSettings], LoggingSettings))
+    telemetry: TelemetrySettings = Field(default_factory=cast(Callable[[], TelemetrySettings], TelemetrySettings))
 
     @model_validator(mode="before")
     @classmethod
@@ -212,16 +298,10 @@ class Settings(BaseModel):
             # user settings.yml so deployments can manage a single file.
             # These keys are ignored by this schema (handled by the separate
             # logging/telemetry settings loader) but must not raise an error.
-            allowed = set(cls.model_fields.keys()) | {
-                "track_length_mode",
-                "logging",
-                "telemetry",
-            }
+            allowed = set(cls.model_fields.keys()) | {"track_length_mode"}
             unknown = set(data.keys()) - allowed
             if unknown:
-                raise ValueError(
-                    "Unknown settings field(s): " + ", ".join(sorted(unknown))
-                )
+                raise ValueError("Unknown settings field(s): " + ", ".join(sorted(unknown)))
         return data
 
     @field_validator("units")
@@ -244,9 +324,7 @@ class Settings(BaseModel):
 
     @field_validator("extra_airports")
     @classmethod
-    def _chk_extra_airports(
-        cls, v: list[str]
-    ) -> list[str]:  # pragma: no cover - trivial
+    def _chk_extra_airports(cls, v: list[str]) -> list[str]:  # pragma: no cover - trivial
         if not isinstance(v, list):
             raise ValueError("extra_airports must be a list")
         result = []
@@ -298,17 +376,12 @@ class Settings(BaseModel):
     def _chk_alt_filter(cls, v: str) -> str:  # pragma: no cover - trivial
         allowed = set(ALTITUDE_FILTER_CYCLE_ORDER)
         if v not in allowed:
-            raise ValueError(
-                "invalid altitude filter: must be one of "
-                + ", ".join(ALTITUDE_FILTER_CYCLE_ORDER)
-            )
+            raise ValueError("invalid altitude filter: must be one of " + ", ".join(ALTITUDE_FILTER_CYCLE_ORDER))
         return v
 
     @field_validator("altitude_min_ft", "altitude_max_ft")
     @classmethod
-    def _chk_alt_bounds(
-        cls, v: float | None
-    ) -> float | None:  # pragma: no cover - trivial
+    def _chk_alt_bounds(cls, v: float | None) -> float | None:  # pragma: no cover - trivial
         if v is None:
             return v
         try:
@@ -334,30 +407,21 @@ class Settings(BaseModel):
     @classmethod
     def _chk_sidebar_mode(cls, v: str) -> str:  # pragma: no cover - trivial
         if v not in _SIDEBAR_MODES:
-            raise ValueError(
-                "invalid primary_sidebar_mode: must be one of "
-                + ", ".join(sorted(_SIDEBAR_MODES))
-            )
+            raise ValueError("invalid primary_sidebar_mode: must be one of " + ", ".join(sorted(_SIDEBAR_MODES)))
         return v
 
     @field_validator("primary_sidebar_side")
     @classmethod
     def _chk_sidebar_side(cls, v: str) -> str:  # pragma: no cover - trivial
         if v not in _SIDEBAR_SIDES:
-            raise ValueError(
-                "invalid primary_sidebar_side: must be one of "
-                + ", ".join(sorted(_SIDEBAR_SIDES))
-            )
+            raise ValueError("invalid primary_sidebar_side: must be one of " + ", ".join(sorted(_SIDEBAR_SIDES)))
         return v
 
     @field_validator("info_blocks_policy")
     @classmethod
     def _chk_info_blocks_policy(cls, v: str) -> str:  # pragma: no cover - trivial
         if v not in _INFO_BLOCK_POLICIES:
-            raise ValueError(
-                "invalid info_blocks_policy: must be one of "
-                + ", ".join(sorted(_INFO_BLOCK_POLICIES))
-            )
+            raise ValueError("invalid info_blocks_policy: must be one of " + ", ".join(sorted(_INFO_BLOCK_POLICIES)))
         return v
 
     @model_validator(mode="after")
@@ -367,17 +431,13 @@ class Settings(BaseModel):
             and self.altitude_max_ft is not None
             and self.altitude_min_ft >= self.altitude_max_ft
         ):
-            raise ValueError(
-                "altitude_min_ft must be < altitude_max_ft when both are set"
-            )
+            raise ValueError("altitude_min_ft must be < altitude_max_ft when both are set")
         if (
             self.autoscale_min_range_nm is not None
             and self.autoscale_max_range_nm is not None
             and self.autoscale_min_range_nm > self.autoscale_max_range_nm
         ):
-            raise ValueError(
-                "autoscale_min_range_nm must be <= autoscale_max_range_nm when both are set"  # noqa:E501
-            )
+            raise ValueError("autoscale_min_range_nm must be <= autoscale_max_range_nm when both are set")  # noqa:E501
         # Migration: if legacy track_length_mode present in input data, map to numeric
         # value using old canonical mapping (short=15, medium=45, long=120) unless
         # user also explicitly set track_length_s.
@@ -392,4 +452,23 @@ class Settings(BaseModel):
                         object.__setattr__(self, "_migrated_track_len", True)
                 except Exception:
                     pass
+        return self
+
+
+# Backwards-compatible container used by the logging/telemetry loader. The
+# project historically validated a minimal schema containing only logging and
+# telemetry keys; keep that behaviour available as `LoggingOnlySettings` so the
+# logging initializer can continue to call `Settings.model_validate(...)` on a
+# compact shape when needed.
+class LoggingOnlySettings(BaseModel):
+    logging: LoggingSettings = Field(default_factory=cast(Callable[[], LoggingSettings], LoggingSettings))
+    telemetry: TelemetrySettings = Field(default_factory=cast(Callable[[], TelemetrySettings], TelemetrySettings))
+
+    @model_validator(mode="after")
+    def normalize_levels(self) -> "LoggingOnlySettings":
+        self.logging.level = self.logging.level.upper()  # type: ignore[assignment]
+        normalized: Dict[str, LogLevel] = {}
+        for name, level in self.logging.loggers.items():
+            normalized[name] = level.upper()  # type: ignore[assignment]
+        self.logging.loggers = normalized
         return self

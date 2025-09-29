@@ -21,6 +21,7 @@ Coordinates and units
 
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass
 from math import cos, isfinite, radians, sin
 from typing import TYPE_CHECKING, Any, Dict, Iterable, List, Optional, Sequence, Tuple
@@ -65,9 +66,7 @@ def _vs_color(vs_fpm: float | None) -> Color:
     if not isinstance(vs_fpm, (int, float)) or not isfinite(float(vs_fpm)):
         return _VS_COLOR_NEUTRAL
     mag = max(-_VS_CLAMP_ABS_FPM, min(_VS_CLAMP_ABS_FPM, float(vs_fpm)))
-    t = (mag + _VS_CLAMP_ABS_FPM) / (
-        2.0 * _VS_CLAMP_ABS_FPM
-    )  # [-clamp,+clamp] -> [0,1]
+    t = (mag + _VS_CLAMP_ABS_FPM) / (2.0 * _VS_CLAMP_ABS_FPM)  # [-clamp,+clamp] -> [0,1]
     r = int(round(_VS_COLOR_NEG[0] + t * (_VS_COLOR_POS[0] - _VS_COLOR_NEG[0])))
     g = int(round(_VS_COLOR_NEG[1] + t * (_VS_COLOR_POS[1] - _VS_COLOR_NEG[1])))
     b = int(round(_VS_COLOR_NEG[2] + t * (_VS_COLOR_POS[2] - _VS_COLOR_NEG[2])))
@@ -123,9 +122,7 @@ def _runway_length_bearing(geometry: Any) -> tuple[float | None, float | None]:
     return (max_nm * _M_PER_NM, bearing)
 
 
-def _prepare_runway_icons(
-    runways: Sequence[Dict[str, Any]]
-) -> dict[str, list[Dict[str, Any]]]:
+def _prepare_runway_icons(runways: Sequence[Dict[str, Any]]) -> dict[str, list[Dict[str, Any]]]:
     grouped: dict[str, list[Dict[str, Any]]] = {}
     for rw in runways:
         ident = rw.get("airport_ident")
@@ -199,6 +196,18 @@ class PpiView:
         label_line_gap_px: int = 2,
         label_block_pad_px: int = 2,
         range_rings: Optional[Sequence[float]] = None,
+        # Geometry decimation controls (adaptive throttling of expensive
+        # static geometry projection / simplification). When enabled, state
+        # border geometry is only recomputed every N frames (adaptive) while
+        # still drawn each frame from a cached screen‑space copy. Dynamic
+        # elements (tracks, labels, rings) are unaffected.
+        geom_decimation_enabled: bool = True,
+        geom_target_refresh_fps: float = 2.0,
+        # Base pixel tolerance for state border simplification (Douglas-Peucker).
+        # Default was previously hard-coded (1.5). Exposed so small / thin
+        # states (e.g., RI, NH) can retain more detail. Effective per-ring
+        # tolerance may be further reduced automatically for very small rings.
+        simplify_base_px: float = 0.7,
     ) -> None:
         self.range_nm = float(range_nm)
         if rotation_deg == 0.0 and isinstance(PPI_CONFIG, dict):
@@ -210,9 +219,7 @@ class PpiView:
         self.show_airports = bool(show_airports)
         self.show_sector_labels = bool(show_sector_labels)
         # Data-block typography (allow config overrides when not explicitly passed)
-        ty_cfg = (
-            PPI_CONFIG.get("typography", {}) if isinstance(PPI_CONFIG, dict) else {}
-        )
+        ty_cfg = PPI_CONFIG.get("typography", {}) if isinstance(PPI_CONFIG, dict) else {}
         if label_font_px == 12:
             label_font_px = int(ty_cfg.get("label_font_px", label_font_px))
         if label_line_gap_px == 2:
@@ -225,6 +232,33 @@ class PpiView:
         # Optional explicit ring distances (NM). If not provided we auto-compute
         # a concise set of 2–5 "nice" rings terminating at the configured range.
         self._explicit_rings = [float(r) for r in range_rings] if range_rings else None
+        # Most recent fine-grained timing data (ms) populated by draw().
+        self.last_detail_timings: dict[str, float] = {}
+        # ------------------------------------------------------------------
+        # Geometry decimation state (private) --------------------------------
+        import os as _os  # local import to avoid polluting module globals
+
+        self._geom_decimation_enabled = bool(geom_decimation_enabled)
+        if _os.environ.get("POCKETSCOPE_DISABLE_GEOM_DECIM"):
+            self._geom_decimation_enabled = False
+        self._geom_target_refresh_fps = max(0.2, float(geom_target_refresh_fps))
+        self._geom_frame_index = 0
+        self._geom_last_update_frame = -1
+        self._geom_interval = 1  # adaptive frames between rebuilds
+        self._geom_last_draw_ts = None  # type: Optional[float]
+        self._geom_recent_dts: list[float] = []  # sliding window for fps est.
+        self._state_screen_cache: list[list[tuple[int, int]]] | None = None
+        self._state_cache_signature: tuple[int, int] | None = None
+        self._geom_last_rotation: float | None = None
+        self.last_geom_decimation_stats: dict[str, int | float | bool] = {}
+        # Simplification configuration -------------------------------------------------
+        try:
+            env_base = _os.environ.get("POCKETSCOPE_SIMPLIFY_BASE_PX")
+            if env_base is not None:
+                simplify_base_px = float(env_base)
+        except Exception:
+            pass
+        self._simplify_base_px = max(0.1, float(simplify_base_px))
 
     # ---------------------------------------------------------------------
     def _auto_range_rings(self) -> List[float]:
@@ -368,11 +402,7 @@ class PpiView:
         # (z-index 1) can avoid them even though rings (2) and their labels (3)
         # are drawn later.
         range_ring_exclusions: list[tuple[int, int, int, int]] = []
-        ring_ticks = (
-            list(self._explicit_rings)
-            if self._explicit_rings is not None
-            else self._auto_range_rings()
-        )
+        ring_ticks = list(self._explicit_rings) if self._explicit_rings is not None else self._auto_range_rings()
         ring_radii: list[int] = []  # circles to draw at z-index 2
         ring_label_specs: list[tuple[int, int, str]] = []  # (x,y,text) for z-index 3
         if ring_ticks:
@@ -383,11 +413,7 @@ class PpiView:
                 ring_radii.append(r_px)
                 if self.show_text_annotations:
                     label_text = f"{int(nm)}nm"
-                    rr_cfg = (
-                        PPI_CONFIG.get("range_ring_label", {})
-                        if isinstance(PPI_CONFIG, dict)
-                        else {}
-                    )
+                    rr_cfg = PPI_CONFIG.get("range_ring_label", {}) if isinstance(PPI_CONFIG, dict) else {}
                     label_x = cx + r_px + int(rr_cfg.get("offset_x_px", 4))
                     label_y = cy + int(rr_cfg.get("offset_y_px", -8))
                     ring_label_specs.append((label_x, label_y, label_text))
@@ -405,11 +431,27 @@ class PpiView:
                         )
                     )
 
+        # ------------------------------------------------------------------
+        # Fine‑grained timing: we accumulate per-stage durations so the UI
+        # controller can surface which internal rendering steps dominate on
+        # constrained hardware (e.g. Pi). We purposefully keep this light:
+        # a handful of perf_counter() calls vs. multi‑stage nesting. The
+        # overhead (<50µs typical) is negligible relative to the multi‑ms
+        # costs we are investigating.
+        # Stages (in order): sectors, states, airports, rings, cardinals,
+        # ownship, trails, glyphs, simple_labels, data_blocks.
+        _detail_stage_start = time.perf_counter()
+        _detail: dict[str, float] = {}
+
+        def _mark(stage: str) -> None:
+            nonlocal _detail_stage_start
+            now_d = time.perf_counter()
+            _detail[stage] = now_d - _detail_stage_start
+            _detail_stage_start = now_d
+
         map_airports = map_data.get("airports") if map_data else []
         runways_source = map_data.get("runways") if map_data else []
-        runways_by_ident = (
-            _prepare_runway_icons(runways_source) if runways_source else {}
-        )
+        runways_by_ident = _prepare_runway_icons(runways_source) if runways_source else {}
 
         # z-index 0: Sectors (drawn first so state borders can be drawn above).
         if sectors:
@@ -432,26 +474,90 @@ class PpiView:
                 )
             except Exception:
                 pass
+        _mark("sectors")
 
         # z-index 1: US state / regional boundaries (now drawn above sectors so
         # sector lines no longer completely mask borders when they coincide).
         # Only the exterior rings of Polygon / MultiPolygon geometries are
         # rendered (holes ignored). We keep the logic local but refactored
         # into a small helper for clarity.
+        # Geometry decimation integration for state borders -----------------
+        import time as _time
+
+        self._geom_frame_index += 1
+        now_ts = _time.perf_counter()
+        if self._geom_last_draw_ts is not None:
+            dt = now_ts - self._geom_last_draw_ts
+            if dt > 0:
+                self._geom_recent_dts.append(dt)
+                if len(self._geom_recent_dts) > 120:  # keep bounded (~2s @60fps)
+                    self._geom_recent_dts = self._geom_recent_dts[-120:]
+        self._geom_last_draw_ts = now_ts
+        actual_fps = 0.0
+        if self._geom_recent_dts:
+            total_dt = sum(self._geom_recent_dts)
+            if total_dt > 0:
+                actual_fps = len(self._geom_recent_dts) / total_dt
+        # Adaptive rebuild interval + dynamic simplification factor.
+        # Previous logic only throttled rebuilds when FPS was already ABOVE
+        # target*1.2 which meant during low FPS the expensive state geometry
+        # still rebuilt every frame. Invert the policy so when we are below
+        # target we stretch the interval to reduce CPU load and (hopefully)
+        # allow FPS to recover.
+        dyn_factor = 0.5  # scaling for simplification tolerance
+        if self._geom_decimation_enabled and actual_fps > 0.0:
+            target = self._geom_target_refresh_fps
+            if actual_fps >= target:  # healthy -> rebuild each frame (interval=1)
+                self._geom_interval = 1
+            else:
+                # Scale interval roughly with deficit; cap to avoid stale geometry.
+                # Eg target=2, fps=0.5 => ratio=4 -> interval=4 (rebuild every 4 frames)
+                ratio = target / max(0.01, actual_fps)
+                self._geom_interval = max(2, min(int(round(ratio)), 60))
+                # Increase simplification tolerance when struggling; clamp growth.
+                dyn_factor = min(8.0, max(1.0, ratio))
+        else:
+            self._geom_interval = 1
+        # Age (frames since last rebuild) tracked for stats only.
+        age_frames = self._geom_frame_index - self._geom_last_update_frame if self._geom_last_update_frame >= 0 else 0
         map_states = map_data.get("states") if map_data else []
+        state_vertices_raw = 0
+        state_vertices_out = 0
+        performed_rebuild = False
+        # Signature of current map states (count + id of first element) to detect change
+        try:
+            _ms_list = list(map_states) if map_states else []
+            state_sig = (len(_ms_list), id(_ms_list[0]) & 0xFFFF if _ms_list else 0)
+        except Exception:
+            state_sig = (0, 0)
+        need_rebuild = False
+        if self._state_screen_cache is None:
+            need_rebuild = True
+        elif self._state_cache_signature != state_sig:
+            need_rebuild = True
+        elif (self._geom_frame_index - self._geom_last_update_frame) >= self._geom_interval:
+            need_rebuild = True
+        if not self._geom_decimation_enabled:
+            need_rebuild = True
+        if self._geom_last_rotation is None or abs(self._geom_last_rotation - self.rotation_deg) >= 0.5:
+            need_rebuild = True
         if map_states:
             try:
                 try:
                     _border_color = ThemeManager.color("map.border")
                 except Exception:  # pragma: no cover - defensive fallback
                     _border_color = (64, 96, 64, 255)
-
                 from math import cos as _cos
                 from math import radians as _radians
                 from math import sin as _sin
 
                 _phi = -_radians(self.rotation_deg % 360.0)
                 _ce, _se = _cos(_phi), _sin(_phi)
+                # Fine-grained profiling accumulators for states rebuild
+                states_simplify_dur = 0.0
+                states_project_dur = 0.0
+                states_rings_total = 0
+                states_rings_kept = 0
 
                 def _to_screen_state(lat: float, lon: float) -> tuple[int, int]:
                     tx, ty, tz = geodetic_to_ecef(lat, lon, 0.0)
@@ -459,10 +565,8 @@ class PpiView:
                     if (self.rotation_deg % 360.0) != 0.0:
                         er = e * _ce - n * _se
                         nr = e * _se + n * _ce
-                        e2, n2 = er, nr
-                    else:
-                        e2, n2 = e, n
-                    sx, sy = enu_to_screen(e2, n2, m_per_px)
+                        e, n = er, nr
+                    sx, sy = enu_to_screen(e, n, m_per_px)
                     return (int(round(cx + sx)), int(round(cy + sy)))
 
                 def _exterior_rings(geom: Any) -> list[list[tuple[float, float]]]:
@@ -490,11 +594,7 @@ class PpiView:
                                     rings_out.append(pts)
                     elif gtype == "MultiPolygon" and isinstance(coords, list):
                         for poly in coords:
-                            if (
-                                isinstance(poly, list)
-                                and poly
-                                and isinstance(poly[0], list)
-                            ):
+                            if isinstance(poly, list) and poly and isinstance(poly[0], list):
                                 ring = poly[0]
                                 if isinstance(ring, list):
                                     pts2: list[tuple[float, float]] = []
@@ -529,34 +629,254 @@ class PpiView:
                         lat_c = 0.0
                     return (nm, float(lon_c), float(lat_c))
 
-                for st in sorted(map_states, key=_state_sort_key):
-                    try:
-                        geom = st.get("geometry") if isinstance(st, dict) else None
-                        if not geom:
-                            continue
-                        rings = _exterior_rings(geom)
-                        for ring in rings:
-                            keep = False
-                            for lat_pt, lon_pt in ring:
-                                d_nm = haversine_nm(
-                                    center_lat, center_lon, lat_pt, lon_pt
-                                )
-                                if d_nm <= (2.0 * self.range_nm):
-                                    keep = True
-                                    break
-                            if not keep:
+                if need_rebuild:
+                    performed_rebuild = True
+                    from pocketscope.render.geo_cache import global_cache
+
+                    global_cache()
+                    new_cache: list[list[tuple[int, int]]] = []
+                    kept_state_names: list[str] = []  # instrumentation
+                    for st in sorted(map_states, key=_state_sort_key):
+                        try:
+                            geom = st.get("geometry") if isinstance(st, dict) else None
+                            if not geom:
                                 continue
-                            pts_screen: list[tuple[int, int]] = []
-                            for lat_pt, lon_pt in ring:
-                                pts_screen.append(_to_screen_state(lat_pt, lon_pt))
-                            if pts_screen and pts_screen[0] != pts_screen[-1]:
-                                pts_screen.append(pts_screen[0])
-                            canvas.polyline(pts_screen, width=1, color=_border_color)
+                            rings = _exterior_rings(geom)
+                            for ring in rings:
+                                states_rings_total += 1
+                                state_vertices_raw += len(ring)
+                                # Inclusion strategy (simplified & robust): Always build ENU point list
+                                # and test against (range_m * 1.02) margin.
+                                # Keep if:
+                                #  a) any vertex is inside radius
+                                #  b) any segment comes within radius of origin
+                                #  c) origin lies inside polygon (ray cast)
+                                # This avoids false negatives introduced by earlier bbox shortcut.
+                                keep = False
+                                try:
+                                    if len(ring) < 3:
+                                        continue
+                                    r_m = range_m * 1.02  # small margin
+                                    r2 = r_m * r_m
+                                    en_pts: list[tuple[float, float]] = []
+                                    for lat_pt, lon_pt in ring:
+                                        tx, ty, tz = geodetic_to_ecef(lat_pt, lon_pt, 0.0)
+                                        e1, n1, _ = ecef_to_enu(tx, ty, tz, center_lat, center_lon, 0.0)
+                                        en_pts.append((e1, n1))
+                                        if (e1 * e1 + n1 * n1) <= r2:
+                                            keep = True
+                                    if not keep:
+                                        # Segment-circle distance
+                                        for i in range(len(en_pts)):
+                                            x1, y1 = en_pts[i]
+                                            x2, y2 = en_pts[(i + 1) % len(en_pts)]
+                                            dx = x2 - x1
+                                            dy = y2 - y1
+                                            seg_len2 = dx * dx + dy * dy
+                                            if seg_len2 <= 1e-12:
+                                                d2 = x1 * x1 + y1 * y1
+                                            else:
+                                                t = -(x1 * dx + y1 * dy) / seg_len2
+                                                if t < 0:
+                                                    px, py = x1, y1
+                                                elif t > 1:
+                                                    px, py = x2, y2
+                                                else:
+                                                    px = x1 + t * dx
+                                                    py = y1 + t * dy
+                                                d2 = px * px + py * py
+                                            if d2 <= r2:
+                                                keep = True
+                                                break
+                                    if not keep and len(en_pts) >= 3:
+                                        # Point-in-polygon (origin inside)
+                                        crossings = 0
+                                        for i in range(len(en_pts)):
+                                            x1, y1 = en_pts[i]
+                                            x2, y2 = en_pts[(i + 1) % len(en_pts)]
+                                            if (y1 <= 0 < y2) or (y2 <= 0 < y1):
+                                                try:
+                                                    x_int = x1 + (0 - y1) * (x2 - x1) / (y2 - y1)
+                                                except Exception:
+                                                    x_int = x1
+                                                if x_int >= 0:
+                                                    crossings += 1
+                                        if (crossings % 2) == 1:
+                                            keep = True
+                                    if not keep:
+                                        continue
+                                except Exception:
+                                    keep = True  # never drop on error
+                                states_rings_kept += 1
+                                try:
+                                    kept_state_names.append(str(st.get("name", "?")))
+                                except Exception:
+                                    pass
+
+                                def _simplify(r: list[tuple[float, float]]) -> list[tuple[float, float]]:
+                                    if len(r) < 6:
+                                        return r
+                                    # Adaptive tolerance:
+                                    # Start from configured base pixel tolerance then scale by
+                                    # dyn_factor (higher when FPS low) BUT also shrink for small
+                                    # geographic extents so thin / small states retain shape.
+                                    base_px = self._simplify_base_px
+                                    px_tol = base_px * dyn_factor
+                                    # Estimate on-screen bounding box (approx) by projecting a few points early.
+                                    # We'll approximate geographic size first to avoid extra projections.
+                                    min_lat = min(p[0] for p in r)
+                                    max_lat = max(p[0] for p in r)
+                                    min_lon = min(p[1] for p in r)
+                                    max_lon = max(p[1] for p in r)
+                                    # Rough width/height meters (lat ~111km/deg, lon scaled by cos(lat)).
+                                    try:
+                                        import math as _math
+
+                                        lat_mid = (min_lat + max_lat) * 0.5
+                                        m_per_deg_lat = 111_320.0
+                                        m_per_deg_lon = 111_320.0 * _math.cos(_math.radians(lat_mid))
+                                        est_w_m = max(1.0, (max_lon - min_lon) * m_per_deg_lon)
+                                        est_h_m = max(1.0, (max_lat - min_lat) * m_per_deg_lat)
+                                        est_max_dim_px = max(est_w_m, est_h_m) / m_per_px
+                                        # If the max dimension is small on screen, tighten tolerance.
+                                        if est_max_dim_px < 80:
+                                            scale = max(0.15, est_max_dim_px / 80.0)  # 0..1 -> 0.15..1
+                                            px_tol *= scale
+                                        if est_max_dim_px < 30:
+                                            px_tol *= 0.5  # further tighten for very tiny states
+                                    except Exception:
+                                        pass
+                                    # Safety clamp: never exceed 8 * base nor drop below 0.2 px
+                                    px_tol = max(0.2, min(px_tol, self._simplify_base_px * 8.0))
+                                    tol_m = px_tol * m_per_px
+                                    lat0, lon0 = r[0]
+                                    en_pts: list[tuple[float, float]] = []
+                                    ge0x, ge0y, ge0z = geodetic_to_ecef(lat0, lon0, 0.0)
+                                    for la, lo in r:
+                                        tx, ty, tz = geodetic_to_ecef(la, lo, 0.0)
+                                        e1, n1, _ = ecef_to_enu(tx, ty, tz, lat0, lon0, 0.0)
+                                        en_pts.append((e1, n1))
+                                    import math as _math
+
+                                    def _dist(a: tuple[float, float], b: tuple[float, float]) -> float:
+                                        return _math.hypot(a[0] - b[0], a[1] - b[1])
+
+                                    def _rdp(indices: list[int]) -> list[int]:
+                                        if len(indices) <= 2:
+                                            return indices
+                                        first, last = indices[0], indices[-1]
+                                        a = en_pts[first]
+                                        b = en_pts[last]
+                                        seg_len = _dist(a, b)
+                                        max_d = -1.0
+                                        max_i = None
+                                        for i in indices[1:-1]:
+                                            p = en_pts[i]
+                                            if seg_len == 0:
+                                                d = _dist(a, p)
+                                            else:
+                                                num = abs((b[0] - a[0]) * (a[1] - p[1]) - (a[0] - p[0]) * (b[1] - a[1]))
+                                                d = num / max(1e-12, seg_len)
+                                            if d > max_d:
+                                                max_d = d
+                                                max_i = i
+                                        if max_d > tol_m and max_i is not None:
+                                            left = _rdp(indices[: indices.index(max_i) + 1])
+                                            right = _rdp(indices[indices.index(max_i) :])
+                                            return left[:-1] + right
+                                        return [first, last]
+
+                                    keep_idx = sorted(set(_rdp(list(range(len(en_pts))))))
+                                    # Minimum retention rule: for tiny polygons keep at least 12 vertices
+                                    # (or 40% of original) to avoid visual collapse.
+                                    min_keep = min(12, max(3, int(len(r) * 0.4)))
+                                    if len(keep_idx) < min_keep:
+                                        return r
+                                    if len(keep_idx) >= 3 and len(keep_idx) < len(r):
+                                        return [r[i] for i in keep_idx]
+                                    return r
+
+                                _t_simp_start = time.perf_counter()
+                                ring_s = _simplify(ring)
+                                states_simplify_dur += time.perf_counter() - _t_simp_start
+                                state_vertices_out += len(ring_s)
+
+                                def _build_state() -> list[list[tuple[int, int]]]:
+                                    _t_proj_start = time.perf_counter()
+                                    pts_screen: list[tuple[int, int]] = []
+                                    for lat_pt, lon_pt in ring_s:
+                                        pts_screen.append(_to_screen_state(lat_pt, lon_pt))
+                                    if pts_screen and pts_screen[0] != pts_screen[-1]:
+                                        pts_screen.append(pts_screen[0])
+                                    nonlocal states_project_dur
+                                    states_project_dur += time.perf_counter() - _t_proj_start
+                                    return [pts_screen]
+
+                                from pocketscope.render.geo_cache import global_cache
+
+                                # Use per-ring cache key so MultiPolygon states with multiple
+                                # disjoint exteriors (e.g., MI) build each ring geometry.
+                                entry = global_cache().get_or_build(
+                                    layer="states",
+                                    obj_id=f"{st.get('name','?')}:{states_rings_kept}",
+                                    range_nm=float(self.range_nm),
+                                    rotation_deg=float(self.rotation_deg),
+                                    center_lat=float(center_lat),
+                                    center_lon=float(center_lon),
+                                    display_px=(w, h),
+                                    m_per_px=m_per_px,
+                                    build_fn=_build_state,
+                                )
+                                pts_screen = entry.screen_pts[0]
+                                canvas.polyline(pts_screen, width=1, color=_border_color)
+                                new_cache.append(list(pts_screen))
+                        except Exception:
+                            continue
+                    self._state_screen_cache = new_cache
+                    self._state_cache_signature = state_sig
+                    self._geom_last_update_frame = self._geom_frame_index
+                    self._geom_last_rotation = self.rotation_deg
+                    # Store detailed rebuild stats for controller logging
+                    self.last_state_rebuild_stats = {
+                        "rings_total": states_rings_total,
+                        "rings_kept": states_rings_kept,
+                        "simplify_ms": round(states_simplify_dur * 1000.0, 3),
+                        "project_ms": round(states_project_dur * 1000.0, 3),
+                    }
+                    # Expose kept state names (deduplicated, truncated for safety) for higher-level logging.
+                    try:
+                        self.last_state_names_drawn = list(dict.fromkeys(kept_state_names))[:128]
                     except Exception:
-                        continue
+                        self.last_state_names_drawn = []
+                else:
+                    # Reuse cached screen space polylines
+                    if self._state_screen_cache:
+                        for poly in self._state_screen_cache:
+                            if len(poly) >= 2:
+                                try:
+                                    canvas.polyline(poly, width=1, color=_border_color)
+                                except Exception:
+                                    pass
             except Exception:
                 pass
-
+        _mark("states")
+        # Save per-frame stats for logging
+        self.last_state_vertex_stats = {
+            "state_vertices_raw": state_vertices_raw,
+            "state_vertices_out": state_vertices_out,
+        }
+        # Record decimation snapshot for controller logging
+        self.last_geom_decimation_stats = {
+            "enabled": self._geom_decimation_enabled,
+            "interval": self._geom_interval,
+            "age": age_frames,
+            "rebuild": 1 if performed_rebuild else 0,
+            "dyn_factor": round(dyn_factor, 2),
+        }
+        if not need_rebuild:
+            # On non-rebuild frames preserve last rebuild stats so controller can still report.
+            if not hasattr(self, "last_state_rebuild_stats"):
+                self.last_state_rebuild_stats = {}
         # z-index 2: Airports
         if self.show_airports and map_airports:
             try:
@@ -576,12 +896,12 @@ class PpiView:
                 )
             except Exception:
                 pass
+        _mark("airports")
 
         # z-index 3: Range rings (circles only)
         for r_px in ring_radii:
-            canvas.circle(
-                (cx, cy), r_px, width=1, color=ThemeManager.color("range.ring")
-            )
+            canvas.circle((cx, cy), r_px, width=1, color=ThemeManager.color("range.ring"))
+        _mark("rings")
 
         # z-index 4: Range ring labels
         if ring_label_specs:
@@ -643,20 +963,18 @@ class PpiView:
         _draw_cardinal(90.0, "E")
         _draw_cardinal(180.0, "S")
         _draw_cardinal(270.0, "W")
+        _mark("cardinals")
 
         # z-index 5/6: ownship base marker (below trails/markers for consistency)
         try:
-            canvas.filled_circle(
-                (cx, cy), 2, color=ThemeManager.color("ac.level.stroke")
-            )  # ownship center
+            canvas.filled_circle((cx, cy), 2, color=ThemeManager.color("ac.level.stroke"))  # ownship center
         except Exception:
             # Fallback: smallest circle
             try:
-                canvas.filled_circle(
-                    (cx, cy), 1, color=ThemeManager.color("ac.level.stroke")
-                )
+                canvas.filled_circle((cx, cy), 1, color=ThemeManager.color("ac.level.stroke"))
             except Exception:
                 pass
+        _mark("ownship")
 
         # Origin for ENU conversion
         _ox, _oy, _oz = geodetic_to_ecef(center_lat, center_lon, 0.0)
@@ -678,9 +996,7 @@ class PpiView:
             return int(round(cx + x)), int(round(cy + y))
 
         # Optional data-block label machinery
-        label_candidates: list[
-            tuple[int, tuple[int, int], tuple[str, str, str], bool]
-        ] = []
+        label_candidates: list[tuple[int, tuple[int, int], tuple[str, str, str], bool]] = []
         label_formatter: LabelFormatter | None = None
         label_layout: LabelLayout | None = None
         if self.show_data_blocks:
@@ -697,7 +1013,7 @@ class PpiView:
         # ALL trails regardless of per-track ordering. This satisfies the
         # requirement that aircraft markers are always on top of any tracks.
         _tracks = list(tracks)
-        _tracks.sort(key=lambda t: ((t.callsign or ""), t.icao))
+        _tracks.sort(key=lambda trk: ((trk.callsign or ""), trk.icao))
 
         # Precompute screen position and visibility for labels; store geometry
         from typing import List as _List
@@ -710,8 +1026,8 @@ class PpiView:
             visible_for_label: bool
 
         precomp: _List[_Precomp] = []
-        for t in _tracks:
-            gx, gy = to_screen(t.lat, t.lon)
+        for trk in _tracks:
+            gx, gy = to_screen(trk.lat, trk.lon)
             visible_for_label = True
             if self.show_data_blocks:
                 if not (0 <= gx < w and 0 <= gy < h):
@@ -728,7 +1044,7 @@ class PpiView:
                                 break
             precomp.append(
                 {
-                    "track": t,
+                    "track": trk,
                     "gx": gx,
                     "gy": gy,
                     "visible_for_label": visible_for_label,
@@ -737,11 +1053,11 @@ class PpiView:
 
         # Pass 1: trails (z=5)
         for pc in precomp:
-            t = pc["track"]
-            if not t.trail_enu:
+            track = pc["track"]
+            if not track.trail_enu:
                 continue
             pts: List[Tuple[int, int]] = []
-            for e, n in t.trail_enu:
+            for e, n in track.trail_enu:
                 x, y = _enu_to_screen_rot(e, n)
                 pts.append((int(round(cx + x)), int(round(cy + y))))
             # Fade trail oldest -> background, keeping the most recent (head-adjacent)
@@ -750,9 +1066,7 @@ class PpiView:
             # by reversing the interpolation factor.
             if len(pts) < 2:
                 continue
-            head_rgba = ThemeManager.track_speed_color(
-                getattr(t, "ground_speed_kt", None)
-            )
+            head_rgba = ThemeManager.track_speed_color(getattr(track, "ground_speed_kt", None))
             bg_rgba = ThemeManager.color("bg")
             hr, hg, hb, ha = head_rgba
             br, bg_, bb, ba = bg_rgba
@@ -767,11 +1081,12 @@ class PpiView:
                 # progress: 0 => oldest, 1 => newest. We lerp bg->head by progress
                 denom = max(1, segs - 1)
                 progress = i / denom
-                r = int(br + (hr - br) * progress)
-                g = int(bg_ + (hg - bg_) * progress)
-                b = int(bb + (hb - bb) * progress)
-                a = int(ba + (ha - ba) * progress)
-                canvas.line(pts[i], pts[i + 1], width=trail_width, color=(r, g, b, a))
+                rr = int(br + (hr - br) * progress)
+                gg = int(bg_ + (hg - bg_) * progress)
+                bb2 = int(bb + (hb - bb) * progress)
+                aa = int(ba + (ha - ba) * progress)
+                canvas.line(pts[i], pts[i + 1], width=trail_width, color=(rr, gg, bb2, aa))
+        _mark("trails")
 
         # Pass 2: glyphs (z=6) & labels
         # Track vertical rate by glyph anchor so we can colorize info blocks
@@ -781,7 +1096,7 @@ class PpiView:
         # Each entry: (gx, gy, text, focused, arrow_symbol, arrow_color_key)
         simple_label_candidates: list[tuple[int, int, str, bool, str, str | None]] = []
         for pc in precomp:
-            t = pc["track"]
+            track = pc["track"]
             gx = pc["gx"]
             gy = pc["gy"]
             visible_for_label = pc["visible_for_label"]
@@ -790,16 +1105,16 @@ class PpiView:
             # (Previously varied by climb/desc status; simplified per request.)
             fill_color = ThemeManager.color("ac.level.fill")
             stroke_color = ThemeManager.color("ac.level.stroke")
-            if t.pinned:
+            if track.pinned:
                 stroke_color = ThemeManager.color("ac.pinned.stroke")
-            if t.focused:
+            if track.focused:
                 stroke_color = ThemeManager.color("ac.focus.stroke")
 
-            if t.course_deg is not None:
+            if track.course_deg is not None:
                 if (self.rotation_deg % 360.0) == 0.0:
-                    rad = radians(t.course_deg)
+                    rad = radians(track.course_deg)
                 else:
-                    rad = radians((t.course_deg + self.rotation_deg) % 360.0)
+                    rad = radians((track.course_deg + self.rotation_deg) % 360.0)
                 dx_f: float = sin(rad)
                 dy_f: float = -cos(rad)
                 size = 5
@@ -825,46 +1140,41 @@ class PpiView:
                 if stroke_color != fill_color:
                     canvas.circle((gx, gy), 3, width=1, color=stroke_color)
 
-            if (
-                self.show_data_blocks
-                and label_formatter is not None
-                and visible_for_label
-                and t.info_block_visible
-            ):
+            if self.show_data_blocks and label_formatter is not None and visible_for_label and track.info_block_visible:
                 ls = LabelTrack(
-                    icao24=t.icao,
-                    callsign=t.callsign,
-                    lat=t.lat,
-                    lon=t.lon,
-                    geo_alt_ft=t.geo_alt_ft,
-                    baro_alt_ft=t.baro_alt_ft,
-                    ground_speed_kt=t.ground_speed_kt,
-                    vertical_rate_fpm=t.vertical_rate_fpm,
+                    icao24=track.icao,
+                    callsign=track.callsign,
+                    lat=track.lat,
+                    lon=track.lon,
+                    geo_alt_ft=track.geo_alt_ft,
+                    baro_alt_ft=track.baro_alt_ft,
+                    ground_speed_kt=track.ground_speed_kt,
+                    vertical_rate_fpm=track.vertical_rate_fpm,
                     emitter_type=None,
-                    pinned=bool(t.pinned),
-                    focused=bool(t.focused),
+                    pinned=bool(track.pinned),
+                    focused=bool(track.focused),
                 )
                 lines = label_formatter.format_standard(ls)
                 dist2 = (gx - cx) * (gx - cx) + (gy - cy) * (gy - cy)
                 label_candidates.append((dist2, (gx, gy), lines, False))
-                anchor_vs[(gx, gy)] = getattr(t, "vertical_rate_fpm", None)
+                anchor_vs[(gx, gy)] = getattr(track, "vertical_rate_fpm", None)
             else:
                 if self.show_simple_labels:
                     # Collect simple one-line label candidates. Augment with
                     # a vertical speed arrow (colored) for non-focused aircraft.
-                    label_text = t.callsign or t.icao
-                    vs = getattr(t, "vertical_rate_fpm", None)
+                    label_text = track.callsign or track.icao
+                    vs = getattr(track, "vertical_rate_fpm", None)
                     arrow_symbol = ""
                     arrow_color_key: str | None = None
                     # New behavior: suppress simple labels for non-focused
                     # aircraft that are effectively level (no significant
                     # climb/descent). We treat +/-200 fpm as the deadband
                     # consistent with arrow logic.
-                    if not t.focused:
+                    if not track.focused:
                         if not isinstance(vs, (int, float)) or -200 < float(vs) < 200:
                             # Skip adding a label for level, non-focused acft.
                             continue
-                    if not t.focused and isinstance(vs, (int, float)):
+                    if not track.focused and isinstance(vs, (int, float)):
                         try:
                             if vs > 200:
                                 arrow_symbol = "▲"  # climb
@@ -881,11 +1191,12 @@ class PpiView:
                             gx,
                             gy,
                             label_text,
-                            bool(t.focused),
+                            bool(track.focused),
                             arrow_symbol,
                             arrow_color_key,
                         )
                     )
+        _mark("glyphs")
 
         # ------------------------------------------------------------------
         # Simple label collision + halo rendering (z=7 just below data blocks)
@@ -895,9 +1206,7 @@ class PpiView:
             # for minimal movement), then text, then anchor.
             # simple_label_candidates entries:
             # (ax, ay, text, focused, arrow_symbol, arrow_color_key)
-            simple_label_candidates.sort(
-                key=lambda it: (not it[3], it[2], it[0], it[1])
-            )
+            simple_label_candidates.sort(key=lambda it: (not it[3], it[2], it[0], it[1]))
             char_w = max(6, int(round(self.label_font_px * 0.6)))
             label_h = self.label_font_px
             occupied: list[tuple[int, int, int, int]] = []  # placed label rects
@@ -910,22 +1219,14 @@ class PpiView:
                 if (ax, ay) in seen_glyphs:
                     continue
                 seen_glyphs.add((ax, ay))
-                occupied.append(
-                    (ax - glyph_half, ay - glyph_half, glyph_size, glyph_size)
-                )
+                occupied.append((ax - glyph_half, ay - glyph_half, glyph_size, glyph_size))
 
-            def _intersects(
-                a: tuple[int, int, int, int], b: tuple[int, int, int, int]
-            ) -> bool:
+            def _intersects(a: tuple[int, int, int, int], b: tuple[int, int, int, int]) -> bool:
                 ax, ay, aw, ah = a
                 bx, by, bw, bh = b
-                return not (
-                    ax + aw <= bx or bx + bw <= ax or ay + ah <= by or by + bh <= ay
-                )
+                return not (ax + aw <= bx or bx + bw <= ax or ay + ah <= by or by + bh <= ay)
 
-            placements_simple: list[
-                tuple[int, int, int, int, str, bool, str, str | None]
-            ] = []
+            placements_simple: list[tuple[int, int, int, int, str, bool, str, str | None]] = []
             for (
                 ax,
                 ay,
@@ -984,9 +1285,7 @@ class PpiView:
                         break
                     attempts += 1
                 # Record and mark occupied
-                placements_simple.append(
-                    (x, y, w_txt, h_txt, text, focused, arrow_symbol, arrow_color_key)
-                )
+                placements_simple.append((x, y, w_txt, h_txt, text, focused, arrow_symbol, arrow_color_key))
                 occupied.append(box)
 
             # Draw halos and text
@@ -1022,9 +1321,7 @@ class PpiView:
                     # Draw arrow after a space following the text.
                     arrow_x = x + 1 + len(text) * char_w + char_w  # space width
                     arrow_color = (
-                        ThemeManager.color(arrow_color_key)
-                        if arrow_color_key
-                        else ThemeManager.color(color_key)
+                        ThemeManager.color(arrow_color_key) if arrow_color_key else ThemeManager.color(color_key)
                     )
                     canvas.text(
                         (arrow_x, y),
@@ -1032,6 +1329,7 @@ class PpiView:
                         size_px=self.label_font_px,
                         color=arrow_color,
                     )
+        _mark("simple_labels")
 
         # Draw data blocks last (leader lines z=7, blocks z=8)
         if self.show_data_blocks and label_layout is not None:
@@ -1046,20 +1344,13 @@ class PpiView:
             occl: list[tuple[int, int, int, int]] = []
             if occlusions:
                 try:
-                    occl.extend(
-                        [
-                            (int(x), int(y), int(w_), int(h_))
-                            for (x, y, w_, h_) in occlusions
-                        ]
-                    )
+                    occl.extend([(int(x), int(y), int(w_), int(h_)) for (x, y, w_, h_) in occlusions])
                 except Exception:
                     occl.extend(list(occlusions))
             occl.append((ox, oy, ow, oh))
             ordered_label_items = [
                 (anchor, lines, expanded)
-                for _range2, anchor, lines, expanded in sorted(
-                    label_candidates, key=lambda entry: entry[0]
-                )
+                for _range2, anchor, lines, expanded in sorted(label_candidates, key=lambda entry: entry[0])
             ]
             placements = label_layout.place_blocks(ordered_label_items, occlusions=occl)
             for p in placements:
@@ -1097,14 +1388,19 @@ class PpiView:
                 # Derive per-block text color from vertical rate (gradient).
                 for i, s in enumerate(p.lines):
                     y = p.y + i * (self.label_font_px + self.label_line_gap_px)
-                    color = (
-                        ThemeManager.color("label.text.primary")
-                        if i == 0
-                        else ThemeManager.color("label.text.dim")
-                    )
+                    color = ThemeManager.color("label.text.primary") if i == 0 else ThemeManager.color("label.text.dim")
                     canvas.text(
                         (p.x + 2, y),
                         s,
                         size_px=self.label_font_px,
                         color=color,
                     )
+            _mark("data_blocks")
+
+        # Finalize timing capture: convert stage durations to ms for human log.
+        # We store in attribute read by the UI controller after draw() returns.
+        if _detail:
+            # Convert to ms (floats) to avoid repeated scaling later.
+            self.last_detail_timings = {k: v * 1000.0 for k, v in _detail.items()}
+        else:  # pragma: no cover - defensive
+            self.last_detail_timings = {}

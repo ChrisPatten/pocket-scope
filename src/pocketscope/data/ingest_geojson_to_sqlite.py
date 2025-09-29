@@ -28,16 +28,12 @@ def parse_args(argv: Iterable[str] | None = None) -> argparse.Namespace:
     else:
         seq = list(argv)
 
-    parser = argparse.ArgumentParser(
-        description="Build PocketScope map SQLite database from GeoJSON assets."
-    )
+    parser = argparse.ArgumentParser(description="Build PocketScope map SQLite database from GeoJSON assets.")
     parser.add_argument("--airports", required=True, help="Path to airports GeoJSON")
     parser.add_argument("--runways", required=True, help="Path to runways GeoJSON")
     parser.add_argument("--states", required=True, help="Path to US states GeoJSON")
     parser.add_argument("--out", required=True, help="Output SQLite database path")
-    parser.add_argument(
-        "--replace", action="store_true", help="Replace existing DB file if present"
-    )
+    parser.add_argument("--replace", action="store_true", help="Replace existing DB file if present")
     return parser.parse_args(seq)
 
 

@@ -16,11 +16,7 @@ logger = logging.getLogger("pocketscope.boot")
 def _git_sha() -> str | None:
     try:
         return (
-            subprocess.check_output(
-                ["git", "rev-parse", "--short", "HEAD"], stderr=subprocess.DEVNULL
-            )
-            .decode()
-            .strip()
+            subprocess.check_output(["git", "rev-parse", "--short", "HEAD"], stderr=subprocess.DEVNULL).decode().strip()
         )
     except Exception:
         return None

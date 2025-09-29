@@ -27,6 +27,22 @@ Comprehensive architecture and feature documentation now lives in [`docs/overvie
 python -m pocketscope [options]
 ```
 
+Common useful options:
+
+- --playback sample_data/demo_adsb.jsonl  Use bundled demo trace instead of live dump1090
+- --fps 15                                Target a different frame rate (default 30)
+- --run-seconds 10                        Run for N seconds then exit (capture perf logs)
+- --web-ui                                Expose simple web view (headless browser mode)
+- --tft                                   Use SPI TFT + touch (embedded)
+ - --adsb-src {JSON,SBS,BEAST,PLAYBACK}    Select ADS-B input source (JSON polls dump1090,
+	 SBS connects to dump1090 SBS TCP:30003)
+
+Example (collect 5 seconds of performance breakdown logs at 12 FPS):
+
+```bash
+POCKETSCOPE_LOGGING_LEVEL=INFO python -m pocketscope --playback sample_data/demo_adsb.jsonl --fps 12 --run-seconds 5 | grep 'ui.perf'
+```
+
 ### Configuration
 
 The application stores user-facing settings at `~/.pocketscope/settings.json` (override with `POCKETSCOPE_HOME`). Edits are validated and reloaded live by the running UI. Settings include units, default range, track length preset, demo mode, altitude filter bounds, north-up lock, and theme overrides.

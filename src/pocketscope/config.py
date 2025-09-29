@@ -55,6 +55,12 @@ def make_ui_config(*, args: Optional[object] = None) -> RuntimeConfig:
     except Exception:
         pass
 
+    # Persisted target_fps (single source of truth). Use if available.
+    try:
+        ui_cfg.target_fps = float(getattr(settings, "target_fps", ui_cfg.target_fps))
+    except Exception:
+        pass
+
     # Apply CLI overrides when provided (Namespace-like)
     if args is not None:
         try:
@@ -80,9 +86,7 @@ def make_ui_config(*, args: Optional[object] = None) -> RuntimeConfig:
         ui=ui_cfg,
         theme=dict(THEME) if isinstance(THEME, dict) else {},
         ppi_config=dict(PPI_CONFIG) if isinstance(PPI_CONFIG, dict) else {},
-        settings_screen_cfg=dict(SETTINGS_SCREEN_CONFIG)
-        if isinstance(SETTINGS_SCREEN_CONFIG, dict)
-        else {},
+        settings_screen_cfg=dict(SETTINGS_SCREEN_CONFIG) if isinstance(SETTINGS_SCREEN_CONFIG, dict) else {},
     )
 
 
@@ -126,6 +130,13 @@ def update_from_settings(settings: object) -> None:
         # Update range if present on settings
         if hasattr(settings, "range_nm"):
             rc.ui.range_nm = float(getattr(settings, "range_nm"))
+    except Exception:
+        pass
+    # Apply persisted target_fps when present so runtime pacing and
+    # telemetry/reporting use the user's configured anchor.
+    try:
+        if hasattr(settings, "target_fps"):
+            rc.ui.target_fps = float(getattr(settings, "target_fps"))
     except Exception:
         pass
     # Live theme reload (best effort). We accept both pydantic Settings

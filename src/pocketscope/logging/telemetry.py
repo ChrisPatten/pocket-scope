@@ -17,9 +17,7 @@ logger = logging.getLogger(__name__)
 
 
 class Metric:
-    def __init__(
-        self, name: str, description: str = "", unit: str | None = None
-    ) -> None:
+    def __init__(self, name: str, description: str = "", unit: str | None = None) -> None:
         self.name = name
         self.description = description
         self.unit = unit
@@ -30,9 +28,7 @@ class Metric:
 
 
 class Counter(Metric):
-    def __init__(
-        self, name: str, description: str = "", unit: str | None = None
-    ) -> None:
+    def __init__(self, name: str, description: str = "", unit: str | None = None) -> None:
         super().__init__(name, description, unit)
         self._value = 0.0
 
@@ -49,9 +45,7 @@ class Counter(Metric):
 
 
 class Gauge(Metric):
-    def __init__(
-        self, name: str, description: str = "", unit: str | None = None
-    ) -> None:
+    def __init__(self, name: str, description: str = "", unit: str | None = None) -> None:
         super().__init__(name, description, unit)
         self._value = 0.0
 
@@ -79,9 +73,7 @@ class Histogram(Metric):
         unit: str | None = None,
     ) -> None:
         super().__init__(name, description, unit)
-        bucket_list = sorted(
-            set(buckets or [0.005, 0.01, 0.05, 0.1, 0.5, 1.0, 2.0, 5.0])
-        )
+        bucket_list = sorted(set(buckets or [0.005, 0.01, 0.05, 0.1, 0.5, 1.0, 2.0, 5.0]))
         self._buckets = bucket_list
         self._counts = {boundary: 0 for boundary in bucket_list}
         self._inf = 0
@@ -151,9 +143,7 @@ class TelemetryRegistry:
         else:
             self.stop()
 
-    def counter(
-        self, name: str, description: str = "", unit: str | None = None
-    ) -> Counter:
+    def counter(self, name: str, description: str = "", unit: str | None = None) -> Counter:
         with self._lock:
             metric = self._metrics.get(name)
             if isinstance(metric, Counter):
@@ -266,9 +256,7 @@ class _MetricsHandler(http.server.BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body.encode("utf-8"))
 
-    def log_message(
-        self, format: str, *args: object
-    ) -> None:  # pragma: no cover - silence
+    def log_message(self, format: str, *args: object) -> None:  # pragma: no cover - silence
         logger.debug("Prometheus exporter: %s", format % args)
 
 

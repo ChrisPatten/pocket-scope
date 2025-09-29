@@ -40,18 +40,13 @@ def haversine_miles(lat1: float, lon1: float, lat2: float, lon2: float) -> float
 
     sin_dphi = math.sin(dphi / 2.0)
     sin_dlambda = math.sin(dlambda / 2.0)
-    a = (
-        sin_dphi * sin_dphi
-        + math.cos(phi1) * math.cos(phi2) * sin_dlambda * sin_dlambda
-    )
+    a = sin_dphi * sin_dphi + math.cos(phi1) * math.cos(phi2) * sin_dlambda * sin_dlambda
     a = min(1.0, max(0.0, a))
     c = 2.0 * math.asin(math.sqrt(a))
     return EARTH_RADIUS_MILES * c
 
 
-def approx_bbox_for_radius(
-    lat: float, lon: float, radius_miles: float
-) -> tuple[float, float, float, float]:
+def approx_bbox_for_radius(lat: float, lon: float, radius_miles: float) -> tuple[float, float, float, float]:
     """Return a loose lon/lat bounding box enclosing a radius around (lat, lon)."""
     lat_extent = (radius_miles / _LAT_DEG_MILES) * 1.05
     cos_lat = math.cos(math.radians(lat))

@@ -7,9 +7,7 @@ import uuid
 from contextvars import ContextVar
 from typing import Dict, Iterator, Optional
 
-_ContextVar: ContextVar[dict[str, str]] = ContextVar(
-    "pocketscope_logging_context", default={}
-)
+_ContextVar: ContextVar[dict[str, str]] = ContextVar("pocketscope_logging_context", default={})
 
 
 def get_context() -> Dict[str, str]:

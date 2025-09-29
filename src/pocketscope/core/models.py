@@ -21,21 +21,11 @@ class AdsbMessage(BaseModel):
     lat: Optional[float] = None
     lon: Optional[float] = None
 
-    baro_alt: Optional[float] = Field(
-        None, description="Barometric altitude in feet, if provided"
-    )
-    geo_alt: Optional[float] = Field(
-        None, description="Geometric altitude in feet, if provided"
-    )
-    ground_speed: Optional[float] = Field(
-        None, description="Ground speed (knots) if provided"
-    )
-    track_deg: Optional[float] = Field(
-        None, description="Course over ground in degrees true"
-    )
-    vertical_rate: Optional[float] = Field(
-        None, description="Vertical rate (ft/min) if provided"
-    )
+    baro_alt: Optional[float] = Field(None, description="Barometric altitude in feet, if provided")
+    geo_alt: Optional[float] = Field(None, description="Geometric altitude in feet, if provided")
+    ground_speed: Optional[float] = Field(None, description="Ground speed (knots) if provided")
+    track_deg: Optional[float] = Field(None, description="Course over ground in degrees true")
+    vertical_rate: Optional[float] = Field(None, description="Vertical rate (ft/min) if provided")
     squawk: Optional[str] = None
     nic: Optional[int] = None
     nacp: Optional[int] = None

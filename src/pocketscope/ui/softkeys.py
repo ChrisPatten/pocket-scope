@@ -8,17 +8,11 @@ from pocketscope.render.canvas import Canvas, Color
 from pocketscope.settings.values import THEME
 from pocketscope.theme import ThemeManager
 
-_SK_THEME = (
-    THEME.get("colors", {}).get("softkeys", {}) if isinstance(THEME, dict) else {}
-)
+_SK_THEME = THEME.get("colors", {}).get("softkeys", {}) if isinstance(THEME, dict) else {}
 
 
 def _c(v: object, fb: tuple[int, int, int, int]) -> Color:
-    if (
-        isinstance(v, (list, tuple))
-        and len(v) == 4
-        and all(isinstance(c, (int, float)) for c in v)
-    ):
+    if isinstance(v, (list, tuple)) and len(v) == 4 and all(isinstance(c, (int, float)) for c in v):
         return (int(v[0]), int(v[1]), int(v[2]), int(v[3]))
     return fb
 
@@ -72,9 +66,7 @@ class SoftKeyBar:
         self.pad_x = max(0, int(pad_x))
         self.pad_y = max(0, int(pad_y))
         # Resolved measurement function (never None after init)
-        self.measure_fn: Callable[[str, int], Tuple[int, int]] = (
-            measure_fn or self._measure_text_internal
-        )
+        self.measure_fn: Callable[[str, int], Tuple[int, int]] = measure_fn or self._measure_text_internal
         # Actual resolved font size (final after layout). Start with request.
         self.font_px = self._requested_font_px
         self.actions = actions or {
@@ -155,9 +147,7 @@ class SoftKeyBar:
                         if rem > 0:
                             rem -= 1
                         widths[i] = max(1, widths[i] - dec)
-                    widths[center_idx] = w - sum(
-                        widths[i] for i in range(n) if i != center_idx
-                    )
+                    widths[center_idx] = w - sum(widths[i] for i in range(n) if i != center_idx)
 
         # Build rects from final widths
         rects: List[Tuple[int, int, int, int]] = []

@@ -122,9 +122,7 @@ class AltitudeBand:
 _units_order: List[str] = list(_FALLBACK_UNITS_ORDER)
 _range_ladder: List[float] = list(_FALLBACK_RANGE_LADDER)
 _track_length_presets_s: List[float] = list(_FALLBACK_TRACK_PRESETS_S)
-_altitude_bands: Dict[str, Tuple[float | None, float | None]] = dict(
-    _FALLBACK_ALT_FILTER_BANDS
-)
+_altitude_bands: Dict[str, Tuple[float | None, float | None]] = dict(_FALLBACK_ALT_FILTER_BANDS)
 _altitude_cycle_order: List[str] = list(_FALLBACK_ALT_FILTER_ORDER)
 _auto_ring_cfg: Dict[str, Any] = dict(_FALLBACK_AUTO_RING_CFG)
 _theme: Dict[str, Any] = dict(_FALLBACK_THEME)
@@ -211,8 +209,7 @@ if yaml is not None and _YAML_PATH.exists():  # pragma: no branch - simple path
                 {
                     k: float(v)
                     for k, v in zoom.items()
-                    if k in {"min_range_nm", "max_range_nm"}
-                    and isinstance(v, (int, float))
+                    if k in {"min_range_nm", "max_range_nm"} and isinstance(v, (int, float))
                 }
             )
         # Tracks service defaults (under tracks.service_defaults)
@@ -249,11 +246,7 @@ if yaml is not None and _YAML_PATH.exists():  # pragma: no branch - simple path
             els = so.get("elements")
             if isinstance(els, dict):
                 _status_overlay_cfg["elements"].update(
-                    {
-                        k: v
-                        for k, v in els.items()
-                        if k in {"line1", "line2", "demo_line"}
-                    }
+                    {k: v for k, v in els.items() if k in {"line1", "line2", "demo_line"}}
                 )
             en = so.get("enabled")
             if isinstance(en, bool):
@@ -265,9 +258,7 @@ if yaml is not None and _YAML_PATH.exists():  # pragma: no branch - simple path
 UNITS_ORDER: Sequence[str] = tuple(_units_order)
 RANGE_LADDER_NM: Sequence[float] = tuple(_range_ladder)
 TRACK_LENGTH_PRESETS_S: Sequence[float] = tuple(_track_length_presets_s)
-ALTITUDE_FILTER_BANDS: Dict[str, Tuple[float | None, float | None]] = dict(
-    _altitude_bands
-)
+ALTITUDE_FILTER_BANDS: Dict[str, Tuple[float | None, float | None]] = dict(_altitude_bands)
 ALTITUDE_FILTER_CYCLE_ORDER: Sequence[str] = tuple(_altitude_cycle_order)
 AUTO_RING_CONFIG: Dict[str, Any] = dict(_auto_ring_cfg)
 THEME: Dict[str, Any] = dict(_theme)

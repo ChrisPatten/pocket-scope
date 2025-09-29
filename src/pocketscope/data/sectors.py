@@ -71,9 +71,7 @@ def _parse_geojson(data: object) -> list[Sector]:
             continue
 
         # Get a display name from common property keys
-        props = (
-            feat.get("properties") if isinstance(feat.get("properties"), dict) else {}
-        )
+        props = feat.get("properties") if isinstance(feat.get("properties"), dict) else {}
         nm_raw = None
         if isinstance(props, dict):
             nm_raw = props.get("SECTOR") or props.get("IDENT") or props.get("NAME")
@@ -179,12 +177,7 @@ def load_sectors_json(
     ):
         max_nm = float(range_nm) * float(cull_factor)
         out = [
-            s
-            for s in out
-            if any(
-                haversine_nm(center_lat, center_lon, lat, lon) <= max_nm
-                for (lat, lon) in s.points
-            )
+            s for s in out if any(haversine_nm(center_lat, center_lon, lat, lon) <= max_nm for (lat, lon) in s.points)
         ]
 
     return out

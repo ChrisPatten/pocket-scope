@@ -168,16 +168,10 @@ class VerticalProfilePanel:
             age_s = float(max(0.0, now_wall - sample.last_ts))
             if age_s > 600.0:
                 continue
-            gs = (
-                self._float(track.state.get("ground_speed"))
-                if hasattr(track, "state")
-                else None
-            )
+            gs = self._float(track.state.get("ground_speed")) if hasattr(track, "state") else None
             bearing = None
             try:
-                bearing = float(
-                    initial_bearing_deg(center_lat, center_lon, sample.lat, sample.lon)
-                )
+                bearing = float(initial_bearing_deg(center_lat, center_lon, sample.lat, sample.lon))
             except Exception:
                 bearing = None
             vs = self._vertical_rate(sample, now_wall)
@@ -212,9 +206,7 @@ class VerticalProfilePanel:
                 bearing_deg=bearing,
                 age_s=age_s,
                 ground_speed_kt=gs,
-                heading_deg=self._float(track.state.get("track_deg"))
-                if hasattr(track, "state")
-                else None,
+                heading_deg=self._float(track.state.get("track_deg")) if hasattr(track, "state") else None,
                 is_eligible=eligible_now,
                 is_fallback=False,
             )
@@ -268,17 +260,13 @@ class VerticalProfilePanel:
                         if self._focus_icao not in pool_ids:
                             self._rotation_index = 0
                             self._focus_icao = pool_ids[0]
-                            self._cycle_deadline = (
-                                now_monotonic + self._cfg.cycle_interval_sec
-                            )
+                            self._cycle_deadline = now_monotonic + self._cfg.cycle_interval_sec
                 if self._manual_hold_until is None:
                     focus_entry = self._entry_for(pool, self._focus_icao)
                     if focus_entry and focus_entry.age_s and focus_entry.age_s > 10.0:
                         self._advance_focus(now_monotonic, pool_ids)
                     elif self._cycle_deadline is None:
-                        self._cycle_deadline = (
-                            now_monotonic + self._cfg.cycle_interval_sec
-                        )
+                        self._cycle_deadline = now_monotonic + self._cfg.cycle_interval_sec
                     elif len(pool_ids) > 1 and now_monotonic >= self._cycle_deadline:
                         self._advance_focus(now_monotonic, pool_ids)
         focus_entry = self._entry_for(pool, self._focus_icao)
@@ -305,9 +293,7 @@ class VerticalProfilePanel:
                     focus_entry.vertical_rate_fpm,
                     now_wall,
                 )
-                history_points = [
-                    pt for pt in history_points if pt[0] >= window[0] - 1.0
-                ]
+                history_points = [pt for pt in history_points if pt[0] >= window[0] - 1.0]
                 if history_points and history_points[0][0] > window[0]:
                     history_points.insert(0, (window[0], history_points[0][1]))
                 future_points = [pt for pt in future_points if pt[0] <= window[1] + 1.0]
@@ -345,9 +331,7 @@ class VerticalProfilePanel:
         self._focus_icao = pool_ids[self._rotation_index]
         self._cycle_deadline = now_monotonic + self._cfg.cycle_interval_sec
 
-    def _entry_for(
-        self, pool: Iterable[ProfileEntry], icao: str | None
-    ) -> ProfileEntry | None:
+    def _entry_for(self, pool: Iterable[ProfileEntry], icao: str | None) -> ProfileEntry | None:
         if icao is None:
             return None
         for entry in pool:
@@ -355,9 +339,7 @@ class VerticalProfilePanel:
                 return entry
         return None
 
-    def _vertical_rate(
-        self, sample: VerticalProfileSample, now_wall: float
-    ) -> float | None:
+    def _vertical_rate(self, sample: VerticalProfileSample, now_wall: float) -> float | None:
         cached = self._vs_cache.get(sample.icao)
         track = sample.track
         history = getattr(track, "history", None)
@@ -525,9 +507,7 @@ class VerticalProfilePanel:
         return int(round(x0 + frac * (x1 - x0)))
 
     @staticmethod
-    def _map_alt(
-        alt: float, alt_min: float, alt_max: float, y_top: int, y_bottom: int
-    ) -> int:
+    def _map_alt(alt: float, alt_min: float, alt_max: float, y_top: int, y_bottom: int) -> int:
         if alt_max <= alt_min:
             return y_bottom
         frac = (alt - alt_min) / (alt_max - alt_min)
@@ -542,11 +522,7 @@ class VerticalProfilePanel:
 
     @staticmethod
     def _eligible_sort_key(entry: ProfileEntry) -> tuple[float, float, float]:
-        abs_vs = (
-            abs(entry.vertical_rate_fpm)
-            if entry.vertical_rate_fpm is not None
-            else -math.inf
-        )
+        abs_vs = abs(entry.vertical_rate_fpm) if entry.vertical_rate_fpm is not None else -math.inf
         dist = entry.distance_nm if entry.distance_nm is not None else math.inf
         age = entry.age_s if entry.age_s is not None else math.inf
         return (-abs_vs, dist, age)
@@ -580,9 +556,7 @@ class VerticalProfilePanel:
         if state is None:
             return
         w, h = size
-        height_frac = max(
-            0.1, min(0.6, float(getattr(self._cfg, "height_fraction", 0.35)))
-        )
+        height_frac = max(0.1, min(0.6, float(getattr(self._cfg, "height_fraction", 0.35))))
         panel_h = max(60, int(h * height_frac))
         x0 = 0
         y0 = h - panel_h

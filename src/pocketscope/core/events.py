@@ -265,9 +265,7 @@ class EventBus:
         """Return mapping of topic -> active subscriber count."""
         return {name: len(state.subscribers) for name, state in self._topics.items()}
 
-    async def _remove_subscription(
-        self, topic: str, queue: asyncio.Queue[Envelope | object]
-    ) -> None:
+    async def _remove_subscription(self, topic: str, queue: asyncio.Queue[Envelope | object]) -> None:
         async with self._lock:
             state = self._topics.get(topic)
             if not state:

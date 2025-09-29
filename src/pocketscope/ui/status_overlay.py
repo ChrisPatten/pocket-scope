@@ -21,17 +21,11 @@ from pocketscope.settings.values import STATUS_OVERLAY_CONFIG, THEME
 from pocketscope.theme import ThemeManager
 
 # Colors / defaults from theme
-_SO_THEME = (
-    THEME.get("colors", {}).get("status_overlay", {}) if isinstance(THEME, dict) else {}
-)
+_SO_THEME = THEME.get("colors", {}).get("status_overlay", {}) if isinstance(THEME, dict) else {}
 
 
 def _c(v: object, fb: tuple[int, int, int, int]) -> Color:
-    if (
-        isinstance(v, (list, tuple))
-        and len(v) == 4
-        and all(isinstance(c, (int, float)) for c in v)
-    ):
+    if isinstance(v, (list, tuple)) and len(v) == 4 and all(isinstance(c, (int, float)) for c in v):
         return (int(v[0]), int(v[1]), int(v[2]), int(v[3]))
     return fb
 
@@ -201,9 +195,7 @@ class StatusOverlay:
         # Autoscale prefix should be a compact 'A' with no trailing space.
         prefix = "A" if autoscale else ""
 
-        if (
-            min_ft is None or (isinstance(min_ft, (int, float)) and min_ft < 1000)
-        ) and max_ft is not None:
+        if (min_ft is None or (isinstance(min_ft, (int, float)) and min_ft < 1000)) and max_ft is not None:
             label = f"<{_fmt_alt(max_ft)}"
         elif max_ft is None and min_ft is not None:
             label = f">{_fmt_alt(min_ft)}"
@@ -353,9 +345,7 @@ class StatusOverlay:
             return f"{fmt_lat(lat)} {fmt_lon(lon)}"
 
         # --- Additional element helpers requested by UI config -------
-        def _elem_near(
-            range_nm_val: float | None, alt_ft: float | None, units_in: str = "nm_ft_kt"
-        ) -> str:
+        def _elem_near(range_nm_val: float | None, alt_ft: float | None, units_in: str = "nm_ft_kt") -> str:
             """Nearest target summary: "NEAR: 2.1nm / 3200ft".
 
             Accepts range in nautical miles and altitude in feet and
@@ -399,12 +389,8 @@ class StatusOverlay:
             except Exception:
                 return "SPD ?"
 
-        def _elem_altfilter(
-            alt_filter: tuple[float | None, float | None] | None
-        ) -> str:
-            return StatusOverlay.format_alt_filter(
-                alt_filter, autoscale=alt_filter_autoscale
-            )
+        def _elem_altfilter(alt_filter: tuple[float | None, float | None] | None) -> str:
+            return StatusOverlay.format_alt_filter(alt_filter, autoscale=alt_filter_autoscale)
 
         def _elem_ac_count(counts: tuple[int | None, int | None] | None) -> str:
             """Aircraft count summary (AC:total(visible))."""
@@ -625,17 +611,11 @@ class StatusOverlay:
                     # Draw text centered in badge (vertical center using text height)
                     text_tx = cx + max(0, (badge_w - tw) // 2)
                     text_ty = cy - (th // 2) - 3
-                    canvas.text(
-                        (text_tx, text_ty), badge_text, size_px=self.font_px, color=fg
-                    )
+                    canvas.text((text_tx, text_ty), badge_text, size_px=self.font_px, color=fg)
 
                 else:
                     # Plain text rendering
-                    s = (
-                        text[1]
-                        if isinstance(text, tuple) and len(text) >= 2
-                        else str(text)
-                    )
+                    s = text[1] if isinstance(text, tuple) and len(text) >= 2 else str(text)
                     if s == "":
                         # empty placeholder (used when AGE was already placed)
                         continue
@@ -658,9 +638,7 @@ class StatusOverlay:
                     else:
                         tx = inner_left + max(0, (avail_w - tw) // 2)
                     ty = y + (line_height - th) // 2
-                    canvas.text(
-                        (tx, ty), str(text), size_px=self.font_px, color=self.text_color
-                    )
+                    canvas.text((tx, ty), str(text), size_px=self.font_px, color=self.text_color)
             y += line_height
 
     # No border: overlay is a translucent band only

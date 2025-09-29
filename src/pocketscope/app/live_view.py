@@ -11,7 +11,7 @@ import asyncio
 import signal
 from collections.abc import Iterable
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Awaitable, Protocol, Type, cast
+from typing import TYPE_CHECKING, Any, Protocol, Type
 
 from pocketscope.core.events import EventBus
 from pocketscope.core.geo import ecef_to_enu, geodetic_to_ecef
@@ -40,9 +40,7 @@ class SourceProtocol(Protocol):
         ...
 
 
-def _make_snapshots(
-    tracks: Iterable[AircraftTrack], center_lat: float, center_lon: float
-) -> list[TrackSnapshot]:
+def _make_snapshots(tracks: Iterable[AircraftTrack], center_lat: float, center_lon: float) -> list[TrackSnapshot]:
     out: list[TrackSnapshot] = []
     # Precompute center ECEF
     _cx, _cy, _cz = geodetic_to_ecef(center_lat, center_lon, 0.0)
@@ -159,6 +157,8 @@ async def main_async(args: argparse.Namespace) -> None:
 
     display: PygameDisplayBackend | WebDisplayBackend | Any
     touch: Any | None = None
+    touch_task: asyncio.Task[Any] | None = None
+    touch_forwarder_task: asyncio.Task[Any] | None = None
     if getattr(args, "tft", False) and _ILI9341Cls is not None:
         # Physical TFT portrait 240x320
         display = _ILI9341Cls(width=240, height=320)
@@ -168,10 +168,15 @@ async def main_async(args: argparse.Namespace) -> None:
             if callable(_run):
                 try:
                     maybe_coro = _run()
-                except Exception:
-                    maybe_coro = None
                     if maybe_coro is not None and hasattr(maybe_coro, "__await__"):
-                        asyncio.ensure_future(cast(Awaitable[Any], maybe_coro))
+                        # Narrow type: ensure we treat as coroutine
+                        touch_task = asyncio.create_task(maybe_coro, name="touch.run")
+                        try:
+                            touch._task = touch_task
+                        except Exception:
+                            pass
+                except Exception:
+                    pass
         print("[live_view] TFT mode active (ILI9341 + XPT2046)")
     elif args.web_ui:
         display = WebDisplayBackend(size=(1280, 800), create_window=False)
@@ -229,7 +234,11 @@ async def main_async(args: argparse.Namespace) -> None:
         bus=bus,
         ts=ts,
         tracks=tracks,
-        cfg=UiConfig(range_nm=float(args.range), overlay=True, target_fps=30.0),
+        cfg=UiConfig(
+            range_nm=float(args.range),
+            overlay=True,
+            target_fps=float(getattr(args, "fps", 30.0) or 30.0),
+        ),
         center_lat=float(args.center[0]),
         center_lon=float(args.center[1]),
         sectors=sectors,
@@ -242,9 +251,7 @@ async def main_async(args: argparse.Namespace) -> None:
         pad_y=10,
         border_width=0,
         # Lightweight measurement when using TFT so we don't import pygame
-        measure_fn=(lambda s, sz: (int(sz * 0.6) * len(s), sz))
-        if getattr(args, "tft", False)
-        else None,
+        measure_fn=(lambda s, sz: (int(sz * 0.6) * len(s), sz)) if getattr(args, "tft", False) else None,
         actions={
             "-": ui.zoom_out,
             "Settings": lambda: None,
@@ -258,9 +265,7 @@ async def main_async(args: argparse.Namespace) -> None:
     ui.set_softkeys(bar)
 
     # Install a SIGUSR1 handler to request screenshot when running as a service.
-    def _sigusr1_handler(
-        _sig: int, _frm: Any
-    ) -> None:  # pragma: no cover - signal path
+    def _sigusr1_handler(_sig: int, _frm: Any) -> None:  # pragma: no cover - signal path
         try:
             ui.request_screenshot()
         except Exception:
@@ -295,13 +300,9 @@ async def main_async(args: argparse.Namespace) -> None:
                             # Settings overlay (legacy) takes precedence if present.
                             settings_screen = getattr(ui, "_settings_screen", None)
                             try:
-                                if settings_screen is not None and getattr(
-                                    settings_screen, "visible", False
-                                ):
+                                if settings_screen is not None and getattr(settings_screen, "visible", False):
                                     try:
-                                        consumed_local = settings_screen.on_mouse(
-                                            x, y, display.size(), ui
-                                        )
+                                        consumed_local = settings_screen.on_mouse(x, y, display.size(), ui)
                                     except Exception:
                                         consumed_local = False
                             except Exception:
@@ -325,8 +326,7 @@ async def main_async(args: argparse.Namespace) -> None:
                                 if last_down_ts and last_down_pos:
                                     # consider same if within 0.25s and ~8px
                                     if float(ev.ts) - last_down_ts < 0.25 and (
-                                        abs(last_down_pos[0] - ix) <= 8
-                                        and abs(last_down_pos[1] - iy) <= 8
+                                        abs(last_down_pos[0] - ix) <= 8 and abs(last_down_pos[1] - iy) <= 8
                                     ):
                                         recent = True
                             except Exception:
@@ -338,7 +338,8 @@ async def main_async(args: argparse.Namespace) -> None:
                     pass
                 await asyncio.sleep(0.01)
 
-        asyncio.create_task(_touch_forwarder())
+    # Schedule forwarder after definition to satisfy type checker
+    touch_forwarder_task = asyncio.create_task(_touch_forwarder(), name="touch.forwarder")
 
     _print_help()
     # Start track maintenance (spawns internal tasks and returns immediately).
@@ -347,10 +348,21 @@ async def main_async(args: argparse.Namespace) -> None:
     # Run UI and source concurrently; stop others when one exits.
     src_task = asyncio.create_task(src.run(), name="adsb_source")
     ui_task = asyncio.create_task(ui.run(), name="ui")
+
+    # Optional auto-halt for scripted diagnostics (e.g., collect ui.perf).
+    run_seconds = getattr(args, "run_seconds", None)
+    if isinstance(run_seconds, (int, float)) and run_seconds and run_seconds > 0:
+
+        async def _auto_halt() -> None:
+            try:
+                await asyncio.sleep(float(run_seconds))
+                await ui.stop()
+            except Exception:
+                pass
+
+        asyncio.create_task(_auto_halt())
     try:
-        done, pending = await asyncio.wait(
-            {src_task, ui_task}, return_when=asyncio.FIRST_COMPLETED
-        )
+        done, pending = await asyncio.wait({src_task, ui_task}, return_when=asyncio.FIRST_COMPLETED)
 
         # If UI finished (user quit), stop source and tracks.
         if ui_task in done:
@@ -373,6 +385,25 @@ async def main_async(args: argparse.Namespace) -> None:
         # Best-effort final cleanup.
         await tracks.stop()
         await src.stop()
+        # Touch cleanup
+        try:
+            if touch is not None:
+                stop_fn = getattr(touch, "stop", None)
+                if callable(stop_fn):
+                    try:
+                        stop_fn()
+                    except Exception:
+                        pass
+        except Exception:
+            pass
+        for _t in (touch_forwarder_task, touch_task):
+            if _t and not _t.done():
+                _t.cancel()
+        if touch_task is not None:
+            await asyncio.gather(
+                *[t for t in (touch_task, touch_forwarder_task) if t],
+                return_exceptions=True,
+            )
         for t in (src_task, ui_task):
             if not t.done():
                 t.cancel()
@@ -408,6 +439,19 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         type=float,
         default=20.0,
         help="Range in NM",
+    )
+    p.add_argument(
+        "--fps",
+        type=float,
+        default=30.0,
+        help="Target UI frames per second (default: 30.0)",
+    )
+    p.add_argument(
+        "--run-seconds",
+        dest="run_seconds",
+        type=float,
+        default=None,
+        help="Automatically stop after N seconds (diagnostics / scripting)",
     )
     p.add_argument(
         "--simple",

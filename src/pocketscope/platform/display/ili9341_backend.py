@@ -87,7 +87,7 @@ class _FontCache:
                     "/Library/Fonts/Menlo.ttc",
                     "/Library/Fonts/Consolas.ttf",
                 ]
-                font = None
+                font: Any = None
                 for p in candidates:
                     try:
                         font = ImageFont.truetype(p, size_px)
@@ -143,9 +143,7 @@ class _PillowCanvas(Canvas):
         self._draw.ellipse(bbox, outline=color, width=max(1, width))
         self._ops += 1
 
-    def filled_circle(
-        self, center: Tuple[int, int], radius: int, color: Color
-    ) -> None:  # override
+    def filled_circle(self, center: Tuple[int, int], radius: int, color: Color) -> None:  # override
         x, y = center
         bbox = [x - radius, y - radius, x + radius, y + radius]
         self._draw.ellipse(bbox, fill=color)
@@ -243,6 +241,52 @@ class ILI9341DisplayBackend(DisplayBackend):
         except Exception:
             pass
 
+        # ------------------------------------------------------------------
+        # Performance buffers / tuning
+        # Persistent RGB565 framebuffer we reuse each frame to avoid new
+        # allocations and enable future partial / dirty region updates.
+        self._buf_rgb565 = bytearray(2 * self._w * self._h)
+        # Reusable scratch references to reduce attribute lookups in hot path.
+        self._encode_last_mode = None  # reserved for future fast-path detection
+        # Tunable SPI payload chunk size (bytes).
+        # NOTE: Increasing this too high can exceed the kernel / driver buffer (often 4096 on RPi)
+        # resulting in IOErrors that trigger our recovery loop (observed as white flashing +
+        # recurring "frame transmit error"). We attempt to detect a safe ceiling and fall back
+        # adaptively on failures.
+        self._spi_chunk_size = 2048  # safe baseline & preserves multi-chunk test expectations
+        if (self._w * self._h) >= (240 * 320):  # full 240x320 panel or larger
+            # Try to read kernel spidev bufsiz (optional)
+            max_buf = 4096
+            try:
+                p = Path("/sys/module/spidev/parameters/bufsiz")
+                if p.exists():
+                    with p.open("r") as f:
+                        val = int(f.read().strip() or "0")
+                        if val >= 2048:
+                            max_buf = val
+            except Exception:
+                pass
+            # Heuristic: use 75% of reported max (or cap at 4096 if unknown)
+            target = int(min(max_buf, 4096) * 0.75)
+            # Round to nearest 512 for nicer chunk boundaries
+            if target < 2048:
+                target = 2048
+            target = (target // 512) * 512
+            self._spi_chunk_size = max(2048, target)
+        # Runtime adaptive downgrade uses _spi_chunk_min to stop shrinking below baseline.
+        self._spi_chunk_min = 1024
+        self._spi_adaptive_enabled = True
+        self._spi_last_error: str | None = None
+        # Fast-path raw encoder detection state for RGB565 (Pillow raw modes)
+        self._fast_rgb565_mode: str | None = None  # e.g. "BGR;16" or "RGB;16"
+        self._fast_rgb565_swap = False  # whether produced 16-bit words need byte swap
+        self._fast_rgb565_attempted = False  # only probe once
+        # Per-frame performance instrumentation (ms); updated each end_frame
+        self._last_encode_ms = 0.0
+        self._last_tx_ms = 0.0
+        self._last_fast_used = False
+        self._fast_log_emitted = False
+
     # (backlight state variables are instance attributes set in __init__)
 
     # --------------------- Hardware / low-level ---------------------
@@ -338,9 +382,7 @@ class ILI9341DisplayBackend(DisplayBackend):
 
     def _set_addr_window(self) -> None:
         self._write_cmd(0x2A, bytes([0x00, 0x00, 0x00, (self._w - 1) & 0xFF]))
-        self._write_cmd(
-            0x2B, bytes([0x00, 0x00, (self._h - 1) >> 8, (self._h - 1) & 0xFF])
-        )
+        self._write_cmd(0x2B, bytes([0x00, 0x00, (self._h - 1) >> 8, (self._h - 1) & 0xFF]))
         self._write_cmd(0x2C, None)
 
     # ------------------------------ API ------------------------------
@@ -362,19 +404,16 @@ class ILI9341DisplayBackend(DisplayBackend):
         brightness = self._compute_brightness(self._frame)
         now_ms = time.monotonic() * 1000.0
         hold_elapsed = now_ms - self._last_push_ms
-        if (
-            self._frame_hold_ms > 0
-            and hold_elapsed < self._frame_hold_ms
-            and ops == 0
-            and self._prev_frame is not None
-        ):
+        if self._frame_hold_ms > 0 and hold_elapsed < self._frame_hold_ms and ops == 0 and self._prev_frame is not None:
             return
         if self._should_skip_push(ops, brightness):
             return
         img = self._frame
         try:
             if self._flip:
-                img = img.transpose(Image.ROTATE_180)
+                # Use rotate(180) instead of transpose with ROTATE_180 to avoid
+                # relying on a PIL attribute that typeshed may not expose.
+                img = img.rotate(180)
         except Exception:
             img = self._frame
         self._push_raw(img)
@@ -434,7 +473,7 @@ class ILI9341DisplayBackend(DisplayBackend):
         try:
             img = self._frame
             if self._flip:
-                img = img.transpose(Image.ROTATE_180)
+                img = img.rotate(180)
             img.save(path)
         except Exception:
             with suppress(Exception):
@@ -459,9 +498,12 @@ class ILI9341DisplayBackend(DisplayBackend):
     def _compute_brightness(self, img: Image.Image) -> float:
         try:
             thumb = img.resize((32, 32))
-            pixels = thumb.getdata()
+            pixels = list(thumb.getdata())
             total = 0
-            for r, g, b, *_ in pixels:
+            for px in pixels:
+                if not px:
+                    continue
+                r, g, b = px[0], px[1], px[2]
                 total += int(r) + int(g) + int(b)
             return (total / (len(pixels) * 3)) if pixels else 0.0
         except Exception:
@@ -476,51 +518,232 @@ class ILI9341DisplayBackend(DisplayBackend):
         if near_black and self._last_brightness > 0:
             return True
         if self._last_brightness > 0 and brightness > 0:
-            if (
-                self._last_brightness / max(brightness, 0.001)
-            ) >= self._blank_skip_threshold:
+            if (self._last_brightness / max(brightness, 0.001)) >= self._blank_skip_threshold:
                 return True
         return False
 
     # ------------------------- Transmission ---------------------------
     def _encode_rgb565(self, img: Image.Image) -> bytearray:
-        rgb = img.convert("RGB")
-        raw = rgb.tobytes()
-        out = bytearray(2 * self._w * self._h)
+        """Convert RGBA/Pillow image to in-place RGB565 in persistent buffer.
+
+        NOTE: For now we still walk all pixels; later we can introduce
+        dirty-rect detection and skip unchanged spans.
+        """
+        import time as _t
+
+        t_enc_start = _t.perf_counter()
+        fast_used = False
+        try:  # Convert once to RGB (fast in Pillow, returns new image or view)
+            rgb = img.convert("RGB")
+        except Exception:
+            self._last_encode_ms = (_t.perf_counter() - t_enc_start) * 1000.0
+            self._last_fast_used = False
+            return self._buf_rgb565  # leave previous contents
+
+        # Attempt one-time discovery of a Pillow raw mode that already yields
+        # RGB565 ordering matching our panel (big-endian: high byte first).
+        if not self._fast_rgb565_attempted:
+            self._fast_rgb565_attempted = True
+            try:
+                # Prepare expected bytes for first pixel using manual pack
+                px_raw = rgb.getpixel((0, 0))  # (r,g,b) or single-band value
+                # Normalize to a 3-tuple of ints so static types are clear
+                if not isinstance(px_raw, (tuple, list)):
+                    # single-band value -> replicate across channels
+                    try:
+                        if isinstance(px_raw, (int, float)):
+                            r0 = int(px_raw)
+                        else:
+                            r0 = 0
+                    except Exception:
+                        r0 = 0
+                    g0 = r0
+                    b0 = r0
+                else:
+                    # Ensure at least 3 components and coerce safely to ints
+                    px_t = tuple(px_raw)
+                    a, b, c = (px_t + (0, 0, 0))[:3]
+                    from typing import Any as _Any
+                    from typing import cast as _cast
+
+                    def _safe_int(v: _Any) -> int:
+                        try:
+                            # cast to Any to satisfy int() signature for mypy
+                            return int(_cast(_Any, v))
+                        except Exception:
+                            return 0
+
+                    r0, g0, b0 = _safe_int(a), _safe_int(b), _safe_int(c)
+                val0 = ((r0 & 0xF8) << 8) | ((g0 & 0xFC) << 3) | (b0 >> 3)
+                exp_hi = (val0 >> 8) & 0xFF
+                exp_lo = val0 & 0xFF
+                candidates = ["BGR;16", "RGB;16"]
+                for mode in candidates:
+                    try:
+                        tb_obj = rgb.crop((0, 0, 1, 1)).tobytes("raw", mode)
+                    except Exception:  # unsupported mode
+                        continue
+                    # Ensure we have a bytes-like object before indexing
+                    if not isinstance(tb_obj, (bytes, bytearray, memoryview)):
+                        continue
+                    tb = bytes(tb_obj)
+                    if len(tb) != 2:
+                        continue
+                    hi, lo = tb[0], tb[1]
+                    if hi == exp_hi and lo == exp_lo:  # exact match
+                        self._fast_rgb565_mode = mode
+                        self._fast_rgb565_swap = False
+                        break
+                    if hi == exp_lo and lo == exp_hi:  # byte-swapped
+                        self._fast_rgb565_mode = mode
+                        self._fast_rgb565_swap = True
+                        break
+            except Exception:
+                pass  # Leave fast path disabled
+
+        # If we discovered a suitable raw encoder, use it and copy/adjust into persistent buffer.
+        if self._fast_rgb565_mode is not None:
+            try:
+                raw16_obj = rgb.tobytes("raw", self._fast_rgb565_mode)
+                if not isinstance(raw16_obj, (bytes, bytearray, memoryview)):
+                    raise RuntimeError("unexpected raw encoder output")
+                raw16 = bytes(raw16_obj)
+                if len(raw16) == 2 * self._w * self._h:
+                    out = self._buf_rgb565
+                    if not self._fast_rgb565_swap:
+                        # Direct copy
+                        mv_out = memoryview(out)
+                        mv_out[: len(raw16)] = raw16
+                    else:
+                        # Swap bytes per 16-bit word
+                        mv_out = memoryview(out)
+                        for i in range(0, len(raw16), 2):
+                            mv_out[i] = raw16[i + 1]
+                            mv_out[i + 1] = raw16[i]
+                    fast_used = True
+                    self._last_encode_ms = (_t.perf_counter() - t_enc_start) * 1000.0
+                    self._last_fast_used = True
+                    if not self._fast_log_emitted:
+                        with suppress(Exception):
+                            msg = (
+                                "[ILI9341] rgb565 fast-path: "
+                                f"mode={self._fast_rgb565_mode} "
+                                f"swap={self._fast_rgb565_swap}"
+                            )
+                            print(msg)
+                        self._fast_log_emitted = True
+                    return out
+            except Exception:
+                # On any failure fall back to manual path for this frame; keep previous detection for future tries.
+                pass
+
+        # Manual per-pixel conversion fallback (baseline path)
+        try:
+            raw = rgb.tobytes()  # bytes of length 3*w*h
+        except Exception:
+            return self._buf_rgb565
+        out = self._buf_rgb565
+        mv_in = memoryview(raw)
+        mv_out = memoryview(out)
+        w3 = len(mv_in)
         oi = 0
-        for i in range(0, len(raw), 3):
-            r = raw[i] & 0xF8
-            g = raw[i + 1] & 0xFC
-            b = raw[i + 2] & 0xF8
-            val = (r << 8) | (g << 3) | (b >> 3)
-            out[oi] = (val >> 8) & 0xFF
-            out[oi + 1] = val & 0xFF
+        # Iterate over triplets in the input memoryview and write big-endian 16-bit words
+        for i in range(0, w3, 3):
+            r = mv_in[i]
+            g = mv_in[i + 1]
+            b = mv_in[i + 2]
+            val = ((r & 0xF8) << 8) | ((g & 0xFC) << 3) | (b >> 3)
+            mv_out[oi] = (val >> 8) & 0xFF
+            mv_out[oi + 1] = val & 0xFF
             oi += 2
+        self._last_encode_ms = (_t.perf_counter() - t_enc_start) * 1000.0
+        self._last_fast_used = fast_used
+        if not fast_used and not self._fast_log_emitted and self._fast_rgb565_attempted:
+            # Log once if fast path was attempted but not used
+            with suppress(Exception):
+                print("[ILI9341] rgb565 fast-path: disabled")
+            self._fast_log_emitted = True
         return out
 
     def _push_raw(self, img: Image.Image) -> None:
-        out = self._encode_rgb565(img)
-        try:
-            self._set_addr_window()
-            if GPIO is not None:
-                GPIO.output(self._dc, 1)
-            if self._spi is not None:
-                chunk = 2048
-                mv = memoryview(out)
-                for i in range(0, len(out), chunk):
-                    with SPI_BUS_LOCK:
-                        self._spi.writebytes(list(mv[i : i + chunk]))
-            self._frame_counter += 1
-            if self._frame_counter % self._ping_interval_frames == 0:
-                self._status_ping()
-            self._last_ok = time.monotonic()
-            self._fail_streak = 0
-            self._next_backoff_s = 0.05
-            self._last_frame_failed = False
-        except Exception:
-            self._fail_streak += 1
-            self._last_frame_failed = True
-            self._attempt_recover("frame transmit error")
+        import time as _t
+
+        out = self._encode_rgb565(img)  # returns persistent buffer
+        t_tx_start = _t.perf_counter()
+        attempt = 0
+        chunk_size = self._spi_chunk_size
+        last_exc: Exception | None = None
+        while True:
+            attempt += 1
+            try:
+                self._set_addr_window()
+                if GPIO is not None:
+                    GPIO.output(self._dc, 1)
+                spi = self._spi
+                if spi is not None:
+                    mv = memoryview(out)
+                    for i in range(0, len(out), chunk_size):
+                        segment = mv[i : i + chunk_size]
+                        with SPI_BUS_LOCK:
+                            try:
+                                wb = getattr(spi, "writebytes", None)
+                                if wb is not None:
+                                    wb(segment)
+                                else:
+                                    x2 = getattr(spi, "xfer2", None)
+                                    if x2 is not None:
+                                        x2(list(segment))
+                                    else:
+                                        raise RuntimeError("No valid SPI write method")
+                            except TypeError:
+                                # Driver expects list[int]
+                                spi.writebytes(list(segment))
+                # Success path
+                self._frame_counter += 1
+                if self._frame_counter % self._ping_interval_frames == 0:
+                    self._status_ping()
+                self._last_ok = time.monotonic()
+                self._fail_streak = 0
+                self._next_backoff_s = 0.05
+                self._last_frame_failed = False
+                # If we previously downgraded due to errors and sustained successes, consider gentle re-up later.
+                self._last_tx_ms = (_t.perf_counter() - t_tx_start) * 1000.0
+                return
+            except Exception as exc:  # transmit failure
+                last_exc = exc
+                self._last_frame_failed = True
+                # Adaptive downgrade: shrink chunk size and retry once or twice before giving up.
+                if self._spi_adaptive_enabled and chunk_size > self._spi_chunk_min and attempt < 3:
+                    # Halve the chunk size (down to min) and retry.
+                    new_chunk = max(self._spi_chunk_min, chunk_size // 2)
+                    if new_chunk != chunk_size:
+                        with suppress(Exception):
+                            print(
+                                f"[ILI9341] spi error: {exc!r}; reducing chunk {chunk_size} -> {new_chunk} and retrying"
+                            )
+                        chunk_size = new_chunk
+                        self._spi_chunk_size = new_chunk  # persist for future frames
+                        continue
+                # Give up: record failure and break to recovery.
+                break
+        # Failure after retries
+        self._fail_streak += 1
+        self._spi_last_error = type(last_exc).__name__ if last_exc else "unknown"
+        self._attempt_recover("frame transmit error")
+        self._last_tx_ms = (_t.perf_counter() - t_tx_start) * 1000.0
+        return
+
+        # Normal success path sets tx duration before return above
+
+    # Exposed instrumentation accessors (lightweight)
+    def last_encode_ms(self) -> float:
+        return self._last_encode_ms
+
+    def last_tx_ms(self) -> float:
+        return self._last_tx_ms
+
+    def last_fast_used(self) -> bool:
+        return self._last_fast_used
 
     # ----------------------- Recovery / health -----------------------
     def _close_spi(self) -> None:
@@ -555,7 +778,11 @@ class ILI9341DisplayBackend(DisplayBackend):
             with SPI_BUS_LOCK:
                 resp = xfer2([0x00, 0x00, 0x00, 0x00, 0x00])
             try:
-                data = resp[1:5]
+                if not hasattr(resp, "__iter__"):
+                    raise RuntimeError("status resp parse error")
+                from typing import Iterable, cast
+
+                data = list(cast(Iterable[int], resp))[1:5]
             except Exception:
                 raise RuntimeError("status resp parse error")
             if not data:
@@ -577,10 +804,7 @@ class ILI9341DisplayBackend(DisplayBackend):
             delay = self._next_backoff_s
             self._next_backoff_s = min(self._max_backoff_s, self._next_backoff_s * 2.0)
             with suppress(Exception):
-                print(
-                    "[ILI9341] recover (reason=%s, streak=%s, backoff=%.2fs)"
-                    % (reason, self._fail_streak, delay)
-                )
+                print("[ILI9341] recover (reason=%s, streak=%s, backoff=%.2fs)" % (reason, self._fail_streak, delay))
             time.sleep(delay)
             try:
                 self.reset_and_init()
@@ -588,7 +812,7 @@ class ILI9341DisplayBackend(DisplayBackend):
                 if self._prev_frame is not None:
                     img = self._prev_frame
                     if self._flip:
-                        img = img.transpose(Image.ROTATE_180)
+                        img = img.rotate(180)
                     self._push_raw(img)
             except Exception:
                 pass
@@ -611,9 +835,7 @@ class ILI9341DisplayBackend(DisplayBackend):
             return
         if spidev is None:  # no hardware libs
             return
-        t = threading.Thread(
-            target=self._watchdog_run, name="ili9341-watchdog", daemon=True
-        )
+        t = threading.Thread(target=self._watchdog_run, name="ili9341-watchdog", daemon=True)
         self._watchdog_thread = t
         with suppress(Exception):
             t.start()

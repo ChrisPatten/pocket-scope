@@ -100,9 +100,7 @@ class FilePlaybackSource:
         self._events_cache: list[tuple[float, dict[str, Any]]] = []
         self._original_events: list[tuple[float, dict[str, Any]]] = []
         self._events_loaded = False
-        self._pending_event_times: list[
-            float
-        ] = []  # Track pending event times for next_due
+        self._pending_event_times: list[float] = []  # Track pending event times for next_due
 
     async def run(self) -> None:
         """Start replaying ADS-B messages.
@@ -175,9 +173,7 @@ class FilePlaybackSource:
                         record = json.loads(line)
                         events.append(self._parse_record(record))
                     except Exception as e:
-                        logger.warning(
-                            f"Skipping invalid line {line_num} in {self._path}: {e}"
-                        )
+                        logger.warning(f"Skipping invalid line {line_num} in {self._path}: {e}")
                         continue
 
                 if events:
@@ -204,9 +200,7 @@ class FilePlaybackSource:
                     offset = current_time - compressed_events[0][0]
 
                     # Apply offset to all events
-                    events = [
-                        (t + offset, msg_data) for t, msg_data in compressed_events
-                    ]
+                    events = [(t + offset, msg_data) for t, msg_data in compressed_events]
 
                     self._events_cache = events
                     # Set the first event as next due
@@ -303,9 +297,7 @@ class FilePlaybackSource:
                 future_events.sort(key=lambda x: x[0])
                 self._next_due = future_events[0][0]
 
-                async def schedule_event(
-                    t_mono: float, msg_data: dict[str, Any]
-                ) -> tuple[float, dict[str, Any]]:
+                async def schedule_event(t_mono: float, msg_data: dict[str, Any]) -> tuple[float, dict[str, Any]]:
                     """Schedule a single event to be published at the specified time."""
                     try:
                         # Sleep until the event time
@@ -339,9 +331,7 @@ class FilePlaybackSource:
                 # Monitor tasks and update next_due as they complete
                 while event_task_map and not self._stop_event.is_set():
                     # Wait for any task to complete
-                    done, pending = await asyncio.wait(
-                        event_task_map.keys(), return_when=asyncio.FIRST_COMPLETED
-                    )
+                    done, pending = await asyncio.wait(event_task_map.keys(), return_when=asyncio.FIRST_COMPLETED)
 
                     # Remove completed tasks from tracking
                     for task in done:
@@ -349,9 +339,7 @@ class FilePlaybackSource:
 
                     # Update next_due to the earliest remaining event
                     if event_task_map:
-                        remaining_times = [
-                            event_info[0] for event_info in event_task_map.values()
-                        ]
+                        remaining_times = [event_info[0] for event_info in event_task_map.values()]
                         self._next_due = min(remaining_times)
                     else:
                         self._next_due = None

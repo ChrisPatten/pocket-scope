@@ -46,3 +46,7 @@ telemetry:
     decoder_offline_warn_sec: 3
     temp_warn_c: 75
     temp_crit_c: 85
+
+# Top-level UI setting: preferred target FPS used as the single source-of-truth
+# for runtime pacing, decimation and telemetry/logging thresholds.
+target_fps: 10

@@ -85,12 +85,33 @@ patched with a no‑op to avoid spurious failures.
 
 ## Configuration Reference
 
-See `examples/settings.example.yml` for a full reference including:
+See `src/pocketscope/settings/settings.yml` for the full default configuration including:
 
 - Global log level + per‑handler overrides
 - Human vs JSON style selection
 - Context field inclusion / exclusion
 - Telemetry enable flag and optional thresholds
+
+## Settings & FPS anchor
+
+PocketScope now uses a single, canonical settings file: `src/pocketscope/settings/settings.yml`.
+That file contains the top-level `target_fps` value (default 10.0) which is the canonical FPS anchor used
+throughout the application for pacing, UI frame calculations, and any telemetry or logging that distinguishes
+behaviour by FPS. Where telemetry needs an FPS target it will use `telemetry.fps_target` if explicitly set,
+otherwise the loader will copy the top-level `target_fps` into the telemetry configuration to preserve a
+single authoritative value.
+
+Notes on other config files:
+- `src/pocketscope/settings/values.yml` provides numeric ladders, UI layout defaults and nested colour hints
+    used as fallbacks by `values.py` (units, ranges, zoom limits, status overlay elements, etc.). It is not a
+    replacement for theme palettes.
+- `themes.yml` remains the canonical place for full named theme palettes (the ThemeManager expects a
+    `themes.yml` that defines palettes using the flat keys in `Theme.REQUIRED_KEYS`). If you want the full
+    UI palette to change, update or add a `themes.yml` in the package or user config directory (see
+    `src/pocketscope/theme.py`).
+
+If you are migrating older configs that only contained logging/telemetry blocks, simply move them under the
+top-level `logging` and `telemetry` keys in `settings.yml` and rely on `target_fps` for a consistent FPS anchor.
 
 ## Testing & Determinism
 

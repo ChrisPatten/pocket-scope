@@ -153,11 +153,7 @@ def initial_bearing_deg(lat1: float, lon1: float, lat2: float, lon2: float) -> f
     # yield numerically unstable bearings after adding ±360. Canonicalize to
     # pure east/west depending on relative sign of lon delta to satisfy
     # invariance. Use generous tolerances to catch pathological fuzz cases.
-    if (
-        abs(abs(norm_lon1) - 180.0) < 1e-9
-        and abs(abs(norm_lon2) - 180.0) < 1e-9
-        and dlat < 1e-6
-    ):
+    if abs(abs(norm_lon1) - 180.0) < 1e-9 and abs(abs(norm_lon2) - 180.0) < 1e-9 and dlat < 1e-6:
         return 180.0
 
     x = sin(dlambda) * cos(phi2)
@@ -174,9 +170,7 @@ def initial_bearing_deg(lat1: float, lon1: float, lat2: float, lon2: float) -> f
     return brg
 
 
-def dest_point(
-    lat: float, lon: float, bearing_deg: float, range_nm: float
-) -> Tuple[float, float]:
+def dest_point(lat: float, lon: float, bearing_deg: float, range_nm: float) -> Tuple[float, float]:
     """Compute destination lat/lon from start, bearing, and range (spherical).
 
     Uses a spherical Earth with R = 6,371,000 m. Inputs are degrees and NM.
@@ -212,9 +206,7 @@ def dest_point(
     return (lat2, _normalize_lon(lon2))
 
 
-def geodetic_to_ecef(
-    lat: float, lon: float, alt_m: float = 0.0
-) -> Tuple[float, float, float]:
+def geodetic_to_ecef(lat: float, lon: float, alt_m: float = 0.0) -> Tuple[float, float, float]:
     """Convert WGS-84 geodetic to ECEF coordinates.
 
     Args:
@@ -275,9 +267,7 @@ def ecef_to_enu(
     return (e, n, u)
 
 
-def enu_to_screen(
-    e_east: float, n_north: float, scale_m_per_px: float
-) -> Tuple[float, float]:
+def enu_to_screen(e_east: float, n_north: float, scale_m_per_px: float) -> Tuple[float, float]:
     """Map ENU to screen coordinates with north-up convention.
 
     Args:
@@ -294,9 +284,7 @@ def enu_to_screen(
     return (x, y)
 
 
-def range_bearing_from(
-    lat0: float, lon0: float, lat: float, lon: float
-) -> Tuple[float, float]:
+def range_bearing_from(lat0: float, lon0: float, lat: float, lon: float) -> Tuple[float, float]:
     """Convenience inverse: range and bearing from origin to target.
 
     Args:

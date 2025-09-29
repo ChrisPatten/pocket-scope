@@ -158,9 +158,7 @@ def _theme_file_candidates() -> Sequence[Path | Traversable]:
     return candidates
 
 
-def _merge_theme_data(
-    base: Mapping[str, Any], override: Mapping[str, Any]
-) -> Dict[str, Any]:
+def _merge_theme_data(base: Mapping[str, Any], override: Mapping[str, Any]) -> Dict[str, Any]:
     """Merge raw theme data dictionaries.
 
     Behaviour requirements:
@@ -176,9 +174,7 @@ def _merge_theme_data(
     - Non-"themes" top-level keys are simply overridden.
     """
 
-    def deep_merge_theme(
-        base_theme: Mapping[str, Any], override_theme: Mapping[str, Any]
-    ) -> Dict[str, Any]:
+    def deep_merge_theme(base_theme: Mapping[str, Any], override_theme: Mapping[str, Any]) -> Dict[str, Any]:
         result: Dict[str, Any] = dict(base_theme)
         for k, v in override_theme.items():
             if k == "palette" and isinstance(v, Mapping):
@@ -275,9 +271,7 @@ def _ensure_theme_definitions() -> Dict[str, Dict[str, Any]]:
     for name, cfg in cleaned.items():
         palette = cfg.get("palette")
         if isinstance(palette, Mapping):
-            THEMES[name] = {
-                str(k): str(v) for k, v in palette.items() if isinstance(k, str)
-            }
+            THEMES[name] = {str(k): str(v) for k, v in palette.items() if isinstance(k, str)}
     _THEME_DEFINITIONS = cleaned
     return cleaned
 
@@ -289,9 +283,7 @@ def _fallback_track_speed_scale(palette: Mapping[str, Color]) -> TrackSpeedScale
     return TrackSpeedScale(((0.0, base), (500.0, base)))
 
 
-def _parse_track_speed_scale(
-    cfg: Mapping[str, Any] | None, palette: Mapping[str, Color]
-) -> TrackSpeedScale:
+def _parse_track_speed_scale(cfg: Mapping[str, Any] | None, palette: Mapping[str, Color]) -> TrackSpeedScale:
     if not isinstance(cfg, Mapping):
         return _fallback_track_speed_scale(palette)
 
@@ -397,12 +389,8 @@ class ThemeManager:
                 palette[key] = hex_color(str(source))
             except Exception:
                 palette[key] = hex_color(str(value))
-        scale_cfg = (
-            base_def.get("track_speed_scale") if isinstance(base_def, Mapping) else None
-        )
-        scale = _parse_track_speed_scale(
-            scale_cfg if isinstance(scale_cfg, Mapping) else None, palette
-        )
+        scale_cfg = base_def.get("track_speed_scale") if isinstance(base_def, Mapping) else None
+        scale = _parse_track_speed_scale(scale_cfg if isinstance(scale_cfg, Mapping) else None, palette)
         cls._theme = Theme(name=name, palette=palette, track_speed_scale=scale)
         cls._rgb565_cache.clear()
         return cls

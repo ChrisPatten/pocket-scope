@@ -8,10 +8,36 @@ PocketScope ingests live sensor feeds and recorded datasets into the event bus. 
 
 `ingest/adsb/json_source.py` polls a dump1090-compatible endpoint (typically `http://host/data/aircraft.json`). Key behaviours:
 
-- Conditional requests with `If-Modified-Since` and `ETag` headers to avoid unnecessary transfers.
-- Exponential backoff when the endpoint is unavailable.
-- Translation of dump1090 fields into `AdsbMessage` models, including unit conversion and identifier casing fixes.
-- Publication on the `adsb.raw` topic for downstream processing.
+
+### Live dump1090 SBS (TCP 30003)
+
+Some dump1090 setups also expose an SBS-1 style text feed on TCP port
+30003. This feed emits newline-delimited ASCII messages (SBS-1) that
+contain individual aircraft state updates. PocketScope may optionally
+connect to such a feed as an `AdsbSource` implementation that parses
+SBS lines and publishes the same `AdsbMessage` models as the JSON
+polling source.
+
+Suggested configuration / usage:
+
+- CLI: add an option to select the `SBS` source and provide host:port
+	(for example `--adsb-src SBS --adsb-sbs-host 192.168.1.2 --adsb-sbs-port 30003`).
+- Environment:
+	- `DUMP1090_SBS_HOST` — host serving the SBS feed (default: `localhost`).
+	- `DUMP1090_SBS_PORT` — TCP port (default: `30003`).
+	- `DUMP1090_SBS_RECONNECT_S` — reconnect backoff base in seconds.
+
+Notes and behaviour:
+
+- The SBS TCP connection should be read line-by-line and tolerant of
+	partial/incomplete lines. Implementations must not block the event
+	loop for long reads; prefer a small reader task or thread pool for
+	parsing.  
+- When both JSON polling and SBS TCP are available users should pick
+	one to avoid duplicate messages; the ingestion layer does not dedupe
+	across sources by default.
+- Keep the connection local by default (operate offline) unless an
+	explicit remote host is configured.
 
 ### JSONL Playback
 

@@ -10,6 +10,7 @@ from pocketscope.core.geo import (
 )
 from pocketscope.data.sectors import Sector
 from pocketscope.render.canvas import Canvas
+from pocketscope.render.geo_cache import global_cache
 from pocketscope.theme import ThemeManager
 
 
@@ -77,11 +78,7 @@ class SectorsLayer:
 
         # Resolve theme colors (live) each draw
         try:
-            base_color = (
-                self._color_override
-                if self._color_override is not None
-                else ThemeManager.color("sector.line")
-            )
+            base_color = self._color_override if self._color_override is not None else ThemeManager.color("sector.line")
         except Exception:
             base_color = (128, 128, 128, 100)
         try:
@@ -89,7 +86,7 @@ class SectorsLayer:
         except Exception:
             label_color = (255, 255, 255, 220)
 
-        # Deterministic draw order: by name
+        cache = global_cache()
         for s in sorted(sectors, key=lambda s: s.name):
             if not s.points:
                 continue
@@ -103,10 +100,24 @@ class SectorsLayer:
             if not keep:
                 continue
 
-            # Convert to screen points, close polygon
-            pts = [to_screen(lat, lon) for (lat, lon) in s.points]
-            if pts and pts[0] != pts[-1]:
-                pts.append(pts[0])
+            def _build() -> list[list[tuple[int, int]]]:
+                pts_local = [to_screen(lat, lon) for (lat, lon) in s.points]
+                if pts_local and pts_local[0] != pts_local[-1]:
+                    pts_local.append(pts_local[0])
+                return [pts_local]
+
+            entry = cache.get_or_build(
+                layer="sectors",
+                obj_id=s.name,
+                range_nm=float(range_nm),
+                rotation_deg=float(rotation_deg),
+                center_lat=float(center_lat),
+                center_lon=float(center_lon),
+                display_px=(W, H),
+                m_per_px=m_per_px,
+                build_fn=_build,
+            )
+            pts = entry.screen_pts[0]
 
             # Outline
             canvas.polyline(pts, width=self.width_px, color=base_color)
@@ -115,9 +126,7 @@ class SectorsLayer:
             # (excluding duplicate last point)
             if self.show_labels:
                 try:
-                    core_pts = (
-                        pts[:-1] if (len(pts) >= 2 and pts[0] == pts[-1]) else pts
-                    )
+                    core_pts = pts[:-1] if (len(pts) >= 2 and pts[0] == pts[-1]) else pts
                     if core_pts:
                         sx = sum(p[0] for p in core_pts) / float(len(core_pts))
                         sy = sum(p[1] for p in core_pts) / float(len(core_pts))

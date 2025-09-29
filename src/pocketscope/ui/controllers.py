@@ -143,20 +143,12 @@ class UiController:
         except Exception:
             disp_w = 300  # pragmatic fallback for headless environments
         self._overlay = StatusOverlay(self._settings, width_px=disp_w)
-        self.primary_sidebar_mode = getattr(
-            self._settings, "primary_sidebar_mode", "vertical_profile"
-        )
-        self.primary_sidebar_side = getattr(
-            self._settings, "primary_sidebar_side", "right"
-        )
-        self.info_blocks_policy = getattr(
-            self._settings, "info_blocks_policy", "focus_and_closest"
-        )
+        self.primary_sidebar_mode = getattr(self._settings, "primary_sidebar_mode", "vertical_profile")
+        self.primary_sidebar_side = getattr(self._settings, "primary_sidebar_side", "right")
+        self.info_blocks_policy = getattr(self._settings, "info_blocks_policy", "focus_and_closest")
         self._info_blocks_previous: str | None = None
         self._info_blocks_prev_baseline: str = (
-            self.info_blocks_policy
-            if self.info_blocks_policy != "focus_and_closest"
-            else "all"
+            self.info_blocks_policy if self.info_blocks_policy != "focus_and_closest" else "all"
         )
         self._info_block_targets: set[str] | None = None
         self._sidebar_focus_icao: str | None = None
@@ -183,13 +175,9 @@ class UiController:
         self.north_up_lock = getattr(self._settings, "north_up_lock", True)
         # Sector label visibility (persisted)
         self.sector_labels = bool(getattr(self._settings, "sector_labels", True))
-        self.autoscale_enabled = bool(
-            getattr(self._settings, "autoscale_enabled", False)
-        )
+        self.autoscale_enabled = bool(getattr(self._settings, "autoscale_enabled", False))
         try:
-            self.autoscale_target_visible = int(
-                getattr(self._settings, "autoscale_target_visible", 12)
-            )
+            self.autoscale_target_visible = int(getattr(self._settings, "autoscale_target_visible", 12))
         except Exception:
             self.autoscale_target_visible = 12
         self._autoscale_alt_override: tuple[float | None, float | None] | None = None
@@ -245,9 +233,7 @@ class UiController:
 
         # Config change subscription & listener task
         self._cfg_sub: Subscription | None = bus.subscribe("cfg.changed")
-        self._cfg_task: asyncio.Task[None] | None = asyncio.create_task(
-            self._cfg_listener()
-        )
+        self._cfg_task: asyncio.Task[None] | None = asyncio.create_task(self._cfg_listener())
 
         # Geographic center defaults (Boston area sentinel)
         self._center_lat: float = 42.0 if center_lat is None else float(center_lat)
@@ -260,9 +246,7 @@ class UiController:
         self._demo_src: FilePlaybackSource | None = None
         self._demo_task: asyncio.Task[None] | None = None
         self._demo_trace_path_env = "POCKETSCOPE_DEMO_TRACE"
-        self._demo_default_trace = (
-            Path(__file__).resolve().parents[3] / "sample_data" / "demo_adsb.jsonl"
-        )
+        self._demo_default_trace = Path(__file__).resolve().parents[3] / "sample_data" / "demo_adsb.jsonl"
 
         # Optional static data
         self._map_provider = map_provider
@@ -295,9 +279,7 @@ class UiController:
     def set_softkeys(self, bar: SoftKeyBar) -> None:
         # Apply persisted softkey typography/padding when available
         try:
-            bar._requested_font_px = int(
-                getattr(self._settings, "softkeys_font_px", bar._requested_font_px)
-            )
+            bar._requested_font_px = int(getattr(self._settings, "softkeys_font_px", bar._requested_font_px))
         except Exception:
             pass
         try:
@@ -379,13 +361,9 @@ class UiController:
         )
         fps_gauge = registry.gauge("ui_fps", "EMA frames/sec")
         tracks_total_g = registry.gauge("ui_tracks_total", "Active tracks")
-        tracks_visible_g = registry.gauge(
-            "ui_tracks_visible", "Visible tracks passing filters"
-        )
+        tracks_visible_g = registry.gauge("ui_tracks_visible", "Visible tracks passing filters")
         range_nm_g = registry.gauge("ui_range_nm", "Current range NM")
-        nearest_range_g = registry.gauge(
-            "ui_nearest_range_nm", "Nearest aircraft range NM"
-        )
+        nearest_range_g = registry.gauge("ui_nearest_range_nm", "Nearest aircraft range NM")
         perf_sampler = Sampler(rate_per_sec=2.0)
         self._running = True
         dt_target = 1.0 / max(1e-6, float(self._cfg.target_fps))
@@ -395,15 +373,28 @@ class UiController:
             if not pg.font.get_init():
                 pg.font.init()
 
+        # Rolling counters for periodic INFO diagnostics
+        info_last_emit = time.perf_counter()
+        frames_since_info = 0
+        accum_frame_wall = 0.0
+        accum_collect = 0.0
+        accum_render = 0.0
+        accum_sleep = 0.0
+        # Detailed sub-phase accumulators (1Hz summary only)
+        accum_inp = accum_met = accum_auto = accum_side = accum_snap = 0.0
+        accum_r_begin = accum_r_map = accum_r_view = accum_r_ovl = 0.0
+        accum_r_soft = accum_r_end = 0.0
         try:
             while self._running:
                 frame_wall_start = time.perf_counter()
                 t0 = self._ts.monotonic()
                 phase_collect_start = time.perf_counter()
+                # ---------------- Collect Phase (fine-grained) -----------------
                 # Handle input
                 self._process_input()
                 # Ensure softkey action set reflects current settings screen visibility
                 self._sync_softkeys()
+                t_after_input = time.perf_counter()
                 # External screenshot trigger polling (lightweight; every ~0.5s)
                 try:
                     now_ms_poll = t0 * 1000.0
@@ -430,17 +421,25 @@ class UiController:
                     self._screenshot_requested = False
 
                 metrics, tracks_active = self._collect_track_metrics()
+                t_after_metrics = time.perf_counter()
                 self._total_aircraft_count = len(metrics)
                 self._apply_autoscale(metrics)
+                t_after_autoscale = time.perf_counter()
                 now_wall = self._ts.wall_time()
                 self._update_sidebar(metrics, now_monotonic=t0, now_wall=now_wall)
+                t_after_sidebar = time.perf_counter()
                 snaps = self._build_snapshots(metrics)
-                collect_latency.observe(time.perf_counter() - phase_collect_start)
+                t_after_snapshots = time.perf_counter()
+                collect_dur = time.perf_counter() - phase_collect_start
+                collect_latency.observe(collect_dur)
                 nearest_range_nm = None  # will be set in overlay section if available
 
                 # Render frame
                 render_phase_start = time.perf_counter()
+                # Begin frame
+                r_begin_start = time.perf_counter()
                 canvas = self._display.begin_frame()
+                r_after_begin = time.perf_counter()
                 self._view.range_nm = float(self._cfg.range_nm)
                 # Apply rotation to view each frame
                 if hasattr(self._view, "rotation_deg"):
@@ -448,6 +447,7 @@ class UiController:
                         self._rotation_deg = 0.0  # enforce lock each frame
                     self._view.rotation_deg = float(self._rotation_deg) % 360.0
                 # Fetch map features near the current center when available
+                r_map_start = time.perf_counter()
                 map_data = None
                 if self._map_provider is not None:
                     try:
@@ -459,7 +459,9 @@ class UiController:
                         map_data = self._map_data
                 if map_data is not None:
                     self._map_data = map_data
+                r_after_map = time.perf_counter()
 
+                r_view_start = time.perf_counter()
                 self._view.draw(
                     canvas,
                     size_px=self._display.size(),
@@ -470,13 +472,20 @@ class UiController:
                     sectors=cast("Optional[Sequence[Sector]]", self._sectors),
                     occlusions=self._compute_occlusions(),
                 )
+                r_after_view = time.perf_counter()
+                # Capture fine-grained view timings if present (ms values)
+                view_detail_timings = getattr(self._view, "last_detail_timings", None)
+                if isinstance(view_detail_timings, dict) and view_detail_timings:
+                    # Stash for per-frame slow log
+                    _frame_view_detail = view_detail_timings.copy()
+                else:
+                    _frame_view_detail = {}
 
                 # Diagnostics overlay
+                r_overlay_start = time.perf_counter()
                 if self._cfg.overlay:
                     # FPS/bus diagnostics removed from overlay per new wireframe
-                    _fps_inst, _fps_avg = self._update_fps(
-                        t0
-                    )  # still computed to keep EMA warm
+                    _fps_inst, _fps_avg = self._update_fps(t0)  # still computed to keep EMA warm
                     # Future: health flags derived from services; for now assume True
                     clock_utc = self._fmt_clock(now_wall)
                     # Compute most recent track timestamp across active
@@ -502,18 +511,11 @@ class UiController:
                     try:
                         from math import asin, cos, radians, sin, sqrt
 
-                        def _haversine_nm(
-                            lat1: float, lon1: float, lat2: float, lon2: float
-                        ) -> float:
+                        def _haversine_nm(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
                             R = 6371000.0
                             dlat = radians(lat2 - lat1)
                             dlon = radians(lon2 - lon1)
-                            a = (
-                                sin(dlat / 2) ** 2
-                                + cos(radians(lat1))
-                                * cos(radians(lat2))
-                                * sin(dlon / 2) ** 2
-                            )
+                            a = sin(dlat / 2) ** 2 + cos(radians(lat1)) * cos(radians(lat2)) * sin(dlon / 2) ** 2
                             c = 2 * asin(min(1, sqrt(a)))
                             meters = R * c
                             nm = meters / 1852.0
@@ -539,13 +541,9 @@ class UiController:
                                     rng = None
                                     # Prefer a view helper if available
                                     try:
-                                        fn = getattr(
-                                            self._view, "great_circle_range_nm", None
-                                        )
+                                        fn = getattr(self._view, "great_circle_range_nm", None)
                                         if callable(fn):
-                                            _res = fn(
-                                                (lat, lon), (center_lat, center_lon)
-                                            )
+                                            _res = fn((lat, lon), (center_lat, center_lon))
                                             try:
                                                 if isinstance(_res, (int, float)):
                                                     rng = float(_res)
@@ -557,15 +555,10 @@ class UiController:
                                     except Exception:
                                         rng = None
                                     if rng is None:
-                                        rng = _haversine_nm(
-                                            lat, lon, center_lat, center_lon
-                                        )
+                                        rng = _haversine_nm(lat, lon, center_lat, center_lon)
                                     if rng is None:
                                         continue
-                                    if (
-                                        nearest_range_nm is None
-                                        or rng < nearest_range_nm
-                                    ):
+                                    if nearest_range_nm is None or rng < nearest_range_nm:
                                         nearest_range_nm = rng
                                         nearest_alt_ft = alt
                                 except Exception:
@@ -600,18 +593,14 @@ class UiController:
                         alt_filter_autoscale=(
                             True
                             if (
-                                getattr(self, "_autoscale_alt_override", None)
-                                is not None
-                                and getattr(self, "_autoscale_alt_override")[1]
-                                is not None
+                                getattr(self, "_autoscale_alt_override", None) is not None
+                                and getattr(self, "_autoscale_alt_override")[1] is not None
                                 and not (
                                     isinstance(
                                         getattr(self, "_autoscale_alt_override")[1],
                                         float,
                                     )
-                                    and math.isinf(
-                                        getattr(self, "_autoscale_alt_override")[1]
-                                    )
+                                    and math.isinf(getattr(self, "_autoscale_alt_override")[1])
                                 )
                             )
                             else False
@@ -619,10 +608,7 @@ class UiController:
                     )
                 # Settings overlay drawn (softkey mapping already synced earlier)
                 # Settings screen removed
-                if (
-                    self.primary_sidebar_mode == "vertical_profile"
-                    and self._vertical_profile
-                ):
+                if self.primary_sidebar_mode == "vertical_profile" and self._vertical_profile:
                     try:
                         self._vertical_profile.draw(
                             canvas,
@@ -632,15 +618,31 @@ class UiController:
                     except Exception:
                         pass
                 # Draw softkeys last (either restricted or full set)
+                r_softkeys_start = time.perf_counter()
                 if self._softkeys:
                     self._softkeys.draw(canvas)
+                r_after_softkeys = time.perf_counter()
 
                 # No per-frame flip call here — flips are applied when the
                 # setting changes or at controller initialization to avoid
                 # repeatedly invoking backend hooks every frame.
-
+                r_end_start = time.perf_counter()
                 self._display.end_frame()
-                render_latency.observe(time.perf_counter() - render_phase_start)
+                r_after_end = time.perf_counter()
+                render_dur = time.perf_counter() - render_phase_start
+                render_latency.observe(render_dur)
+                # ---------------- Sub-phase durations ----------------
+                input_dur = t_after_input - frame_wall_start
+                metrics_dur = t_after_metrics - t_after_input
+                autoscale_dur = t_after_autoscale - t_after_metrics
+                sidebar_dur = t_after_sidebar - t_after_autoscale
+                snapshots_dur = t_after_snapshots - t_after_sidebar
+                begin_dur = r_after_begin - r_begin_start
+                map_dur = r_after_map - r_map_start
+                view_dur = r_after_view - r_view_start
+                overlay_dur = r_softkeys_start - r_overlay_start
+                softkeys_dur = r_after_softkeys - r_softkeys_start
+                end_dur = r_after_end - r_end_start
 
                 # Frame pacing
                 t1 = self._ts.monotonic()
@@ -655,7 +657,8 @@ class UiController:
                 if slept > 0:
                     sleep_latency.observe(slept)
                 # Per-frame metrics
-                frame_latency.observe(time.perf_counter() - frame_wall_start)
+                frame_wall_dur = time.perf_counter() - frame_wall_start
+                frame_latency.observe(frame_wall_dur)
                 frames_total.inc()
                 try:
                     fps_gauge.set(self._fps_avg)
@@ -673,15 +676,333 @@ class UiController:
                     logger.debug(
                         "ui.frame",
                         extra={
-                            "frame_ms": round(
-                                (time.perf_counter() - frame_wall_start) * 1000.0, 3
-                            ),
+                            "frame_ms": round((time.perf_counter() - frame_wall_start) * 1000.0, 3),
                             "tracks_total": self._total_aircraft_count,
                             "tracks_visible": self._visible_aircraft_count,
                             "range_nm": round(float(self._cfg.range_nm), 3),
                             "fps_ema": round(self._fps_avg, 2),
                         },
                     )
+                # Aggregate for periodic INFO log (1 Hz)
+                frames_since_info += 1
+                accum_frame_wall += frame_wall_dur
+                accum_collect += collect_dur
+                accum_render += render_dur
+                accum_sleep += slept
+                accum_inp += input_dur
+                accum_met += metrics_dur
+                accum_auto += autoscale_dur
+                accum_side += sidebar_dur
+                accum_snap += snapshots_dur
+                accum_r_begin += begin_dur
+                accum_r_map += map_dur
+                accum_r_view += view_dur
+                accum_r_ovl += overlay_dur
+                accum_r_soft += softkeys_dur
+                accum_r_end += end_dur
+                now_info = time.perf_counter()
+                # Single-frame slow detection
+                slow_threshold = max(0.15, (1.0 / max(1.0, self._cfg.target_fps)) * 3.0)
+                if frame_wall_dur > slow_threshold and logger.isEnabledFor(logging.WARNING):
+                    enc_ms = getattr(self._display, "last_encode_ms", None)
+                    tx_ms = getattr(self._display, "last_tx_ms", None)
+                    enc_tx_txt = ""
+                    if callable(enc_ms) and callable(tx_ms):
+                        try:
+                            enc_val = enc_ms()
+                            tx_val = tx_ms()
+                            enc_tx_txt = f" r_enc={enc_val:.2f} r_tx={tx_val:.2f}"
+                        except Exception:
+                            enc_tx_txt = ""
+                    logger.warning(
+                        ("ui.frame.slow " f"ms={frame_wall_dur*1000.0:.2f} collect={collect_dur*1000.0:.2f} ")
+                        + (
+                            f"render={render_dur*1000.0:.2f} inp={input_dur*1000.0:.2f} "
+                            f"met={metrics_dur*1000.0:.2f} auto={autoscale_dur*1000.0:.2f} "
+                        )
+                        + (
+                            f"side={sidebar_dur*1000.0:.2f} snap={snapshots_dur*1000.0:.2f} "
+                            f"r_begin={begin_dur*1000.0:.2f} r_map={map_dur*1000.0:.2f} "
+                        )
+                        + (
+                            f"r_view={view_dur*1000.0:.2f} r_ovl={overlay_dur*1000.0:.2f} "
+                            f"r_soft={softkeys_dur*1000.0:.2f} r_end={end_dur*1000.0:.2f}{enc_tx_txt}"
+                        ),
+                        extra={
+                            "frame_ms": round(frame_wall_dur * 1000.0, 3),
+                            "collect_ms": round(collect_dur * 1000.0, 3),
+                            "render_ms": round(render_dur * 1000.0, 3),
+                            "input_ms": round(input_dur * 1000.0, 3),
+                            "metrics_ms": round(metrics_dur * 1000.0, 3),
+                            "autoscale_ms": round(autoscale_dur * 1000.0, 3),
+                            "sidebar_ms": round(sidebar_dur * 1000.0, 3),
+                            "snapshots_ms": round(snapshots_dur * 1000.0, 3),
+                            "r_begin_ms": round(begin_dur * 1000.0, 3),
+                            "r_map_ms": round(map_dur * 1000.0, 3),
+                            "r_view_ms": round(view_dur * 1000.0, 3),
+                            "r_overlay_ms": round(overlay_dur * 1000.0, 3),
+                            "r_softkeys_ms": round(softkeys_dur * 1000.0, 3),
+                            "r_end_ms": round(end_dur * 1000.0, 3),
+                            **(
+                                (
+                                    lambda d: (
+                                        lambda f, g, h: {
+                                            "r_enc_ms": round(f(), 3),
+                                            "r_tx_ms": round(g(), 3),
+                                            "r_fast": int(1 if h() else 0),
+                                        }
+                                    )(
+                                        getattr(d, "last_encode_ms"),
+                                        getattr(d, "last_tx_ms"),
+                                        getattr(d, "last_fast_used"),
+                                    )
+                                    if all(
+                                        callable(getattr(d, n, None))
+                                        for n in (
+                                            "last_encode_ms",
+                                            "last_tx_ms",
+                                            "last_fast_used",
+                                        )
+                                    )
+                                    else {}
+                                )(self._display)
+                            ),
+                        },
+                    )
+                if now_info - info_last_emit >= 1.0:
+                    if logger.isEnabledFor(logging.INFO):
+                        avg_frame_ms = (accum_frame_wall / max(1, frames_since_info)) * 1000.0
+                        avg_collect_ms = (accum_collect / max(1, frames_since_info)) * 1000.0
+                        avg_render_ms = (accum_render / max(1, frames_since_info)) * 1000.0
+                        avg_sleep_ms = (accum_sleep / max(1, frames_since_info)) * 1000.0
+                        avg_inp_ms = (accum_inp / max(1, frames_since_info)) * 1000.0
+                        avg_met_ms = (accum_met / max(1, frames_since_info)) * 1000.0
+                        avg_auto_ms = (accum_auto / max(1, frames_since_info)) * 1000.0
+                        avg_side_ms = (accum_side / max(1, frames_since_info)) * 1000.0
+                        avg_snap_ms = (accum_snap / max(1, frames_since_info)) * 1000.0
+                        avg_rb_ms = (accum_r_begin / max(1, frames_since_info)) * 1000.0
+                        avg_rm_ms = (accum_r_map / max(1, frames_since_info)) * 1000.0
+                        avg_rv_ms = (accum_r_view / max(1, frames_since_info)) * 1000.0
+                        avg_ro_ms = (accum_r_ovl / max(1, frames_since_info)) * 1000.0
+                        avg_rs_ms = (accum_r_soft / max(1, frames_since_info)) * 1000.0
+                        avg_re_ms = (accum_r_end / max(1, frames_since_info)) * 1000.0
+                        # If we have detailed view timings for most recent frame(s),
+                        # compute simple averages over the window (we only retain last
+                        # frame detail so treat as current snapshot). Future: could
+                        # accumulate but we avoid overhead now.
+                        view_detail_avg_txt = ""
+                        if isinstance(getattr(self._view, "last_detail_timings", None), dict):
+                            vd = getattr(self._view, "last_detail_timings") or {}
+                            if vd:
+                                # Include only a subset to keep line length reasonable.
+                                keys_order = [
+                                    "sectors",
+                                    "states",
+                                    "airports",
+                                    "rings",
+                                    "cardinals",
+                                    "ownship",
+                                    "trails",
+                                    "glyphs",
+                                    "simple_labels",
+                                    "data_blocks",
+                                ]
+                                parts = []
+                                for k in keys_order:
+                                    if k in vd:
+                                        parts.append(f"{k[:6]}={vd[k]:.2f}")
+                                if parts:
+                                    view_detail_avg_txt = " view_detail=" + ",".join(parts)
+                        cache_stats_txt = ""
+                        try:  # snapshot geometry cache + decimation stats (cheap O(1))
+                            from pocketscope.render.geo_cache import (  # local import to avoid cycle
+                                global_cache,
+                            )
+
+                            _gc = global_cache()
+                            snap = _gc.snapshot_and_reset()
+                            sect_hit = snap["layer_hits"].get("sectors", 0)
+                            sect_miss = snap["layer_misses"].get("sectors", 0)
+                            state_hit = snap["layer_hits"].get("states", 0)
+                            state_miss = snap["layer_misses"].get("states", 0)
+                            simp_raw = getattr(
+                                getattr(self, "_view", object()),
+                                "last_state_vertex_stats",
+                                {},
+                            ).get("state_vertices_raw", 0)
+                            simp_out = getattr(
+                                getattr(self, "_view", object()),
+                                "last_state_vertex_stats",
+                                {},
+                            ).get("state_vertices_out", 0)
+                            decim = (
+                                getattr(
+                                    getattr(self, "_view", object()),
+                                    "last_geom_decimation_stats",
+                                    {},
+                                )
+                                or {}
+                            )
+                            decim_enabled = decim.get("enabled")
+                            decim_interval = decim.get("interval")
+                            decim_age = decim.get("age")
+                            decim_rebuild = decim.get("rebuild")
+                            decim_dyn = decim.get("dyn_factor") if isinstance(decim, dict) else None
+                            # Pull optional detailed rebuild stats from view
+                            rebuild_stats = (
+                                getattr(
+                                    getattr(self, "_view", object()),
+                                    "last_state_rebuild_stats",
+                                    {},
+                                )
+                                or {}
+                            )
+                            rings_total = rebuild_stats.get("rings_total")
+                            rings_kept = rebuild_stats.get("rings_kept")
+                            simplify_ms = rebuild_stats.get("simplify_ms")
+                            project_ms = rebuild_stats.get("project_ms")
+                            rebuild_txt = ""
+                            if rings_total is not None and rings_kept is not None:
+                                rebuild_txt = (
+                                    f" rings={rings_kept}/{rings_total} simp_ms={simplify_ms} proj_ms={project_ms}"
+                                )
+                            cache_stats_txt = (
+                                (
+                                    f" geo_cache=sect_hit={sect_hit}|sect_miss={sect_miss}|"
+                                    f"state_hit={state_hit}|state_miss={state_miss}"
+                                )
+                                + (f" simp=raw={simp_raw}|out={simp_out}")
+                                + (
+                                    f" geom_decim=en={int(1 if decim_enabled else 0)}|int={decim_interval}|"
+                                    f"age={decim_age}|rb={decim_rebuild}"
+                                )
+                                + (f"|dyn={decim_dyn}" if decim_dyn is not None else "")
+                            ) + rebuild_txt
+                        except Exception:
+                            cache_stats_txt = ""
+                        msg_txt = (
+                            "ui.perf "
+                            + f"fps={self._fps_avg:.2f} "
+                            + f"frame_ms={avg_frame_ms:.2f} collect_ms={avg_collect_ms:.2f} "
+                            + f"render_ms={avg_render_ms:.2f} sleep_ms={avg_sleep_ms:.2f} "
+                            + (
+                                f"collect_breakdown=in={avg_inp_ms:.2f}|met={avg_met_ms:.2f}|"
+                                f"auto={avg_auto_ms:.2f}|side={avg_side_ms:.2f}|"
+                                f"snap={avg_snap_ms:.2f} "
+                            )
+                            + (
+                                f"render_breakdown=beg={avg_rb_ms:.2f}|map={avg_rm_ms:.2f}|view={avg_rv_ms:.2f}|"
+                                f"ovl={avg_ro_ms:.2f}|sk={avg_rs_ms:.2f}|end={avg_re_ms:.2f}{view_detail_avg_txt} "
+                            )
+                            + (
+                                f"tracks={self._total_aircraft_count} visible={self._visible_aircraft_count} "
+                                f"range_nm={float(self._cfg.range_nm):.1f}{cache_stats_txt}"
+                            )
+                        )
+                        logger.info(
+                            msg_txt,
+                            extra={
+                                "fps_ema": round(self._fps_avg, 2),
+                                "avg_frame_ms": round(avg_frame_ms, 3),
+                                "avg_collect_ms": round(avg_collect_ms, 3),
+                                "avg_render_ms": round(avg_render_ms, 3),
+                                "avg_sleep_ms": round(avg_sleep_ms, 3),
+                                "avg_input_ms": round(avg_inp_ms, 3),
+                                "avg_metrics_ms": round(avg_met_ms, 3),
+                                "avg_autoscale_ms": round(avg_auto_ms, 3),
+                                "avg_sidebar_ms": round(avg_side_ms, 3),
+                                "avg_snapshots_ms": round(avg_snap_ms, 3),
+                                "avg_r_begin_ms": round(avg_rb_ms, 3),
+                                "avg_r_map_ms": round(avg_rm_ms, 3),
+                                "avg_r_view_ms": round(avg_rv_ms, 3),
+                                "avg_r_overlay_ms": round(avg_ro_ms, 3),
+                                "avg_r_softkeys_ms": round(avg_rs_ms, 3),
+                                "avg_r_end_ms": round(avg_re_ms, 3),
+                                "tracks_total": self._total_aircraft_count,
+                                "tracks_visible": self._visible_aircraft_count,
+                                "range_nm": round(float(self._cfg.range_nm), 3),
+                                # geometry decimation structured fields (if present)
+                                "geom_decim_enabled": getattr(
+                                    getattr(self, "_view", object()),
+                                    "last_geom_decimation_stats",
+                                    {},
+                                ).get("enabled"),
+                                "geom_decim_interval": getattr(
+                                    getattr(self, "_view", object()),
+                                    "last_geom_decimation_stats",
+                                    {},
+                                ).get("interval"),
+                                "geom_decim_age": getattr(
+                                    getattr(self, "_view", object()),
+                                    "last_geom_decimation_stats",
+                                    {},
+                                ).get("age"),
+                                "geom_decim_rebuild": getattr(
+                                    getattr(self, "_view", object()),
+                                    "last_geom_decimation_stats",
+                                    {},
+                                ).get("rebuild"),
+                                "geom_decim_dyn_factor": getattr(
+                                    getattr(self, "_view", object()),
+                                    "last_geom_decimation_stats",
+                                    {},
+                                ).get("dyn_factor"),
+                                # state geometry rebuild details
+                                "state_rings_total": getattr(
+                                    getattr(self, "_view", object()),
+                                    "last_state_rebuild_stats",
+                                    {},
+                                ).get("rings_total"),
+                                "state_rings_kept": getattr(
+                                    getattr(self, "_view", object()),
+                                    "last_state_rebuild_stats",
+                                    {},
+                                ).get("rings_kept"),
+                                "state_simplify_ms": getattr(
+                                    getattr(self, "_view", object()),
+                                    "last_state_rebuild_stats",
+                                    {},
+                                ).get("simplify_ms"),
+                                "state_project_ms": getattr(
+                                    getattr(self, "_view", object()),
+                                    "last_state_rebuild_stats",
+                                    {},
+                                ).get("project_ms"),
+                            },
+                        )
+                        # Highlight slow frame window if average above threshold
+                        slow_window_threshold = (
+                            500.0 if self._cfg.target_fps <= 5.0 else 1000.0 / max(1.0, self._cfg.target_fps) * 2.0
+                        )
+                        if avg_frame_ms > slow_window_threshold:
+                            logger.warning(
+                                (
+                                    f"ui.slow_window avg_frame_ms={avg_frame_ms:.2f} "
+                                    f"target_fps={self._cfg.target_fps} "
+                                )
+                                + (f"frames={frames_since_info}"),
+                                extra={
+                                    "avg_frame_ms": round(avg_frame_ms, 3),
+                                    "target_fps": self._cfg.target_fps,
+                                    "frames": frames_since_info,
+                                },
+                            )
+                    info_last_emit = now_info
+                    frames_since_info = 0
+                    accum_frame_wall = accum_collect = accum_render = accum_sleep = 0.0
+                    (
+                        accum_inp,
+                        accum_met,
+                        accum_auto,
+                        accum_side,
+                        accum_snap,
+                        accum_r_begin,
+                        accum_r_map,
+                        accum_r_view,
+                        accum_r_ovl,
+                        accum_r_soft,
+                        accum_r_end,
+                    ) = (0.0,) * 11
         except asyncio.CancelledError:  # pragma: no cover - cooperative cancel
             pass
         finally:
@@ -712,10 +1033,7 @@ class UiController:
         except Exception:
             pass
         # Vertical profile sidebar
-        if (
-            self.primary_sidebar_mode == "vertical_profile"
-            and self._vertical_profile is not None
-        ):
+        if self.primary_sidebar_mode == "vertical_profile" and self._vertical_profile is not None:
             try:
                 rect = self._vertical_profile.panel_rect()
             except Exception:
@@ -804,9 +1122,7 @@ class UiController:
         mode = self.primary_sidebar_mode
         if mode == "vertical_profile":
             if self._vertical_profile is None:
-                self._vertical_profile = VerticalProfilePanel(
-                    self._settings, side=self.primary_sidebar_side
-                )
+                self._vertical_profile = VerticalProfilePanel(self._settings, side=self.primary_sidebar_side)
             else:
                 self._vertical_profile.refresh_settings(self._settings)
                 self._vertical_profile.set_side(self.primary_sidebar_side)
@@ -885,17 +1201,9 @@ class UiController:
             "none",
         }:
             self.set_info_blocks_policy("focus_and_closest", persist=persist)
-        if (
-            prev_mode == "vertical_profile"
-            and self.info_blocks_policy == "focus_and_closest"
-        ):
-            if (
-                self._info_blocks_prev_baseline
-                and self._info_blocks_prev_baseline != "focus_and_closest"
-            ):
-                self.set_info_blocks_policy(
-                    self._info_blocks_prev_baseline, persist=persist
-                )
+        if prev_mode == "vertical_profile" and self.info_blocks_policy == "focus_and_closest":
+            if self._info_blocks_prev_baseline and self._info_blocks_prev_baseline != "focus_and_closest":
+                self.set_info_blocks_policy(self._info_blocks_prev_baseline, persist=persist)
         if persist:
             SettingsStore.save_debounced(self._settings)
 
@@ -1026,9 +1334,7 @@ class UiController:
             # Explicitly type this local so static checkers do not treat
             # getattr()'s result as Any and then complain about returning
             # Any from a function declared to return a typed tuple.
-            override: tuple[float | None, float | None] | None = getattr(
-                self, "_autoscale_alt_override", None
-            )
+            override: tuple[float | None, float | None] | None = getattr(self, "_autoscale_alt_override", None)
             if override is not None:
                 o_lo, o_hi = override
                 if o_lo is not None:
@@ -1037,9 +1343,7 @@ class UiController:
                     if math.isinf(o_hi):
                         base_hi = None
                     else:
-                        base_hi = (
-                            min(base_hi, o_hi) if base_hi is not None else float(o_hi)
-                        )
+                        base_hi = min(base_hi, o_hi) if base_hi is not None else float(o_hi)
         return base_lo, base_hi
 
     def _apply_track_windows(self) -> None:
@@ -1134,14 +1438,9 @@ class UiController:
                 except Exception:
                     pass
                 sidebar_handled = False
-                if (
-                    self.primary_sidebar_mode == "vertical_profile"
-                    and self._vertical_profile is not None
-                ):
+                if self.primary_sidebar_mode == "vertical_profile" and self._vertical_profile is not None:
                     try:
-                        sidebar_handled = self._vertical_profile.on_key(
-                            pg.key.name(key), self._ts.monotonic()
-                        )
+                        sidebar_handled = self._vertical_profile.on_key(pg.key.name(key), self._ts.monotonic())
                     except Exception:
                         sidebar_handled = False
                 if sidebar_handled:
@@ -1162,14 +1461,9 @@ class UiController:
                 x, y = ev.pos
                 # If settings screen visible, attempt to consume click first.
                 # Settings screen removed: no mouse interception
-                if (
-                    self.primary_sidebar_mode == "vertical_profile"
-                    and self._vertical_profile is not None
-                ):
+                if self.primary_sidebar_mode == "vertical_profile" and self._vertical_profile is not None:
                     try:
-                        if self._vertical_profile.on_mouse(
-                            x, y, ev.button, self._ts.monotonic()
-                        ):
+                        if self._vertical_profile.on_mouse(x, y, ev.button, self._ts.monotonic()):
                             continue
                     except Exception:
                         pass
@@ -1286,9 +1580,7 @@ class UiController:
                 self._settings = new
                 self._cfg.range_nm = float(new.range_nm)
                 self.units = new.units
-                self.track_length_s = float(
-                    getattr(new, "track_length_s", self.track_length_s)
-                )
+                self.track_length_s = float(getattr(new, "track_length_s", self.track_length_s))
                 # Track expiry window (seconds)
                 try:
                     self.track_expiry_s = float(
@@ -1307,9 +1599,7 @@ class UiController:
                 self.demo_mode = new.demo_mode
                 self.altitude_filter = getattr(new, "altitude_filter", "All")
                 self.north_up_lock = getattr(new, "north_up_lock", True)
-                self.autoscale_enabled = bool(
-                    getattr(new, "autoscale_enabled", self.autoscale_enabled)
-                )
+                self.autoscale_enabled = bool(getattr(new, "autoscale_enabled", self.autoscale_enabled))
                 try:
                     self.autoscale_target_visible = int(
                         getattr(
@@ -1341,6 +1631,22 @@ class UiController:
                     _config.update_from_settings(self._settings)
                 except Exception:
                     pass
+                # Apply persisted target_fps immediately so pacing, logging
+                # thresholds and EMA behaviour reflect the user's choice.
+                try:
+                    new_tfps = getattr(new, "target_fps", None)
+                    if new_tfps is not None:
+                        try:
+                            self._cfg.target_fps = float(new_tfps)
+                            # Re-base EMA to avoid long warmup after big changes
+                            try:
+                                self._fps_avg = float(self._cfg.target_fps)
+                            except Exception:
+                                pass
+                        except Exception:
+                            pass
+                except Exception:
+                    pass
                 # Live‑apply sidebar mode / side / info block policy changes.
                 # Previously these fields were only read during controller
                 # initialization, so editing settings.yml while the app was
@@ -1348,9 +1654,7 @@ class UiController:
                 # visible effect until a restart. Applying them here lets
                 # users toggle these options via external config updates.
                 try:
-                    new_mode = getattr(
-                        new, "primary_sidebar_mode", self.primary_sidebar_mode
-                    )
+                    new_mode = getattr(new, "primary_sidebar_mode", self.primary_sidebar_mode)
                     if (
                         isinstance(new_mode, str)
                         and new_mode in _SIDEBAR_MODES
@@ -1361,34 +1665,28 @@ class UiController:
                         # Rebuild / teardown vertical profile or softkeys
                         self._apply_sidebar_mode()
                         # Enforce policy constraints when entering/exiting
-                        if (
-                            new_mode == "vertical_profile"
-                            and self.info_blocks_policy
-                            not in {"focus_and_closest", "none"}
-                        ):
+                        if new_mode == "vertical_profile" and self.info_blocks_policy not in {
+                            "focus_and_closest",
+                            "none",
+                        }:
                             # Preserve previous baseline so when user later
                             # leaves vertical profile we can restore it if
                             # focus_and_closest was only a temporary override.
                             if self.info_blocks_policy != "focus_and_closest":
-                                self._info_blocks_prev_baseline = (
-                                    self.info_blocks_policy
-                                )
+                                self._info_blocks_prev_baseline = self.info_blocks_policy
                             self.info_blocks_policy = "focus_and_closest"
                             self._apply_info_blocks_policy()
                         if (
                             prev_mode == "vertical_profile"
                             and self.info_blocks_policy == "focus_and_closest"
                             and self._info_blocks_prev_baseline
-                            and self._info_blocks_prev_baseline
-                            not in {"focus_and_closest"}
+                            and self._info_blocks_prev_baseline not in {"focus_and_closest"}
                         ):
                             # Restore prior baseline policy now that vertical
                             # profile view is no longer active.
                             self.info_blocks_policy = self._info_blocks_prev_baseline
                             self._apply_info_blocks_policy()
-                    new_side = getattr(
-                        new, "primary_sidebar_side", self.primary_sidebar_side
-                    )
+                    new_side = getattr(new, "primary_sidebar_side", self.primary_sidebar_side)
                     if (
                         isinstance(new_side, str)
                         and new_side in _SIDEBAR_SIDES
@@ -1400,9 +1698,7 @@ class UiController:
                                 self._vertical_profile.set_side(new_side)
                             except Exception:
                                 pass
-                    new_policy = getattr(
-                        new, "info_blocks_policy", self.info_blocks_policy
-                    )
+                    new_policy = getattr(new, "info_blocks_policy", self.info_blocks_policy)
                     if (
                         isinstance(new_policy, str)
                         and new_policy in _INFO_BLOCK_POLICIES
@@ -1429,13 +1725,9 @@ class UiController:
                     if hasattr(self._view, "label_font_px"):
                         self._view.label_font_px = int(self._settings.label_font_px)
                     if hasattr(self._view, "label_line_gap_px"):
-                        self._view.label_line_gap_px = int(
-                            self._settings.label_line_gap_px
-                        )
+                        self._view.label_line_gap_px = int(self._settings.label_line_gap_px)
                     if hasattr(self._view, "label_block_pad_px"):
-                        self._view.label_block_pad_px = int(
-                            self._settings.label_block_pad_px
-                        )
+                        self._view.label_block_pad_px = int(self._settings.label_block_pad_px)
                     # Apply status overlay font size as well
                     try:
                         self._overlay.font_px = int(self._settings.status_font_px)
@@ -1445,9 +1737,7 @@ class UiController:
                     try:
                         if self._softkeys:
                             # Set requested font so layout uses it
-                            self._softkeys._requested_font_px = int(
-                                self._settings.softkeys_font_px
-                            )
+                            self._softkeys._requested_font_px = int(self._settings.softkeys_font_px)
                             self._softkeys.pad_x = int(self._settings.softkeys_pad_x)
                             self._softkeys.pad_y = int(self._settings.softkeys_pad_y)
                             # Allow automatic height computation based on font/pad
@@ -1496,9 +1786,7 @@ class UiController:
             self._refresh_info_block_targets()
             return
         if self._vertical_profile is None:
-            self._vertical_profile = VerticalProfilePanel(
-                self._settings, side=self.primary_sidebar_side
-            )
+            self._vertical_profile = VerticalProfilePanel(self._settings, side=self.primary_sidebar_side)
         else:
             self._vertical_profile.refresh_settings(self._settings)
             self._vertical_profile.set_side(self.primary_sidebar_side)
@@ -1557,9 +1845,7 @@ class UiController:
         self._sidebar_focus_icao = state.focus.icao if state.focus else None
         self._sidebar_focus_pinned = state.pinned
         self._sidebar_closest_icao = state.closest.icao if state.closest else None
-        self._refresh_info_block_targets(
-            focus=self._sidebar_focus_icao, closest=self._sidebar_closest_icao
-        )
+        self._refresh_info_block_targets(focus=self._sidebar_focus_icao, closest=self._sidebar_closest_icao)
 
     def _collect_track_metrics(self) -> tuple[list[_TrackMetric], list[Any]]:
         try:
@@ -1667,15 +1953,11 @@ class UiController:
         except Exception:
             return math.inf
 
-    def _autoscale_alt_threshold(
-        self, metrics: list[_TrackMetric], range_limit: float, target: int
-    ) -> float | None:
+    def _autoscale_alt_threshold(self, metrics: list[_TrackMetric], range_limit: float, target: int) -> float | None:
         alts = sorted(
             float(m.altitude_ft)
             for m in metrics
-            if m.altitude_ft is not None
-            and math.isfinite(m.distance_nm)
-            and m.distance_nm <= range_limit + 1e-6
+            if m.altitude_ft is not None and math.isfinite(m.distance_nm) and m.distance_nm <= range_limit + 1e-6
         )
         if not alts:
             return None
@@ -1691,9 +1973,7 @@ class UiController:
 
         user_lo, user_hi = self._user_alt_filter_bounds()
 
-        def _eligible_for_autoscale(
-            m: _TrackMetric, *, ignore_hi: bool = False
-        ) -> bool:
+        def _eligible_for_autoscale(m: _TrackMetric, *, ignore_hi: bool = False) -> bool:
             if not math.isfinite(m.distance_nm):
                 return False
             # Previously autoscale only considered tracks with a "full"
@@ -1734,9 +2014,7 @@ class UiController:
             autoscale_max_range = None
 
         eligible_metrics = [m for m in metrics if _eligible_for_autoscale(m)]
-        extended_metrics = [
-            m for m in metrics if _eligible_for_autoscale(m, ignore_hi=True)
-        ]
+        extended_metrics = [m for m in metrics if _eligible_for_autoscale(m, ignore_hi=True)]
 
         if not eligible_metrics:
             # No eligible aircraft -> reset overrides and clamp range inside bounds
@@ -1790,9 +2068,7 @@ class UiController:
             if autoscale_min_range is not None:
                 lower_bound = max(lower_bound, autoscale_min_range)
             upper_bound_candidate = max(max_distance, max_distance_extended, user_range)
-            upper_bound = min(
-                cfg_max, _ceil_to_step(max(lower_bound, upper_bound_candidate))
-            )
+            upper_bound = min(cfg_max, _ceil_to_step(max(lower_bound, upper_bound_candidate)))
             if autoscale_max_range is not None:
                 upper_bound = min(upper_bound, autoscale_max_range)
             limit_upper = min(limit_upper, user_range)
@@ -1829,9 +2105,7 @@ class UiController:
             # Lower-bound mode: zoom out to reach target, altitude filter only at base
             if base_count > target:
                 selected_range = base_range
-                threshold = self._autoscale_alt_threshold(
-                    eligible_metrics, base_range, target
-                )
+                threshold = self._autoscale_alt_threshold(eligible_metrics, base_range, target)
                 if threshold is not None:
                     self._autoscale_alt_override = (None, threshold)
             else:
@@ -1862,23 +2136,15 @@ class UiController:
                     selected_range = lower_bound
                 else:
                     selected_range = max(lower_bound, chosen)
-                final_count = counts.get(
-                    selected_range, count_for_range(selected_range)
-                )
+                final_count = counts.get(selected_range, count_for_range(selected_range))
                 if final_count > target:
-                    threshold = self._autoscale_alt_threshold(
-                        eligible_metrics, selected_range, target
-                    )
+                    threshold = self._autoscale_alt_threshold(eligible_metrics, selected_range, target)
                     if threshold is not None:
                         self._autoscale_alt_override = (None, threshold)
 
         selected_range = max(lower_bound, min(selected_range, upper_bound))
 
-        if (
-            user_hi is not None
-            and selected_range >= limit_upper - 1e-6
-            and self._autoscale_alt_override is None
-        ):
+        if user_hi is not None and selected_range >= limit_upper - 1e-6 and self._autoscale_alt_override is None:
             base_upper_count = count_for_range(limit_upper)
             if extended_distances:
                 extended_count = bisect_right(extended_distances, limit_upper + 1e-6)
@@ -1888,9 +2154,7 @@ class UiController:
         self._autoscale_range_nm = selected_range
         self._cfg.range_nm = selected_range
 
-    def _build_snapshots(
-        self, metrics: list[_TrackMetric] | None = None
-    ) -> list[TrackSnapshot]:
+    def _build_snapshots(self, metrics: list[_TrackMetric] | None = None) -> list[TrackSnapshot]:
         if metrics is None:
             metrics, _ = self._collect_track_metrics()
         lo, hi = self.alt_filter
@@ -1973,9 +2237,7 @@ class UiController:
             for _, la, lon_pt, _alt in pts_sel:
                 try:
                     tx, ty, tz = geodetic_to_ecef(float(la), float(lon_pt), 0.0)
-                    e, n, _ = ecef_to_enu(
-                        tx, ty, tz, self._center_lat, self._center_lon, 0.0
-                    )
+                    e, n, _ = ecef_to_enu(tx, ty, tz, self._center_lat, self._center_lon, 0.0)
                     trail_enu.append((e, n))
                 except Exception:
                     continue
@@ -1999,18 +2261,8 @@ class UiController:
             # Focus semantics: both the actively selected (sidebar focus)
             # and the nearest (closest) vertical profile aircraft are
             # considered "Focus" for rendering (info block & styling).
-            is_focus = bool(
-                icao
-                and (
-                    (icao == self._sidebar_focus_icao)
-                    or (icao == self._sidebar_closest_icao)
-                )
-            )
-            info_visible = (
-                True
-                if self._info_block_targets is None
-                else bool(icao and icao in self._info_block_targets)
-            )
+            is_focus = bool(icao and ((icao == self._sidebar_focus_icao) or (icao == self._sidebar_closest_icao)))
+            info_visible = True if self._info_block_targets is None else bool(icao and icao in self._info_block_targets)
             # Always force full info block visibility for the aircraft that is
             # currently the vertical profile focus (highlighted in sidebar),
             # regardless of the active info block policy or filtering.
@@ -2024,16 +2276,10 @@ class UiController:
                     callsign=tr.callsign,
                     course_deg=course,
                     trail_enu=trail_enu if len(trail_enu) >= 2 else None,
-                    geo_alt_ft=(
-                        float(geo_alt) if isinstance(geo_alt, (int, float)) else None
-                    ),
-                    baro_alt_ft=(
-                        float(baro_alt) if isinstance(baro_alt, (int, float)) else None
-                    ),
+                    geo_alt_ft=(float(geo_alt) if isinstance(geo_alt, (int, float)) else None),
+                    baro_alt_ft=(float(baro_alt) if isinstance(baro_alt, (int, float)) else None),
                     ground_speed_kt=float(gs) if isinstance(gs, (int, float)) else None,
-                    vertical_rate_fpm=(
-                        float(vr) if isinstance(vr, (int, float)) else None
-                    ),
+                    vertical_rate_fpm=(float(vr) if isinstance(vr, (int, float)) else None),
                     focused=is_focus,
                     pinned=is_focus and self._sidebar_focus_pinned,
                     info_block_visible=info_visible,
@@ -2100,9 +2346,7 @@ class UiController:
     def _fmt_clock(wall_ts: float) -> str:
         import datetime as _dt
 
-        return _dt.datetime.fromtimestamp(wall_ts, tz=_dt.timezone.utc).strftime(
-            "%H:%M:%SZ"
-        )
+        return _dt.datetime.fromtimestamp(wall_ts, tz=_dt.timezone.utc).strftime("%H:%M:%SZ")
 
     # Demo mode helpers -------------------------------------------------
     def _start_demo_mode(self) -> None:
@@ -2128,12 +2372,8 @@ class UiController:
                         msg = rec.get("msg", {})
                         lat = msg.get("lat")
                         lon = msg.get("lon")
-                        if isinstance(lat, (int, float)) and isinstance(
-                            lon, (int, float)
-                        ):
-                            self._center_lat_live = (
-                                self._center_lat
-                            )  # stash current live center
+                        if isinstance(lat, (int, float)) and isinstance(lon, (int, float)):
+                            self._center_lat_live = self._center_lat  # stash current live center
                             self._center_lon_live = self._center_lon
                             self._center_lat = float(lat)
                             self._center_lon = float(lon)
@@ -2150,9 +2390,7 @@ class UiController:
             pass
         # Launch playback source
         try:
-            self._demo_src = FilePlaybackSource(
-                str(trace_path), ts=self._ts, bus=self._bus, speed=1.0, loop=True
-            )
+            self._demo_src = FilePlaybackSource(str(trace_path), ts=self._ts, bus=self._bus, speed=1.0, loop=True)
             self._demo_task = asyncio.create_task(self._demo_src.run())
         except Exception:
             self._demo_src = None

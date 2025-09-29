@@ -40,3 +40,41 @@ vertical_profile:
   height_fraction: 0.35
 theme: atc_classic
 themeOverrides: {}
+
+# Logging and telemetry defaults (centralised in the main settings.yml)
+logging:
+  level: INFO
+  style: json
+  utc: true
+  propagate: false
+  context_fields:
+    - session_id
+    - request_id
+  redactions: []
+  sampling:
+    debug_qps: 20
+    duplicate_suppression_window_sec: 5
+  handlers:
+    console:
+      enabled: true
+      level: DEBUG
+  loggers:
+    pocketscope: INFO
+
+telemetry:
+  enabled: false
+  exporters:
+    prometheus:
+      enabled: false
+      host: 127.0.0.1
+      port: 9100
+    otlp:
+      enabled: false
+      endpoint: http://127.0.0.1:4317
+  fps_target: 5
+  thresholds:
+    gps_stale_sec: 300
+    decoder_offline_warn_sec: 3
+    temp_warn_c: 75
+    temp_crit_c: 85
+  sampler_interval_sec: 1.0

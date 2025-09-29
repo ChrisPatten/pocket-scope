@@ -41,6 +41,8 @@ Example usage:
 from __future__ import annotations
 
 import asyncio
+import logging
+import time
 from datetime import datetime
 
 from pocketscope.core.events import EventBus, Subscription, unpack
@@ -148,6 +150,11 @@ class TrackService:
         if not self._subscription:
             return
 
+        logger = logging.getLogger(__name__)
+        last_info = time.perf_counter()
+        msg_count = 0
+        created_tracks = 0
+
         try:
             async for envelope in self._subscription:
                 if not self._running:
@@ -159,14 +166,30 @@ class TrackService:
 
                     # Convert timestamp back to datetime (from ISO string)
                     if "ts" in msg_data and isinstance(msg_data["ts"], str):
-                        msg_data["ts"] = datetime.fromisoformat(
-                            msg_data["ts"].replace("Z", "+00:00")
-                        )
+                        msg_data["ts"] = datetime.fromisoformat(msg_data["ts"].replace("Z", "+00:00"))
 
                     msg = AdsbMessage.model_validate(msg_data)
 
                     # Process the message
+                    before = len(self._tracks)
                     await self._process_adsb_message(msg)
+                    after = len(self._tracks)
+                    if after > before:
+                        created_tracks += 1
+                    msg_count += 1
+                    now = time.perf_counter()
+                    if now - last_info >= 1.0 and logger.isEnabledFor(logging.INFO):
+                        logger.info(
+                            f"tracks.rx msg_per_sec={msg_count} created={created_tracks} active={len(self._tracks)}",
+                            extra={
+                                "messages_per_sec": msg_count,
+                                "created_tracks": created_tracks,
+                                "active_tracks": len(self._tracks),
+                            },
+                        )
+                        last_info = now
+                        msg_count = 0
+                        created_tracks = 0
 
                 except Exception as e:
                     # Log error but continue processing
@@ -230,9 +253,7 @@ class TrackService:
 
         # Add trail point if we have coordinates and meet 1Hz sampling rule
         if msg.lat is not None and msg.lon is not None:
-            last_pos_ts = self._last_position_ts.get(
-                icao24, -1.0
-            )  # Use -1.0 to allow first message
+            last_pos_ts = self._last_position_ts.get(icao24, -1.0)  # Use -1.0 to allow first message
 
             # Check 1Hz sampling rule (minimum 0.9s between position updates)
             if msg_ts - last_pos_ts >= 0.9:
@@ -252,11 +273,7 @@ class TrackService:
     def _trim_trail(self, track: AircraftTrack, current_time: float) -> None:
         """Trim track trail to maintain time window."""
         # Determine trail length based on pinning
-        trail_len = (
-            self._trail_len_pinned_s
-            if track.icao24 in self._pinned
-            else self._trail_len_default_s
-        )
+        trail_len = self._trail_len_pinned_s if track.icao24 in self._pinned else self._trail_len_default_s
 
         cutoff_time = current_time - trail_len
 
@@ -312,6 +329,20 @@ class TrackService:
         # Publish update if there were any changes
         if expired_icaos:
             from pocketscope.core.events import pack
+
+            logger = logging.getLogger(__name__)
+            if logger.isEnabledFor(logging.INFO):
+                logger.info(
+                    "tracks.expire expired=%d active_after=%d expiry_s=%s",
+                    len(expired_icaos),
+                    len(self._tracks),
+                    self._expiry_s,
+                    extra={
+                        "expired": len(expired_icaos),
+                        "active_after": len(self._tracks),
+                        "expiry_s": self._expiry_s,
+                    },
+                )
 
             update = {
                 "ts": current_time,

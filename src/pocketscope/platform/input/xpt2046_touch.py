@@ -84,16 +84,10 @@ class XPT2046Touch:
             # No spidev device present on this system (e.g. running on a
             # non-Raspberry Pi or SPI not enabled). Don't raise: leave
             # touch disabled and continue running the application.
-            print(
-                f"[XPT2046Touch] SPI device /dev/spidev{bus}.{dev} not found; "
-                "touch disabled"
-            )
+            print(f"[XPT2046Touch] SPI device /dev/spidev{bus}.{dev} not found; " "touch disabled")
             return
         except PermissionError:
-            print(
-                f"[XPT2046Touch] Permission denied opening /dev/spidev{bus}.{dev}; "
-                "touch disabled"
-            )
+            print(f"[XPT2046Touch] Permission denied opening /dev/spidev{bus}.{dev}; " "touch disabled")
             return
         except OSError as e:
             # Generic OS-level errors (e.g. bus not present)
@@ -131,16 +125,8 @@ class XPT2046Touch:
         ys.sort()
         x = xs[1]
         y = ys[1]
-        sx = int(
-            (x - self._cal.x_min)
-            * (self._w - 1)
-            / max(1, self._cal.x_max - self._cal.x_min)
-        )
-        sy = int(
-            (y - self._cal.y_min)
-            * (self._h - 1)
-            / max(1, self._cal.y_max - self._cal.y_min)
-        )
+        sx = int((x - self._cal.x_min) * (self._w - 1) / max(1, self._cal.x_max - self._cal.x_min))
+        sy = int((y - self._cal.y_min) * (self._h - 1) / max(1, self._cal.y_max - self._cal.y_min))
         sx = max(0, min(self._w - 1, sx))
         sy = max(0, min(self._h - 1, sy))
         return (sx, sy)

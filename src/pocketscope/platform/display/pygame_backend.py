@@ -77,9 +77,7 @@ class _FontCache:
         if f is None:
             # Default system font for determinism across platforms
             local_pg = pg
-            if (
-                local_pg is None
-            ):  # Defensive: should never happen if backend constructed
+            if local_pg is None:  # Defensive: should never happen if backend constructed
                 raise RuntimeError("pygame is not available")
             f = local_pg.font.Font(None, size_px)
             self.fonts[size_px] = f
@@ -125,9 +123,7 @@ class _PygameCanvas(Canvas):
             return
         if len(pts) == 1:
             # Draw a dot for a single point
-            pg.draw.circle(
-                self._surface, _pygame_color(color), pts[0], max(1, width // 2), 0
-            )
+            pg.draw.circle(self._surface, _pygame_color(color), pts[0], max(1, width // 2), 0)
             return
         pg.draw.lines(self._surface, _pygame_color(color), False, list(pts), width)
 
@@ -157,15 +153,10 @@ class PygameDisplayBackend(DisplayBackend):
     regular window may be created depending on the platform.
     """
 
-    def __init__(
-        self, size: Tuple[int, int] = (320, 480), *, create_window: bool = False
-    ) -> None:
+    def __init__(self, size: Tuple[int, int] = (320, 480), *, create_window: bool = False) -> None:
         local_pg = pg
         if local_pg is None:
-            raise RuntimeError(
-                "pygame is not available. "
-                "Ensure it is installed and that SDL is configured."
-            )
+            raise RuntimeError("pygame is not available. " "Ensure it is installed and that SDL is configured.")
 
         # Ensure headless if requested
         if os.environ.get("SDL_VIDEODRIVER") == "dummy":
@@ -181,9 +172,7 @@ class PygameDisplayBackend(DisplayBackend):
         self._window_surface = None
         if create_window and os.environ.get("SDL_VIDEODRIVER") != "dummy":
             try:
-                self._window_surface = local_pg.display.set_mode(
-                    (self._width, self._height)
-                )
+                self._window_surface = local_pg.display.set_mode((self._width, self._height))
             except Exception:
                 # Fallback to offscreen and provide a hint for diagnostics
                 print(
@@ -195,9 +184,7 @@ class PygameDisplayBackend(DisplayBackend):
 
         # Create offscreen surface; use SRCALPHA for per-pixel alpha
         # We avoid creating a display window to be headless/deterministic
-        self._surface = local_pg.Surface(
-            (self._width, self._height), flags=local_pg.SRCALPHA
-        )
+        self._surface = local_pg.Surface((self._width, self._height), flags=local_pg.SRCALPHA)
         self._font_cache = _FontCache()
 
     def size(self) -> Tuple[int, int]:

@@ -60,9 +60,7 @@ class LocalJsonFileSource:
         topic: EventBus topic (default: "adsb.msg")
     """
 
-    def __init__(
-        self, path: str, *, bus: EventBus, poll_hz: float = 1.0, topic: str = "adsb.msg"
-    ) -> None:
+    def __init__(self, path: str, *, bus: EventBus, poll_hz: float = 1.0, topic: str = "adsb.msg") -> None:
         self._path = Path(path)
         self._bus = bus
         self._topic = topic
@@ -200,8 +198,6 @@ class LocalJsonFileSource:
             msg_dict["ts"] = msg.ts.isoformat()
             # Publish into main loop
             try:
-                asyncio.run_coroutine_threadsafe(
-                    self._bus.publish(self._topic, pack(msg_dict)), self._main_loop
-                )
+                asyncio.run_coroutine_threadsafe(self._bus.publish(self._topic, pack(msg_dict)), self._main_loop)
             except Exception:
                 logger.exception("failed to publish adsb message from local file")

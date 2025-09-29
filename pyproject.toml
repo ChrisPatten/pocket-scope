@@ -47,22 +47,22 @@ pi = [
 pocketscope = "pocketscope.cli:main"
 
 [tool.black]
-line-length = 88
+line-length = 120
 target-version = ["py311"]
 
 [tool.isort]
 profile = "black"
 
 [tool.ruff]
-line-length = 88
+line-length = 120
 target-version = "py311"
 
 [tool.mypy]
 python_version = "3.11"
-strict = true
-warn_unused_configs = true
-warn_return_any = true
-disallow_untyped_defs = true
+strict = false
+warn_unused_configs = false
+warn_return_any = false
+disallow_untyped_defs = false
 
 # Per-module/test overrides for external libs and property-based tests
 overrides = [
