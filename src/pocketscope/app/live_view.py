@@ -26,6 +26,7 @@ from pocketscope.map.data_provider import MapDataProvider
 from pocketscope.platform.display.pygame_backend import PygameDisplayBackend
 from pocketscope.platform.display.web_backend import WebDisplayBackend
 from pocketscope.render.view_ppi import PpiView, TrackSnapshot
+from pocketscope.settings.store import SettingsStore
 from pocketscope.tools.config_watcher import ConfigWatcher
 from pocketscope.ui.controllers import UiConfig, UiController
 from pocketscope.ui.softkeys import SoftKeyBar
@@ -179,7 +180,18 @@ async def main_async(args: argparse.Namespace) -> None:
                     pass
         print("[live_view] TFT mode active (ILI9341 + XPT2046)")
     elif args.web_ui:
-        display = WebDisplayBackend(size=(1280, 800), create_window=False)
+        # Use persisted settings to allow customizing the web UI resolution.
+        try:
+            settings = SettingsStore.load()
+            w = int(getattr(settings, "web_ui_width", 1280))
+            h = int(getattr(settings, "web_ui_height", 800))
+            # defensive bounds
+            if w <= 0 or h <= 0:
+                raise ValueError("invalid web_ui dimensions")
+            display = WebDisplayBackend(size=(w, h), create_window=False)
+        except Exception:
+            # Fall back to historical default if settings cannot be loaded.
+            display = WebDisplayBackend(size=(1280, 800), create_window=False)
         print("[live_view] Web UI mode active (http://localhost:8080)")
     else:
         display = PygameDisplayBackend(size=(480, 800), create_window=True)

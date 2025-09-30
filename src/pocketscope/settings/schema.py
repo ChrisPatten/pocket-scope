@@ -278,6 +278,10 @@ class Settings(BaseModel):
     # missing fields fall back to atc_classic with no overrides.
     theme: str = Field(default="atc_classic")
     themeOverrides: dict[str, str] = Field(default_factory=dict)
+    # Web UI image resolution (pixels). Used when running with --web-ui to
+    # size the offscreen pygame surface that is captured and served.
+    web_ui_width: int = Field(default=1280)
+    web_ui_height: int = Field(default=800)
     # Unified logging and telemetry configuration. These were previously
     # defined in a separate settings_schema module; they are embedded here
     # so a single `settings.yml` contains all runtime configuration.
@@ -378,6 +382,17 @@ class Settings(BaseModel):
         if v not in allowed:
             raise ValueError("invalid altitude filter: must be one of " + ", ".join(ALTITUDE_FILTER_CYCLE_ORDER))
         return v
+
+    @field_validator("web_ui_width", "web_ui_height")
+    @classmethod
+    def _chk_web_ui_dims(cls, v: int) -> int:  # pragma: no cover - trivial
+        try:
+            iv = int(v)
+        except Exception:
+            raise ValueError("web_ui dimensions must be integers") from None
+        if iv <= 0 or iv > 8192:
+            raise ValueError("web_ui dimensions must be between 1 and 8192")
+        return iv
 
     @field_validator("altitude_min_ft", "altitude_max_ft")
     @classmethod

@@ -41,7 +41,7 @@ class _FrameHandler(BaseHTTPRequestHandler):
             self.end_headers()
             html = (
                 "<html><head><meta charset='utf-8'><title>PocketScope Web UI</title>"
-                "<style>body{margin:0;background:#000;color:#fff;display:flex;align-items:center;justify-content:center;height:100vh}img{max-width:100%;height:auto}</style>"
+                "<style>html,body{height:100%;margin:0;background:#000;color:#fff;overflow:hidden}#frame{position:fixed;top:0;left:0;width:100vw;height:auto;display:block;object-fit:contain}</style>"
                 "</head><body>"
                 "<img id=frame src='/frame.png?t=0' alt='frame'/>"
                 "<script>setInterval(()=>{document.getElementById('frame').src='/frame.png?t='+Date.now()},1000);</script>"

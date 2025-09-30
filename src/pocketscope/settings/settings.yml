@@ -78,3 +78,9 @@ telemetry:
     temp_warn_c: 75
     temp_crit_c: 85
   sampler_interval_sec: 1.0
+
+# Web UI served image resolution (width x height in pixels).
+# Controls the size of the offscreen canvas used when running with --web-ui.
+# Set in your ~/.pocketscope/settings.yml to customise the browser view size.
+web_ui_width: 1280
+web_ui_height: 800
