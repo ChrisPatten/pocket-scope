@@ -338,8 +338,8 @@ async def main_async(args: argparse.Namespace) -> None:
                     pass
                 await asyncio.sleep(0.01)
 
-    # Schedule forwarder after definition to satisfy type checker
-    touch_forwarder_task = asyncio.create_task(_touch_forwarder(), name="touch.forwarder")
+        # Schedule forwarder after definition to satisfy type checker
+        touch_forwarder_task = asyncio.create_task(_touch_forwarder(), name="touch.forwarder")
 
     _print_help()
     # Start track maintenance (spawns internal tasks and returns immediately).
