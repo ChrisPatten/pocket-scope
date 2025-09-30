@@ -90,7 +90,7 @@ class WebDisplayBackend(PygameDisplayBackend):
         size: Tuple[int, int] = (320, 480),
         *,
         create_window: bool = False,
-        host: str = "127.0.0.1",
+        host: str = "0.0.0.0",
         port: int = 8000,
     ) -> None:
         # Initialize underlying PygameDisplayBackend (we subclass it so
@@ -104,7 +104,8 @@ class WebDisplayBackend(PygameDisplayBackend):
         self._frame_bytes: Optional[bytes] = None
 
         # Start HTTP server in background thread
-        self._host = host
+        # Allow environment override for host/port too (useful for containers)
+        self._host = os.environ.get("POCKETSCOPE_WEB_HOST", host)
         self._port = int(os.environ.get("POCKETSCOPE_WEB_PORT", str(port)))
         self._server_thread = threading.Thread(target=self._run_server, daemon=True)
         self._server_thread.start()
