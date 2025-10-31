@@ -27,6 +27,7 @@ from pocketscope.platform.display.pygame_backend import PygameDisplayBackend
 from pocketscope.platform.display.web_backend import WebDisplayBackend
 from pocketscope.render.view_ppi import PpiView, TrackSnapshot
 from pocketscope.settings.store import SettingsStore
+from pocketscope.theme import ThemeManager
 from pocketscope.tools.config_watcher import ConfigWatcher
 from pocketscope.ui.controllers import UiConfig, UiController
 from pocketscope.ui.softkeys import SoftKeyBar
@@ -192,7 +193,7 @@ async def main_async(args: argparse.Namespace) -> None:
         except Exception:
             # Fall back to historical default if settings cannot be loaded.
             display = WebDisplayBackend(size=(1280, 800), create_window=False)
-        print("[live_view] Web UI mode active (http://localhost:8080)")
+        print("[live_view] Web UI mode active")
     else:
         display = PygameDisplayBackend(size=(480, 800), create_window=True)
         print("[live_view] Pygame window mode active")
@@ -257,11 +258,18 @@ async def main_async(args: argparse.Namespace) -> None:
         font_px=args.font_px,
         map_provider=map_provider,
     )
+    try:
+        vprof_border = ThemeManager.color("vprof.border")
+        vprof_border_color = (vprof_border[0], vprof_border[1], vprof_border[2], vprof_border[3])
+    except Exception:
+        vprof_border_color = (255, 255, 255, 255)
+
     bar = SoftKeyBar(
         display.size(),
         bar_height=60,
         pad_y=10,
-        border_width=0,
+        border_width=1,
+        border_color=vprof_border_color,
         # Lightweight measurement when using TFT so we don't import pygame
         measure_fn=(lambda s, sz: (int(sz * 0.6) * len(s), sz)) if getattr(args, "tft", False) else None,
         actions={

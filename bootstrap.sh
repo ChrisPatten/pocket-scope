@@ -60,14 +60,14 @@ pip install -e ".[pi]"
 echo "==> Configuring systemd service..."
 SERVICE_FILE="/etc/systemd/system/pocketscope.service"
 ENVIRONMENT_FILE="/etc/default/pocketscope"
-tee "$ENVIRONMENT_FILE" >/dev/null <<'EOF'
+sudo tee "$ENVIRONMENT_FILE" >/dev/null <<'EOF'
 POCKETSCOPE_URL="https://adsb.chrispatten.dev/data/aircraft.json"
 POCKETSCOPE_CENTER="42.00748,-71.20899"
 POCKETSCOPE_HOME="/home/pocketscope/.pocketscope"
 POCKETSCOPE_RUNWAYS_SQLITE="/home/pocketscope/.pocketscope/runways.sqlite"
 EOF
 
-tee "$SERVICE_FILE" >/dev/null <<'EOF'
+sudo tee "$SERVICE_FILE" >/dev/null <<'EOF'
 [Unit]
 Description=PocketScope live view (TFT)
 Wants=network-online.target
@@ -105,9 +105,13 @@ StandardError=journal
 WantedBy=multi-user.target
 EOF
 
+echo "==> Ensuring SPI and GPIO are enabled..."
+sudo raspi-config nonint do_spi 0
+sudo raspi-config nonint do_gpio 0
+
 echo "==> Reloading systemd and enabling service..."
 sudo systemctl daemon-reload
 sudo systemctl enable pocketscope.service
-sudo systemctl restart pocketscope.service
 
-echo "==> Done!"
+echo "==> Restarting to apply all changes..."
+shutdown -r now
