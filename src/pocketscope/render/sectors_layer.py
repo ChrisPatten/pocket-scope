@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from typing import Sequence, Tuple
 
 from pocketscope.core.geo import (
@@ -12,6 +13,8 @@ from pocketscope.data.sectors import Sector
 from pocketscope.render.canvas import Canvas
 from pocketscope.render.geo_cache import global_cache
 from pocketscope.theme import ThemeManager
+
+logger = logging.getLogger(__name__)
 
 
 class SectorsLayer:
@@ -87,6 +90,8 @@ class SectorsLayer:
             label_color = (255, 255, 255, 220)
 
         cache = global_cache()
+        total_sectors = len(sectors)
+        drawn_sectors = 0
         for s in sorted(sectors, key=lambda s: s.name):
             if not s.points:
                 continue
@@ -99,6 +104,7 @@ class SectorsLayer:
                     break
             if not keep:
                 continue
+            drawn_sectors += 1
 
             def _build() -> list[list[tuple[int, int]]]:
                 pts_local = [to_screen(lat, lon) for (lat, lon) in s.points]
@@ -139,3 +145,7 @@ class SectorsLayer:
                 except Exception:
                     # Non-critical; skip label if any math/render issue
                     pass
+
+        logger.info(
+            f"Drew {drawn_sectors} out of {total_sectors} sectors (center: {center_lat:.3f}, {center_lon:.3f}, range: {range_nm} nm)"  # noqa: E501
+        )

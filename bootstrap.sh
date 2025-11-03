@@ -57,53 +57,23 @@ echo "==> Installing project in editable mode with [pi] extra..."
 cd "$TARGET_DIR"
 pip install -e ".[pi]"
 
+echo "==> Creating configuration files..."
+CONFIG_DIR="$HOME/.pocketscope"
+mkdir -p "$CONFIG_DIR"
+cp "$TARGET_DIR/bootstrap_assets/settings.yml" "$CONFIG_DIR/settings.yml"
+
+echo "==> Building basemap database..."
+python -m pocketscope.data.ingest_geojson_to_sqlite \
+  --airports "$TARGET_DIR/src/pocketscope/assets/airports.json" \
+  --runways "$TARGET_DIR/src/pocketscope/assets/runways.json" \
+  --states "$TARGET_DIR/src/pocketscope/assets/us_states.json" \
+  --out "$CONFIG_DIR/pocketscope.db" --replace
+
 echo "==> Configuring systemd service..."
 SERVICE_FILE="/etc/systemd/system/pocketscope.service"
 ENVIRONMENT_FILE="/etc/default/pocketscope"
-sudo tee "$ENVIRONMENT_FILE" >/dev/null <<'EOF'
-POCKETSCOPE_URL="https://adsb.chrispatten.dev/data/aircraft.json"
-POCKETSCOPE_CENTER="42.00748,-71.20899"
-POCKETSCOPE_HOME="/home/pocketscope/.pocketscope"
-POCKETSCOPE_RUNWAYS_SQLITE="/home/pocketscope/.pocketscope/runways.sqlite"
-EOF
-
-sudo tee "$SERVICE_FILE" >/dev/null <<'EOF'
-[Unit]
-Description=PocketScope live view (TFT)
-Wants=network-online.target
-After=network-online.target
-StartLimitBurst=10
-StartLimitIntervalSec=60
-
-[Service]
-Type=simple
-User=pocketscope
-WorkingDirectory=/home/pocketscope/pocket-scope
-EnvironmentFile=-/etc/default/pocketscope-live-view
-Environment=PYTHONUNBUFFERED=1
-# Uncomment if you need to target the framebuffer directly:
-# Environment=SDL_VIDEODRIVER=fbcon
-# Environment=SDL_FBDEV=/dev/fb0
-
-ExecStart=/home/pocketscope/pocket-scope/.venv/bin/python -m pocketscope \
-  --url ${POCKETSCOPE_URL} \
-  --center ${POCKETSCOPE_CENTER} \
-  --tft \
-
-KillSignal=SIGINT
-TimeoutStopSec=15
-Restart=always
-RestartSec=3
-
-# Uncomment if you need additional device access:
-# SupplementaryGroups=gpio,spi,video
-
-StandardOutput=journal
-StandardError=journal
-
-[Install]
-WantedBy=multi-user.target
-EOF
+sudo cp "$TARGET_DIR/bootstrap_assets/pocketscope.env" "$ENVIRONMENT_FILE"
+sudo cp "$TARGET_DIR/bootstrap_assets/pocketscope.service" "$SERVICE_FILE"
 
 echo "==> Ensuring SPI and GPIO are enabled..."
 sudo raspi-config nonint do_spi 0

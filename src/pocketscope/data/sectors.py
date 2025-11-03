@@ -18,12 +18,13 @@ instances with a list of (lat, lon) tuples.
 from __future__ import annotations
 
 import json
+import logging
 from dataclasses import dataclass
 from math import isfinite
 
 from pocketscope.core.geo import haversine_nm
 
-__all__ = ["Sector", "load_sectors_json"]
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -180,4 +181,5 @@ def load_sectors_json(
             s for s in out if any(haversine_nm(center_lat, center_lon, lat, lon) <= max_nm for (lat, lon) in s.points)
         ]
 
+    logger.info(f"Loaded {len(out)} sectors from {path}")
     return out

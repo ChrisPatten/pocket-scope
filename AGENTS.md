@@ -1,4 +1,7 @@
-# Copilot Repository Instructions
+# PocketScope Repository Instructions
+
+## Introduction
+PocketScope is a handheld, Pi-powered radar-style viewer that visualizes nearby aircraft by decoding 1090 MHz ADS-B signals with an RTL-SDR. It renders a live north-up polar display with heading from an IMU and position from GPS—showing altitude, speed, and range in real time, entirely offline.
 
 ## Coding style & quality
 - Follow **PEP 8**; require **type hints** and `mypy`‑clean stubs.
@@ -132,25 +135,5 @@ pocketscope/
 - Keep changes **small and focused**; include/update tests and docs.
 - Describe interfaces and trade‑offs in PR body; list performance impact.
 
-## Helpful snippets Copilot can reuse
-- **Event model skeletons** (Pydantic): `AdsbMessage`, `GpsFix`, `ImuSample`, `AircraftTrack`.
-- **Async bus** with topic queues and backpressure.
-- **Renderer** with layers and a frame‑tick.
-
-## Example tasks to prioritize
-- Implement `Dump1090SbsSource` (TCP 30003) as `AdsbSource`.
-- Implement `FilePlaybackSource` and deterministic `TimeSource`.
-- Implement `TrackService` with ring‑buffer trails and expiry.
-- Implement `PpiView` with range rings, airport markers, decluttered labels.
-
 ## Non‑goals (v0)
 - UAT 978, MLAT, feeder/cloud features, rich cartography, alerts.
-
-## Keywords for Copilot
-- When I ask you to "PREPARE_COMMIT", remember to:
-  - Update all relevant documentation in README and `docs/` to capture changes.
-  - Run `pre-commit run --all-files` to ensure all hooks pass. Resolve any issues and re-run until clean.
-  - generate a concise commit message that summarizes the changes, e.g. "Implement `Dump1090SbsSource` for ADS-B ingestion".
-- When I ask you to "PREPARE_PR" for PR to <target_branch>, remember to:
-  - Review the diff against the <target_branch> to capture all changes.
-  - Create a new file in `docs/pr` with the PR title and a detailed description of the changes.

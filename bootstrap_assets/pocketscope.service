@@ -1,0 +1,35 @@
+[Unit]
+Description=PocketScope live view (TFT)
+Wants=network-online.target
+After=network-online.target
+StartLimitBurst=10
+StartLimitIntervalSec=60
+
+[Service]
+Type=simple
+User=pocketscope
+WorkingDirectory=/home/pocketscope/pocket-scope
+EnvironmentFile=-/etc/default/pocketscope-live-view
+Environment=PYTHONUNBUFFERED=1
+# Uncomment if you need to target the framebuffer directly:
+# Environment=SDL_VIDEODRIVER=fbcon
+# Environment=SDL_FBDEV=/dev/fb0
+
+ExecStart=/home/pocketscope/pocket-scope/.venv/bin/python -m pocketscope \
+  --url ${POCKETSCOPE_URL} \
+  --center ${POCKETSCOPE_CENTER} \
+  --tft \
+
+KillSignal=SIGINT
+TimeoutStopSec=15
+Restart=always
+RestartSec=3
+
+# Uncomment if you need additional device access:
+# SupplementaryGroups=gpio,spi,video
+
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

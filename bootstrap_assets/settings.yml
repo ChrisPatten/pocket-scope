@@ -1,0 +1,87 @@
+# PocketScope default settings.yml for use on device.
+
+units: nm_ft_kt
+range_nm: 100.0
+autoscale_enabled: true
+autoscale_target_visible: 12
+autoscale_min_range_nm: 15.0
+autoscale_max_range_nm: 50.0
+track_length_s: 300.0
+demo_mode: false
+altitude_filter: "All"
+altitude_min_ft: null
+altitude_max_ft: null
+north_up_lock: true
+flip_display: false
+backlight_pct: 100.0
+label_font_px: 10
+label_line_gap_px: 0
+label_block_pad_px: 2
+status_font_px: 12
+status_pad_top_px: null
+status_pad_bottom_px: 5
+softkeys_font_px: 12
+softkeys_pad_x: 4
+softkeys_pad_y: 2
+sector_labels: false
+track_expiry_s: 300.0
+extra_airports:
+  - 1B9
+primary_sidebar_mode: vertical_profile
+primary_sidebar_side: right
+info_blocks_policy: focus_and_closest
+vertical_profile:
+  cycle_interval_sec: 15
+  vs_threshold_fpm: 200
+  vs_hysteresis:
+    enter: 220
+    exit: 180
+  auto_resume_after_manual_ms: 30000
+  show_time_to_crossing: true
+  height_fraction: 0.20
+theme: monokai
+themeOverrides: {}
+
+# Logging and telemetry defaults (centralised in the main settings.yml)
+logging:
+  level: INFO
+  style: json
+  utc: true
+  propagate: false
+  context_fields:
+    - session_id
+    - request_id
+  redactions: []
+  sampling:
+    debug_qps: 20
+    duplicate_suppression_window_sec: 5
+  handlers:
+    console:
+      enabled: true
+      level: INFO
+  loggers:
+    pocketscope: INFO
+
+telemetry:
+  enabled: false
+  exporters:
+    prometheus:
+      enabled: false
+      host: 127.0.0.1
+      port: 9100
+    otlp:
+      enabled: false
+      endpoint: http://127.0.0.1:4317
+  fps_target: 5
+  thresholds:
+    gps_stale_sec: 300
+    decoder_offline_warn_sec: 3
+    temp_warn_c: 75
+    temp_crit_c: 85
+  sampler_interval_sec: 1.0
+
+# Web UI served image resolution (width x height in pixels).
+# Controls the size of the offscreen canvas used when running with --web-ui.
+# Set in your ~/.pocketscope/settings.yml to customise the browser view size.
+web_ui_width: 240
+web_ui_height: 320
