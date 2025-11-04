@@ -70,6 +70,8 @@ async def test_autoscale_respects_user_altitude_bounds(tmp_path, monkeypatch):
 
         ui._apply_autoscale(metrics)  # type: ignore[attr-defined]
 
+        # With the new debounce, the sparse condition hasn't been sustained
+        # for 10s yet, so the original user altitude cap (24k) should remain.
         assert ui._autoscale_alt_override is None
         lo, hi = ui.alt_filter
         assert lo is None
@@ -143,9 +145,17 @@ async def test_autoscale_caps_zoom_to_farthest_aircraft(tmp_path, monkeypatch):
 
     try:
         ui._apply_autoscale(metrics)  # type: ignore[attr-defined]
-
-        assert ui._cfg.range_nm == pytest.approx(35.0)
-        assert ui._autoscale_range_nm == pytest.approx(35.0)
+        # New rule: with 2 visible (<= target 3) range should be farthest * 1.05
+        # Farthest distance is 32nm -> 33.6nm (no ladder rounding) and below
+        # autoscale_max_range cap (35.0). However, debounce requires 10s of
+        # sparse condition before applying. Simulate sustained sparse condition.
+        
+        # Advance time by 10+ seconds and reapply
+        ts.advance(11.0)
+        ui._apply_autoscale(metrics)  # type: ignore[attr-defined]
+        
+        assert ui._cfg.range_nm == pytest.approx(33.6)
+        assert ui._autoscale_range_nm == pytest.approx(33.6)
     finally:
         await ui.stop()
         await tracks.stop()
@@ -214,7 +224,16 @@ async def test_autoscale_ignores_partial_datablocks(tmp_path, monkeypatch):
         # requested range is 10nm (treated as lower-bound mode). Target=2
         # aircraft: we have 1 inside 10nm, 2 by 55nm. The max configured
         # autoscale_max_range_nm is 20.0 so autoscale should expand up to
-        # that cap to try to include the second aircraft.
+        # that cap to try to include the second aircraft. However, with the
+        # new debounce, the sparse zoom rule won't apply yet, so legacy logic
+        # takes over.
+        
+        # Advance time to satisfy debounce
+        ts.advance(11.0)
+        ui._apply_autoscale(metrics)  # type: ignore[attr-defined]
+        
+        # Now the sparse rule applies: 2 visible (<= target 2) -> farthest
+        # 55nm * 1.05 = 57.75nm, clamped by autoscale_max_range_nm (20.0)
         assert ui._cfg.range_nm == pytest.approx(20.0)
         assert ui._autoscale_range_nm == pytest.approx(20.0)
     finally:
@@ -271,6 +290,11 @@ async def test_autoscale_honors_min_range_limit(tmp_path, monkeypatch):
     ]
 
     try:
+        ui._apply_autoscale(metrics)  # type: ignore[attr-defined]
+
+        # With debounce, the sparse condition needs to persist for 10s before
+        # triggering tight zoom. Advance time and reapply.
+        ts.advance(11.0)
         ui._apply_autoscale(metrics)  # type: ignore[attr-defined]
 
         assert ui._cfg.range_nm == pytest.approx(25.0)
@@ -344,12 +368,21 @@ async def test_autoscale_exceeds_altitude_when_range_limited(tmp_path, monkeypat
 
     try:
         ui._apply_autoscale(metrics)  # type: ignore[attr-defined]
-
-        assert ui._cfg.range_nm == pytest.approx(60.0)
-        assert ui._autoscale_alt_override is not None
+        # New rule changes behavior: altitude cap (24k ft) excludes the
+        # higher aircraft from eligibility, so only one visible track at
+        # 12nm. With visible <= target, after debounce range shrinks to
+        # 12nm * 1.05 = 12.6nm.
+        
+        # Advance time to satisfy debounce
+        ts.advance(11.0)
+        ui._apply_autoscale(metrics)  # type: ignore[attr-defined]
+        
+        assert ui._cfg.range_nm == pytest.approx(12.6)
+        # No altitude override should be applied in this sparse scenario.
+        assert ui._autoscale_alt_override is None
         lo, hi = ui.alt_filter
-        assert hi is None
         assert lo is None
+        assert hi == pytest.approx(24000.0)
     finally:
         await ui.stop()
         await tracks.stop()

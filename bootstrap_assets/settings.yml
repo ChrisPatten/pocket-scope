@@ -9,7 +9,7 @@ autoscale_max_range_nm: 50.0
 track_length_s: 300.0
 demo_mode: false
 altitude_filter: "All"
-altitude_min_ft: null
+altitude_min_ft: 500
 altitude_max_ft: null
 north_up_lock: true
 flip_display: false
@@ -31,14 +31,14 @@ primary_sidebar_mode: vertical_profile
 primary_sidebar_side: right
 info_blocks_policy: focus_and_closest
 vertical_profile:
-  cycle_interval_sec: 15
+  cycle_interval_sec: 30
   vs_threshold_fpm: 200
   vs_hysteresis:
     enter: 220
     exit: 180
   auto_resume_after_manual_ms: 30000
   show_time_to_crossing: true
-  height_fraction: 0.20
+  height_fraction: 0.25
 theme: monokai
 themeOverrides: {}
 

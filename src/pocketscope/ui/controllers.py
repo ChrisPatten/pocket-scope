@@ -184,6 +184,9 @@ class UiController:
         self._autoscale_range_nm: float | None = None
         self._total_aircraft_count: int = 0
         self._visible_aircraft_count: int = 0
+        # Debounce state for sparse-traffic zoom-to-farthest rule
+        self._autoscale_sparse_start_time: float | None = None
+        self._autoscale_sparse_debounce_s: float = 10.0
         # Apply persisted trail length immediately so TrackService windows
         # reflect a user-provided custom value on startup (previously only
         # applied when cycling or after a cfg.changed hot‑reload event).
@@ -2017,12 +2020,57 @@ class UiController:
         extended_metrics = [m for m in metrics if _eligible_for_autoscale(m, ignore_hi=True)]
 
         if not eligible_metrics:
-            # No eligible aircraft -> reset overrides and clamp range inside bounds
+            # No eligible aircraft -> reset overrides, clamp range, reset debounce
             clamped = max(cfg_min, min(user_range, cfg_max))
             self._autoscale_alt_override = None
             self._cfg.range_nm = clamped
             self._autoscale_range_nm = clamped
+            self._autoscale_sparse_start_time = None
             return
+
+        # New rule: when the number of visible (eligible) aircraft is less than
+        # or equal to the autoscale target, zoom so the farthest visible
+        # aircraft is just inside the edge with a 5% margin. This overrides the
+        # previous ladder/target seeking logic in sparse traffic scenarios to
+        # present a tighter view. A 10-second debounce ensures we only apply
+        # this tighter zoom after sustained sparse conditions.
+        try:
+            visible_count = len(eligible_metrics)
+            now_mono = self._ts.monotonic()
+
+            if visible_count <= target:
+                # Sparse condition active
+                if self._autoscale_sparse_start_time is None:
+                    # First frame of sparse condition -> start timer
+                    self._autoscale_sparse_start_time = now_mono
+
+                elapsed = now_mono - self._autoscale_sparse_start_time
+                if elapsed >= self._autoscale_sparse_debounce_s:
+                    # Debounce satisfied -> apply tight zoom
+                    farthest_nm = max(
+                        (m.distance_nm for m in eligible_metrics if math.isfinite(m.distance_nm)),
+                        default=0.0,
+                    )
+                    # Apply 5% outward margin
+                    desired = farthest_nm * 1.05 if farthest_nm > 0.0 else user_range
+                    # Respect explicit autoscale min/max and controller bounds
+                    if autoscale_min_range is not None:
+                        desired = max(desired, autoscale_min_range)
+                    if autoscale_max_range is not None:
+                        desired = min(desired, autoscale_max_range)
+                    desired = max(cfg_min, min(desired, cfg_max))
+                    # Persist selection
+                    self._autoscale_alt_override = None
+                    self._autoscale_range_nm = desired
+                    self._cfg.range_nm = desired
+                    return
+                # else: still debouncing, fall through to legacy logic
+            else:
+                # Dense condition -> reset debounce timer
+                self._autoscale_sparse_start_time = None
+        except Exception:
+            # Fall through to legacy logic if any unexpected failure occurs
+            self._autoscale_sparse_start_time = None
 
         distances = sorted(m.distance_nm for m in eligible_metrics)
         max_distance = distances[-1] if distances else 0.0
