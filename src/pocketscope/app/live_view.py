@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import os
 import signal
 from collections.abc import Iterable
 from pathlib import Path
@@ -99,7 +100,60 @@ def _print_help() -> None:
     print("Keys: [ / - = zoom out, ] / = zoom in, o overlay, q/ESC quit")
 
 
+def _load_env_file(path: str) -> None:
+    """Load KEY=VALUE pairs from *path* into os.environ.
+
+    Rules:
+    - Ignore blank lines and lines starting with '#'.
+    - Allow export KEY=VALUE (strip leading 'export ').
+    - Do not overwrite existing environment variables unless they are empty.
+    - Silently ignore malformed lines.
+    """
+    try:
+        p = Path(path).expanduser()
+        if not p.exists():
+            return
+        for line in p.read_text().splitlines():
+            ln = line.strip()
+            if not ln or ln.startswith("#"):
+                continue
+            if ln.lower().startswith("export "):
+                ln = ln[7:].strip()
+            if "=" not in ln:
+                continue
+            k, v = ln.split("=", 1)
+            k = k.strip()
+            v = v.strip().strip("'\"")
+            if not k:
+                continue
+            if k in os.environ and os.environ.get(k):
+                continue
+            os.environ[k] = v
+    except Exception:
+        pass
+
+
+def _resolve_env_defaults(args: argparse.Namespace) -> None:
+    """Resolve CLI args from environment variables when not explicitly set.
+
+    This allows env vars to provide defaults for common flags without
+    requiring them on the command line.
+    """
+    # Resolve --url from CLI, env vars (POCKETSCOPE_URL or ADSB_URL), or hardcoded default
+    if args.url is None:
+        args.url = os.environ.get(
+            "POCKETSCOPE_URL", os.environ.get("ADSB_URL", "http://127.0.0.1:8080/data/aircraft.json")
+        )
+
+
 async def main_async(args: argparse.Namespace) -> None:
+    # Load environment variables from file if requested before any other initialization.
+    try:
+        env_path = getattr(args, "env_file", None)
+        if env_path:
+            _load_env_file(env_path)
+    except Exception:
+        pass
     ts = RealTimeSource()
     bus = EventBus()
     tracks = TrackService(bus, ts, expiry_s=300.0)
@@ -195,8 +249,24 @@ async def main_async(args: argparse.Namespace) -> None:
             display = WebDisplayBackend(size=(1280, 800), create_window=False)
         print("[live_view] Web UI mode active")
     else:
-        display = PygameDisplayBackend(size=(480, 800), create_window=True)
-        print("[live_view] Pygame window mode active")
+        # Default desktop window size unless overridden by custom flags.
+        win_size = (480, 800)
+        try:
+            if getattr(args, "window_hw", False):
+                win_size = (240, 320)
+            elif getattr(args, "window_size", None):
+                raw = str(args.window_size).lower().replace("x", "x")
+                if "x" in raw:
+                    w_s, h_s = raw.split("x", 1)
+                    w_i = int(w_s.strip())
+                    h_i = int(h_s.strip())
+                    if w_i > 0 and h_i > 0:
+                        win_size = (w_i, h_i)
+        except Exception:
+            # Fall back silently to default on parse/validation error.
+            win_size = (480, 800)
+        display = PygameDisplayBackend(size=win_size, create_window=True)
+        print(f"[live_view] Pygame window mode active size={win_size[0]}x{win_size[1]}")
     view = PpiView(
         show_data_blocks=not bool(args.simple),
         label_font_px=args.font_px,
@@ -439,8 +509,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p = argparse.ArgumentParser(description="PocketScope Live Viewer")
     p.add_argument(
         "--url",
-        default="http://127.0.0.1:8080/data/aircraft.json",
-        help="dump1090 aircraft.json URL",
+        default=None,
+        help="dump1090 aircraft.json URL (default: $POCKETSCOPE_URL, $ADSB_URL, or http://127.0.0.1:8080/data/aircraft.json)",
     )
     p.add_argument(
         "--playback",
@@ -532,7 +602,30 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         action="store_true",
         help="Run without GUI (lightweight mode suitable for CI/tests)",
     )
-    return p.parse_args(argv)
+    p.add_argument(
+        "--env-file",
+        dest="env_file",
+        type=str,
+        default=None,
+        help="Path to .env style file (KEY=VALUE per line) loaded before startup",
+    )
+    p.add_argument(
+        "--window-hw",
+        dest="window_hw",
+        action="store_true",
+        help="Use hardware TFT portrait dimensions (240x320) for pygame window",
+    )
+    p.add_argument(
+        "--window-size",
+        dest="window_size",
+        type=str,
+        default=None,
+        help="Custom pygame window size WxH (e.g. 240x320). Overrides default 480x800",
+    )
+    args = p.parse_args(argv)
+    # Post-parse resolution: check env vars for unset CLI args
+    _resolve_env_defaults(args)
+    return args
 
 
 def main() -> None:
@@ -554,6 +647,13 @@ async def _main_headless_async(args: argparse.Namespace) -> None:
     and data source) but does not create any display/UI. It runs briefly
     to allow startup logic to exercise without requiring a display.
     """
+    # Load env vars in headless mode too (mirrors main_async behavior)
+    try:
+        env_path = getattr(args, "env_file", None)
+        if env_path:
+            _load_env_file(env_path)
+    except Exception:
+        pass
     ts = RealTimeSource()
     bus = EventBus()
     tracks = TrackService(bus, ts, expiry_s=300.0)

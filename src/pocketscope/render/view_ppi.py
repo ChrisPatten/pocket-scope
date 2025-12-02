@@ -357,8 +357,10 @@ class PpiView:
 
         # Active theme palette
         ThemeManager.theme()  # keep reference (may inspect name)
-        # Clear background
-        canvas.clear(ThemeManager.color("bg"))
+        # Fill background with opaque theme bg color
+        # (canvas starts transparent to allow label halos to blend with scene)
+        bg_color = ThemeManager.color("bg")
+        canvas.clear((bg_color[0], bg_color[1], bg_color[2], 255))
 
         # Precompute range ring geometry and label bounding boxes so airports
         # (z-index 1) can avoid them even though rings (2) and their labels (3)

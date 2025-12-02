@@ -49,6 +49,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, Sequence, Tuple
 
+from PIL import Image
+
 from pocketscope.render.canvas import Canvas, Color, DisplayBackend
 
 pg: Any = None
@@ -201,6 +203,41 @@ class PygameDisplayBackend(DisplayBackend):
             self._window_surface.blit(self._surface, (0, 0))
             local_pg.display.flip()
         return None
+
+    def present(self, frame: Image.Image) -> None:
+        """
+        Present a pre-composited RGBA frame to the display.
+
+        Converts the PIL Image to a pygame surface and displays it.
+
+        Args:
+            frame: Pillow RGBA image to display.
+        """
+        local_pg = pg
+        if local_pg is None:  # pragma: no cover
+            return
+
+        try:
+            # Convert PIL Image to pygame Surface
+            # Use tobytes() + fromstring to handle RGBA correctly
+            frame_rgba = frame.convert("RGBA")
+            raw_bytes = frame_rgba.tobytes()
+            pg_surf = local_pg.image.fromstring(
+                raw_bytes,
+                frame_rgba.size,
+                "RGBA",
+                False,
+            )
+            # Copy to our offscreen surface
+            self._surface.blit(pg_surf, (0, 0))
+
+            # If we have a window, flip to display
+            if self._window_surface is not None:
+                self._window_surface.blit(self._surface, (0, 0))
+                local_pg.display.flip()
+        except Exception:
+            # Gracefully handle conversion errors
+            pass
 
     def save_png(self, path: str) -> None:
         # Save current offscreen surface to PNG

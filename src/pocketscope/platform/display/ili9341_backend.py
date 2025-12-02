@@ -34,13 +34,13 @@ from __future__ import annotations
 import threading
 import time
 from contextlib import suppress
-from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Protocol, Sequence, Tuple, runtime_checkable
+from typing import Any, Protocol, Tuple, runtime_checkable
 
-from PIL import Image, ImageDraw, ImageFont
+from PIL import Image
 
-from pocketscope.render.canvas import Canvas, Color, DisplayBackend
+from pocketscope.platform.display.pillow_canvas import FontCache, PillowCanvas
+from pocketscope.render.canvas import DisplayBackend
 
 try:  # pragma: no cover
     from .spi_lock import SPI_BUS_LOCK
@@ -69,108 +69,6 @@ class _SpiLike(Protocol):  # pragma: no cover - typing only
         ...
 
 
-@dataclass(slots=True)
-class _FontCache:
-    fonts: dict[int, Any]
-
-    def __init__(self) -> None:
-        self.fonts = {}
-
-    def get(self, size_px: int) -> Any:
-        f = self.fonts.get(size_px)
-        if f is None:
-            try:
-                candidates = [
-                    "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf",
-                    "/usr/share/fonts/truetype/liberation/LiberationMono-Regular.ttf",
-                    "/usr/share/fonts/truetype/freefont/FreeMono.ttf",
-                    "/Library/Fonts/Menlo.ttc",
-                    "/Library/Fonts/Consolas.ttf",
-                ]
-                font: Any = None
-                for p in candidates:
-                    try:
-                        font = ImageFont.truetype(p, size_px)
-                        break
-                    except Exception:
-                        continue
-                if font is None:
-                    try:
-                        font = ImageFont.truetype("DejaVuSansMono.ttf", size_px)
-                    except Exception:
-                        font = ImageFont.load_default()
-                f = font
-            except Exception:
-                f = ImageFont.load_default()
-            self.fonts[size_px] = f
-        return f
-
-
-class _PillowCanvas(Canvas):
-    """Simple Pillow-backed canvas counting drawing ops for heuristics."""
-
-    def __init__(self, img: Image.Image, fonts: _FontCache) -> None:
-        self._img = img
-        self._draw = ImageDraw.Draw(img)
-        self._fonts = fonts
-        self._ops = 0
-
-    def clear(self, color: Color) -> None:  # override
-        r, g, b, a = color
-        w, h = self._img.size
-        self._draw.rectangle((0, 0, w, h), fill=(r, g, b, a))
-        self._ops += 1
-
-    def line(
-        self,
-        p0: Tuple[int, int],
-        p1: Tuple[int, int],
-        width: int = 1,
-        color: Color = (255, 255, 255, 255),
-    ) -> None:  # override
-        self._draw.line([p0, p1], fill=color, width=width)
-        self._ops += 1
-
-    def circle(
-        self,
-        center: Tuple[int, int],
-        radius: int,
-        width: int = 1,
-        color: Color = (255, 255, 255, 255),
-    ) -> None:  # override
-        x, y = center
-        bbox = [x - radius, y - radius, x + radius, y + radius]
-        self._draw.ellipse(bbox, outline=color, width=max(1, width))
-        self._ops += 1
-
-    def filled_circle(self, center: Tuple[int, int], radius: int, color: Color) -> None:  # override
-        x, y = center
-        bbox = [x - radius, y - radius, x + radius, y + radius]
-        self._draw.ellipse(bbox, fill=color)
-        self._ops += 1
-
-    def polyline(
-        self,
-        pts: Sequence[Tuple[int, int]],
-        width: int = 1,
-        color: Color = (255, 255, 255, 255),
-    ) -> None:  # override
-        if pts:
-            self._draw.line(list(pts), fill=color, width=width)
-            self._ops += 1
-
-    def text(
-        self,
-        pos: Tuple[int, int],
-        s: str,
-        size_px: int = 12,
-        color: Color = (255, 255, 255, 255),
-    ) -> None:  # override
-        font = self._fonts.get(size_px)
-        self._draw.text(pos, s, fill=color, font=font)
-        self._ops += 1
-
-
 class ILI9341DisplayBackend(DisplayBackend):
     def __init__(
         self,
@@ -195,9 +93,9 @@ class ILI9341DisplayBackend(DisplayBackend):
         self._hz = hz
         self._spi: _SpiLike | None = None
         self._frame: Image.Image | None = None
-        self._frame_canvas: _PillowCanvas | None = None
+        self._frame_canvas: PillowCanvas | None = None
         self._flip = False
-        self._fonts = _FontCache()
+        self._fonts = FontCache()
 
         # Backlight PWM state (initialized in _init_gpio)
         self._pwm = None
@@ -389,12 +287,13 @@ class ILI9341DisplayBackend(DisplayBackend):
     def size(self) -> Tuple[int, int]:  # override
         return (self._w, self._h)
 
-    def begin_frame(self) -> Canvas:  # override
-        if self._prev_frame is not None:
-            self._frame = self._prev_frame.copy()
-        else:
-            self._frame = Image.new("RGBA", (self._w, self._h), (0, 0, 0, 255))
-        self._frame_canvas = _PillowCanvas(self._frame, self._fonts)
+    def begin_frame(self) -> PillowCanvas:  # override
+        # Always start with a fresh RGBA canvas to ensure proper alpha
+        # blending and transparency. Start with fully transparent (0,0,0,0)
+        # so that semi-transparent elements (like label halos) can blend with
+        # scene elements beneath them. The view will fill the background explicitly.
+        self._frame = Image.new("RGBA", (self._w, self._h), (0, 0, 0, 0))
+        self._frame_canvas = PillowCanvas(self._frame, self._fonts)
         return self._frame_canvas
 
     def end_frame(self) -> None:  # override
@@ -420,6 +319,47 @@ class ILI9341DisplayBackend(DisplayBackend):
         if not self._last_frame_failed:
             with suppress(Exception):
                 self._prev_frame = self._frame.copy()
+            self._last_brightness = brightness
+            self._last_push_ms = now_ms
+
+    def present(self, frame: Image.Image) -> None:
+        """
+        Present a pre-composited RGBA frame to the display.
+
+        This method is used by RenderPipeline to display frames that were
+        composed upstream. It applies the same blink mitigation and recovery
+        logic as end_frame() but receives a pre-rendered RGBA image instead
+        of compositing from layers.
+
+        Args:
+            frame: Pillow RGBA image to display.
+        """
+        if frame is None:
+            return
+        # Compute brightness for skip heuristics
+        brightness = self._compute_brightness(frame)
+        now_ms = time.monotonic() * 1000.0
+        hold_elapsed = now_ms - self._last_push_ms
+
+        # Check blink mitigation conditions
+        if self._frame_hold_ms > 0 and hold_elapsed < self._frame_hold_ms and self._prev_frame is not None:
+            return
+        if self._should_skip_push(getattr(frame, "_frame_canvas_ops", 1), brightness):
+            return
+
+        # Apply rotation if needed
+        img = frame
+        try:
+            if self._flip:
+                img = img.rotate(180)
+        except Exception:
+            img = frame
+
+        # Transmit to panel
+        self._push_raw(img)
+        if not self._last_frame_failed:
+            with suppress(Exception):
+                self._prev_frame = frame.copy()
             self._last_brightness = brightness
             self._last_push_ms = now_ms
 
