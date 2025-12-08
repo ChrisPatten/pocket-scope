@@ -12,9 +12,9 @@ Store runtime arguments here so you can tweak them without editing the service u
 sudo tee /etc/default/pocketscope-live-view >/dev/null <<'EOF'
 POCKETSCOPE_URL="https://adsb.chrispatten.dev/data/aircraft.json"
 POCKETSCOPE_CENTER="42.00748,-71.20899"
-POCKETSCOPE_HOME="/home/pocketscope/.pocketscope"
-POCKETSCOPE_RUNWAYS_FILE="/home/pocketscope/pocket-scope/src/pocketscope/assets/runways.json"
-POCKETSCOPE_RUNWAYS_SQLITE="/home/pocketscope/.pocketscope/runways.sqlite"
+POCKETSCOPE_HOME="$HOME/.pocketscope"
+POCKETSCOPE_RUNWAYS_FILE="$HOME/pocket-scope/src/pocketscope/assets/runways.json"
+POCKETSCOPE_RUNWAYS_SQLITE="$POCKETSCOPE_HOME/runways.sqlite"
 EOF
 ````
 
@@ -33,15 +33,15 @@ StartLimitIntervalSec=60
 
 [Service]
 Type=simple
-User=pocketscope
-WorkingDirectory=/home/pocketscope/pocket-scope
+# Prefer the templated unit `pocketscope@.service` which accepts a username
+# instance and avoids hardcoded paths. Example usage is shown below.
 EnvironmentFile=-/etc/default/pocketscope-live-view
 Environment=PYTHONUNBUFFERED=1
 # Uncomment if you need to target the framebuffer directly:
 # Environment=SDL_VIDEODRIVER=fbcon
 # Environment=SDL_FBDEV=/dev/fb0
 
-ExecStart=/home/pocketscope/pocket-scope/.venv/bin/python -m pocketscope \
+ExecStart=%h/pocket-scope/.venv/bin/python -m pocketscope \
   --url ${POCKETSCOPE_URL} \
   --center ${POCKETSCOPE_CENTER} \
   --tft \
@@ -71,8 +71,13 @@ EOF
 
 ```bash
 sudo systemctl daemon-reload
-sudo systemctl enable pocketscope.service
-sudo systemctl start pocketscope.service
+# To enable for a specific user (for example `pocketscope`) using the
+# templated unit, copy the unit and enable the instance:
+#   sudo cp bootstrap_assets/pocketscope@.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now pocketscope@pocketscope.service
+
+sudo systemctl daemon-reload
 ```
 
 ---
@@ -107,7 +112,8 @@ sudo systemctl restart pocketscope.service
 Good for debugging before relying on systemd:
 
 ```bash
-cd /home/pocketscope/pocket-scope
+.venv/bin/activate
+cd "$HOME/pocket-scope"
 . .venv/bin/activate
 python -m pocketscope \
   --url "https://adsb.chrispatten.dev/data/aircraft.json" \

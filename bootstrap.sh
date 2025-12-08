@@ -70,18 +70,20 @@ python -m pocketscope.data.ingest_geojson_to_sqlite \
   --out "$CONFIG_DIR/pocketscope.db" --replace
 
 echo "==> Configuring systemd service..."
-SERVICE_FILE="/etc/systemd/system/pocketscope.service"
+SERVICE_FILE="/etc/systemd/system/pocketscope@.service"
 ENVIRONMENT_FILE="/etc/default/pocketscope"
+# Install environment defaults (will expand $HOME for the user when sourced)
 sudo cp "$TARGET_DIR/bootstrap_assets/pocketscope.env" "$ENVIRONMENT_FILE"
-sudo cp "$TARGET_DIR/bootstrap_assets/pocketscope.service" "$SERVICE_FILE"
+# Install the templated systemd unit so it can be instantiated per-user
+sudo cp "$TARGET_DIR/bootstrap_assets/pocketscope@.service" "$SERVICE_FILE"
 
 echo "==> Ensuring SPI and GPIO are enabled..."
 sudo raspi-config nonint do_spi 0
-sudo raspi-config nonint do_gpio 0
 
 echo "==> Reloading systemd and enabling service..."
 sudo systemctl daemon-reload
-sudo systemctl enable pocketscope.service
+# Enable the service instance for the current user (useful on single-user Pi)
+sudo systemctl enable --now pocketscope@${USER}.service || true
 
 echo "==> Restarting to apply all changes..."
 shutdown -r now
