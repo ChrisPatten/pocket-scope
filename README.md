@@ -30,6 +30,7 @@ python -m pocketscope [options]
 Common useful options:
 
 - --playback sample_data/demo_adsb.jsonl  Use bundled demo trace instead of live dump1090
+- --file /path/to/aircraft.json          Poll local dump1090-style JSON (bypass HTTP)
 - --fps 15                                Target a different frame rate (default 30)
 - --run-seconds 10                        Run for N seconds then exit (capture perf logs)
 - --web-ui                                Expose simple web view (headless browser mode)

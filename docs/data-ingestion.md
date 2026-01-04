@@ -8,6 +8,14 @@ PocketScope ingests live sensor feeds and recorded datasets into the event bus. 
 
 `ingest/adsb/json_source.py` polls a dump1090-compatible endpoint (typically `http://host/data/aircraft.json`). Key behaviours:
 
+### Local dump1090 JSON file
+
+`ingest/adsb/file_source.py` polls a local dump1090-style `aircraft.json` written by another service.
+
+- Enable with `--file /path/to/aircraft.json` (takes precedence over `--url`, lower than `--playback`).
+- Polls the file at 1 Hz by default, republishing updates without HTTP overhead.
+- Shares payload validation and event publication logic with the live JSON source.
+- Logs and retries with backoff if the file is missing or unreadable.
 
 ### Live dump1090 SBS (TCP 30003)
 

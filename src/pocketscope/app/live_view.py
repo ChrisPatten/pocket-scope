@@ -21,6 +21,7 @@ from pocketscope.core.time import RealTimeSource
 from pocketscope.core.tracks import TrackService
 from pocketscope.data.cache import LRUCache
 from pocketscope.data.sectors import load_sectors_json
+from pocketscope.ingest.adsb import LocalJsonFileSource
 from pocketscope.ingest.adsb.json_source import Dump1090JsonSource
 from pocketscope.ingest.adsb.playback_source import FilePlaybackSource
 from pocketscope.map.data_provider import MapDataProvider
@@ -162,6 +163,8 @@ async def main_async(args: argparse.Namespace) -> None:
     src: SourceProtocol
     if args.playback:
         src = FilePlaybackSource(args.playback, ts=ts, bus=bus, speed=1.0, loop=True)
+    elif args.file:
+        src = LocalJsonFileSource(args.file, bus=bus, poll_hz=1.0)
     else:
         src = Dump1090JsonSource(args.url, bus=bus, poll_hz=1.0)
 
@@ -519,6 +522,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="Path to JSONL ADS-B trace for local playback (overrides --url)",
     )
     p.add_argument(
+        "--file",
+        type=str,
+        default=None,
+        help="Path to local dump1090-style JSON file (overrides --url, bypasses HTTP)",
+    )
+    p.add_argument(
         "--center",
         type=lambda s: tuple(map(float, s.split(","))),
         default=(42.00748, -71.20899),
@@ -662,6 +671,8 @@ async def _main_headless_async(args: argparse.Namespace) -> None:
     src: SourceProtocol
     if args.playback:
         src = FilePlaybackSource(args.playback, ts=ts, bus=bus, speed=1.0, loop=False)
+    elif args.file:
+        src = LocalJsonFileSource(args.file, bus=bus, poll_hz=1.0)
     else:
         src = Dump1090JsonSource(args.url, bus=bus, poll_hz=1.0)
 
