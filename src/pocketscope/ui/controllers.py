@@ -33,16 +33,26 @@ from pocketscope.render.canvas import DisplayBackend
 from pocketscope.render.view_ppi import PpiView, TrackSnapshot
 from pocketscope.settings.schema import Settings
 from pocketscope.settings.store import SettingsStore
-from pocketscope.settings.values import (
-    ALTITUDE_FILTER_BANDS,
-    ALTITUDE_FILTER_CYCLE_ORDER,
-    RANGE_LADDER_NM,
-    TRACK_LENGTH_PRESETS_S,
-    TRACK_SERVICE_DEFAULTS,
-    UNITS_ORDER,
-    ZOOM_LIMITS,
-)
 from pocketscope.ui.softkeys import SoftKeyBar
+
+# Constants for UI defaults
+UNITS_ORDER = ("nm_ft_kt", "mi_ft_mph", "km_m_kmh")
+RANGE_LADDER_NM = (2.0, 5.0, 10.0, 20.0, 40.0, 80.0)
+TRACK_LENGTH_PRESETS_S = (15.0, 45.0, 120.0)
+ALTITUDE_FILTER_BANDS = {
+    "All": (None, None),
+    "0–5k": (0.0, 5000.0),
+    "5–10k": (5000.0, 10000.0),
+    "10–20k": (10000.0, 20000.0),
+    ">20k": (20000.0, None),
+}
+ALTITUDE_FILTER_CYCLE_ORDER = ("All", "0–5k", "5–10k", "10–20k", ">20k")
+TRACK_SERVICE_DEFAULTS = {
+    "trail_len_default_s": 60.0,
+    "trail_len_pinned_s": 180.0,
+    "expiry_s": 300.0,
+}
+ZOOM_LIMITS = {"min_range_nm": 2.0, "max_range_nm": 80.0}
 from pocketscope.ui.status_overlay import StatusOverlay
 from pocketscope.ui.vertical_profile import (
     VerticalProfilePanel,
@@ -244,6 +254,17 @@ class UiController:
         # Preserve original (non-demo) center so we can restore when leaving demo
         self._center_lat_live: float = self._center_lat
         self._center_lon_live: float = self._center_lon
+        
+        # GPS state tracking
+        self._gps_fix: Optional[object] = None  # Latest GpsFix from event bus
+        self._gps_last_update_ts: float = 0.0  # Monotonic timestamp of last GPS update
+        self._gps_valid: bool = False  # Whether GPS fix is valid and fresh
+        self._gps_lat: Optional[float] = None  # Last known GPS latitude
+        self._gps_lon: Optional[float] = None  # Last known GPS longitude
+        
+        # GPS subscription & listener task
+        self._gps_sub: Subscription | None = bus.subscribe("gps.position")
+        self._gps_task: asyncio.Task[None] | None = asyncio.create_task(self._gps_listener())
 
         # Demo playback management
         self._demo_src: FilePlaybackSource | None = None
@@ -572,6 +593,9 @@ class UiController:
 
                     alt_min_ft, alt_max_ft = self.alt_filter
 
+                    # Update center coordinates from GPS with fallback logic
+                    self._update_center_from_gps()
+                    
                     self._overlay.draw(
                         canvas,
                         self._settings,
@@ -579,7 +603,7 @@ class UiController:
                         clock_utc=clock_utc,
                         center_lat=self._center_lat,
                         center_lon=self._center_lon,
-                        gps_ok=True,
+                        gps_ok=self._gps_valid,
                         imu_ok=True,
                         decoder_ok=True,
                         last_update_ts=latest_ts,
@@ -1771,6 +1795,93 @@ class UiController:
                         self._stop_demo_mode()
                 except Exception:
                     pass
+        except asyncio.CancelledError:
+            pass
+
+    def _update_center_from_gps(self) -> None:
+        """
+        Update center coordinates with GPS fallback cascade.
+        
+        Fallback order:
+        1. Current GPS fix (if valid and fresh < 10s)
+        2. Last known GPS position (if < 60s old)
+        3. CLI center argument (preserved in _center_lat_live, _center_lon_live)
+        """
+        import time
+        
+        now = time.monotonic()
+        age = now - self._gps_last_update_ts if self._gps_last_update_ts > 0 else 999.0
+        
+        # Check if GPS fix is fresh (< 10s)
+        if self._gps_valid and age < 10.0 and self._gps_lat is not None and self._gps_lon is not None:
+            # Use current GPS position
+            self._center_lat = self._gps_lat
+            self._center_lon = self._gps_lon
+        elif age < 60.0 and self._gps_lat is not None and self._gps_lon is not None:
+            # Use last known GPS position (< 60s old)
+            self._center_lat = self._gps_lat
+            self._center_lon = self._gps_lon
+            # Mark as not fully valid since it's stale
+            self._gps_valid = False
+        else:
+            # Fall back to CLI center argument
+            self._center_lat = self._center_lat_live
+            self._center_lon = self._center_lon_live
+            self._gps_valid = False
+
+    async def _gps_listener(self) -> None:
+        """
+        Listen for GPS position fixes from event bus and update center coordinates.
+        
+        Implements fallback cascade via _update_center_from_gps():
+        1. Current GPS fix (if valid and fresh < 10s)
+        2. Last known GPS position (if < 60s old)
+        3. CLI center argument (preserved in _center_lat_live, _center_lon_live)
+        """
+        if self._gps_sub is None:
+            return
+        
+        import time
+        from pocketscope.core.models import GpsFix
+        
+        try:
+            async for env in self._gps_sub:
+                try:
+                    # Unpack GPS fix from event bus
+                    data = unpack(env.payload)
+                    gps_fix = GpsFix.model_validate(data)
+                    
+                    # Update GPS state
+                    self._gps_fix = gps_fix
+                    self._gps_last_update_ts = time.monotonic()
+                    
+                    # Validate fix is usable
+                    if gps_fix.lat is not None and gps_fix.lon is not None:
+                        # Basic sanity check
+                        if -90 <= gps_fix.lat <= 90 and -180 <= gps_fix.lon <= 180:
+                            self._gps_lat = float(gps_fix.lat)
+                            self._gps_lon = float(gps_fix.lon)
+                            self._gps_valid = True
+                            
+                            logger.debug(
+                                f"GPS fix: lat={self._gps_lat:.6f}, lon={self._gps_lon:.6f}"
+                            )
+                        else:
+                            logger.warning(
+                                f"GPS coordinates out of range: lat={gps_fix.lat}, lon={gps_fix.lon}"
+                            )
+                            self._gps_valid = False
+                    else:
+                        logger.debug("GPS fix missing coordinates")
+                        self._gps_valid = False
+                    
+                    # Update center coordinates with fallback logic
+                    self._update_center_from_gps()
+                        
+                except Exception as e:
+                    logger.error(f"Error processing GPS fix: {e}")
+                    self._gps_valid = False
+                    
         except asyncio.CancelledError:
             pass
 

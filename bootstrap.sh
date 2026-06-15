@@ -57,6 +57,16 @@ echo "==> Installing project in editable mode with [pi] extra..."
 cd "$TARGET_DIR"
 pip install -e ".[pi]"
 
+echo "==> Installing ps_sensors module for GPS support..."
+if [[ -d "$TARGET_DIR/ps_sensors" ]]; then
+  cd "$TARGET_DIR/ps_sensors"
+  pip install -e ".[pi]"
+  echo "✓ ps_sensors installed successfully"
+else
+  echo "⚠ Warning: ps_sensors directory not found, skipping GPS module installation"
+fi
+cd "$TARGET_DIR"
+
 echo "==> Creating configuration files..."
 CONFIG_DIR="$HOME/.pocketscope"
 mkdir -p "$CONFIG_DIR"

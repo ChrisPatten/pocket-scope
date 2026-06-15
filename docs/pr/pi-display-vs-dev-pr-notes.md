@@ -81,8 +81,6 @@ Modified
 - src/pocketscope/render/sectors_layer.py
 - src/pocketscope/render/view_ppi.py
 - src/pocketscope/settings/schema.py
-- src/pocketscope/settings/values.py
-- src/pocketscope/settings/values.yml
 - src/pocketscope/tools/config_watcher.py
 - src/pocketscope/tools/record_replay.py
 - src/pocketscope/ui/controllers.py
@@ -117,7 +115,7 @@ Potential risks / review focus
 
 - Hardware-only code: `ili9341_backend.py`, `spi_lock.py`, and `xpt2046_touch.py` must be reviewed carefully for race conditions, device locking, and error recovery — these run on Pi-only hardware and are gated by optional dependencies in `pyproject.toml`.
 - Dependency markers: `pyproject.toml` was modified; ensure the conditional pygame vs pygame-ce logic and pi extras remain correct.
-- Settings and schema changes: `settings/schema.py` and `values.yml` changed — confirm any default-setting migrations are backward-compatible and documented.
+- Settings and schema changes: `settings/schema.py` changed — confirm any default-setting migrations are backward-compatible and documented.
 - Tests added: CI may need to skip Pi-hardware tests on non-Pi runners; ensure pytest markers or environment gating are present so CI doesn't fail on GitHub actions runners without hardware.
 - Deleted golden render test: confirm its removal was intentional and replaced by other validations.
 
@@ -129,7 +127,7 @@ Files / areas to review closely
 - src/pocketscope/platform/input/xpt2046_touch.py
 - src/pocketscope/render/view_ppi.py (rendering changes)
 - src/pocketscope/ui/status_overlay.py and softkeys
-- src/pocketscope/settings/* (schema, values.yml)
+- src/pocketscope/settings/* (schema)
 - tests/platform/* (ensure CI gating)
 
 Quick QA / smoke test steps

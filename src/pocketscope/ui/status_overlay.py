@@ -17,11 +17,23 @@ from typing import Any, Callable, Dict, List, Tuple
 from pocketscope.render.canvas import Canvas, Color
 from pocketscope.render.fonts import get_mono
 from pocketscope.settings.schema import Settings
-from pocketscope.settings.values import STATUS_OVERLAY_CONFIG, THEME
 from pocketscope.theme import ThemeManager
 
-# Colors / defaults from theme
-_SO_THEME = THEME.get("colors", {}).get("status_overlay", {}) if isinstance(THEME, dict) else {}
+# Default theme colors for status overlay
+_SO_THEME = {
+    "bg": [32, 32, 32, 180],
+    "text": [255, 255, 255, 255],
+    "border": [255, 255, 255, 255],
+}
+# Status overlay configuration
+STATUS_OVERLAY_CONFIG = {
+    "elements": {
+        "line1": ["GPS", "IMU", "DEC", "RNG"],
+        "line2": ["CLOCK", "LAT", "LON"],
+        "demo_line": "DEMO MODE",
+    },
+    "enabled": True,
+}
 
 
 def _c(v: object, fb: tuple[int, int, int, int]) -> Color:
@@ -172,7 +184,7 @@ class StatusOverlay:
             self._elements_layout = elements_layout
         else:
             # Compact single row: CLOCK | AGE | AC
-            self._elements_layout = [["CLOCK", "AGE", "AC"]]
+            self._elements_layout = [["CLOCK", "GPS", "AGE", "AC"]]
 
     @staticmethod
     def format_alt_filter(
@@ -275,8 +287,10 @@ class StatusOverlay:
             m = (s % 3600) // 60
             return f"Age {h}h{m}m" if m else f"Age {h}h"
 
-        def _elem_gps(ok: bool) -> str:
-            return f"GPS {'ok' if ok else 'x'}"
+        def _elem_gps(ok: bool) -> tuple[str, str, bool]:
+            # Return tuple sentinel for badge rendering: ('GPS', label, ok)
+            label = "GPS"
+            return ("GPS", label, ok)
 
         def _elem_imu(ok: bool) -> str:
             return f"IMU {'ok' if ok else 'x'}"
@@ -520,53 +534,84 @@ class StatusOverlay:
             cell_w = width // n
             for i, text in enumerate(cells):
                 x0 = i * cell_w
-                # If this is a special AGE cell, render a colored rounded
+                # If this is a special AGE or GPS cell, render a colored rounded
                 # badge instead of plain text.
                 # Freshness sentinel is ('AGE', label, age_s)
-                if isinstance(text, tuple) and len(text) >= 2 and text[0] == "AGE":
+                # GPS sentinel is ('GPS', label, ok)
+                if isinstance(text, tuple) and len(text) >= 2 and text[0] in ("AGE", "GPS"):
                     label = str(text[1])
-                    age_val = None
-                    if len(text) >= 3:
-                        try:
-                            age_val = float(text[2]) if text[2] is not None else None
-                        except Exception:
-                            age_val = None
-                    # Determine state from numeric age (if available)
-                    if age_val is None:
-                        state = "STALE"
-                    else:
-                        if age_val < 5.0:
-                            state = "LIVE"
-                        elif age_val < 10.0:
-                            state = "DELAY"
-                        else:
+                    if text[0] == "AGE":
+                        # AGE badge: determine state from numeric age
+                        age_val = None
+                        if len(text) >= 3:
+                            try:
+                                age_val = float(text[2]) if text[2] is not None else None
+                            except Exception:
+                                age_val = None
+                        # Determine state from numeric age (if available)
+                        if age_val is None:
                             state = "STALE"
+                        else:
+                            if age_val < 5.0:
+                                state = "LIVE"
+                            elif age_val < 10.0:
+                                state = "DELAY"
+                            else:
+                                state = "STALE"
+                    else:
+                        # GPS badge: determine state from ok boolean
+                        gps_ok_val = False
+                        if len(text) >= 3:
+                            try:
+                                gps_ok_val = bool(text[2])
+                            except Exception:
+                                gps_ok_val = False
+                        state = "LIVE" if gps_ok_val else "STALE"
 
                     # Badge label and colors per rules
-                    if state == "LIVE":
-                        badge_text = "LIVE"
-                        try:
-                            bg = ThemeManager.color("status.badge.live.bg")
-                            fg = ThemeManager.color("status.badge.live.text")
-                        except Exception:
-                            bg = (0, 160, 0, 255)
-                            fg = (255, 255, 255, 255)
-                    elif state == "DELAY":
-                        badge_text = "DELAY"
-                        try:
-                            bg = ThemeManager.color("status.badge.delay.bg")
-                            fg = ThemeManager.color("status.badge.delay.text")
-                        except Exception:
-                            bg = (255, 165, 0, 255)
-                            fg = (0, 0, 0, 255)
+                    if text[0] == "GPS":
+                        # GPS badge: use label from tuple, state determines colors
+                        badge_text = label
+                        if state == "LIVE":
+                            try:
+                                bg = ThemeManager.color("status.badge.live.bg")
+                                fg = ThemeManager.color("status.badge.live.text")
+                            except Exception:
+                                bg = (0, 160, 0, 255)
+                                fg = (255, 255, 255, 255)
+                        else:
+                            try:
+                                bg = ThemeManager.color("status.badge.stale.bg")
+                                fg = ThemeManager.color("status.badge.stale.text")
+                            except Exception:
+                                bg = (200, 0, 0, 255)
+                                fg = (255, 255, 255, 255)
                     else:
-                        badge_text = "STALE"
-                        try:
-                            bg = ThemeManager.color("status.badge.stale.bg")
-                            fg = ThemeManager.color("status.badge.stale.text")
-                        except Exception:
-                            bg = (200, 0, 0, 255)
-                            fg = (255, 255, 255, 255)
+                        # AGE badge: state determines both label and colors
+                        if state == "LIVE":
+                            badge_text = "LIVE"
+                            try:
+                                bg = ThemeManager.color("status.badge.live.bg")
+                                fg = ThemeManager.color("status.badge.live.text")
+                            except Exception:
+                                bg = (0, 160, 0, 255)
+                                fg = (255, 255, 255, 255)
+                        elif state == "DELAY":
+                            badge_text = "DELAY"
+                            try:
+                                bg = ThemeManager.color("status.badge.delay.bg")
+                                fg = ThemeManager.color("status.badge.delay.text")
+                            except Exception:
+                                bg = (255, 165, 0, 255)
+                                fg = (0, 0, 0, 255)
+                        else:
+                            badge_text = "STALE"
+                            try:
+                                bg = ThemeManager.color("status.badge.stale.bg")
+                                fg = ThemeManager.color("status.badge.stale.text")
+                            except Exception:
+                                bg = (200, 0, 0, 255)
+                                fg = (255, 255, 255, 255)
 
                     # Measure badge text
                     try:
@@ -617,7 +662,7 @@ class StatusOverlay:
                     # Plain text rendering
                     s = text[1] if isinstance(text, tuple) and len(text) >= 2 else str(text)
                     if s == "":
-                        # empty placeholder (used when AGE was already placed)
+                        # empty placeholder (used when AGE/GPS badges were already placed)
                         continue
                     try:
                         tw, th = measure(str(s), self.font_px)

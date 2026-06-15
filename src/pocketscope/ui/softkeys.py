@@ -5,10 +5,14 @@ from __future__ import annotations
 from typing import Callable, Dict, List, Tuple
 
 from pocketscope.render.canvas import Canvas, Color
-from pocketscope.settings.values import THEME
 from pocketscope.theme import ThemeManager
 
-_SK_THEME = THEME.get("colors", {}).get("softkeys", {}) if isinstance(THEME, dict) else {}
+# Default theme colors for softkeys
+_SK_THEME = {
+    "bg": [32, 32, 32, 255],
+    "text": [255, 255, 255, 255],
+    "border": [255, 0, 0, 255],
+}
 
 
 def _c(v: object, fb: tuple[int, int, int, int]) -> Color:

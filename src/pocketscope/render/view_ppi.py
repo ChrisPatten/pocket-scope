@@ -39,8 +39,30 @@ from pocketscope.render.labels import DataBlockFormatter as LabelFormatter
 from pocketscope.render.labels import DataBlockLayout as LabelLayout
 from pocketscope.render.labels import OwnshipRef
 from pocketscope.render.labels import TrackSnapshot as LabelTrack
-from pocketscope.settings.values import AUTO_RING_CONFIG, PPI_CONFIG
 from pocketscope.theme import ThemeManager
+
+# Constants for PPI rendering
+AUTO_RING_CONFIG = {
+    "nice_pattern": [1, 2, 5],
+    "min_gap_fraction": 0.10,
+    "max_inner_rings": 3,
+    "legacy_special_cases": {"10.0": [5.0, 10.0]},
+    "min_exp": -2,
+}
+PPI_CONFIG = {
+    "range_ring_label": {
+        "offset_x_px": 4,
+        "offset_y_px": -8,
+        "char_width_em": 0.6,
+        "padding_px": 4,
+    },
+    "typography": {
+        "label_font_px": 12,
+        "line_gap_px": 2,
+        "block_pad_px": 2,
+    },
+    "rotation_step_deg": 5.0,
+}
 
 if TYPE_CHECKING:  # for type hints only
     from pocketscope.data.sectors import Sector

@@ -1,9 +1,9 @@
 """Runtime configuration helpers.
 
-Small aggregator that centralizes defaults from settings.values and the
-persisted Settings store, and provides a factory to build the UiConfig used
-by callers like the examples. This is intentionally minimal: it returns a
-UiConfig merged from CLI args (when provided) and persisted settings.
+Small aggregator that centralizes defaults and the persisted Settings store,
+and provides a factory to build the UiConfig used by callers like the examples.
+This is intentionally minimal: it returns a UiConfig merged from CLI args
+(when provided) and persisted settings.
 """
 from __future__ import annotations
 
@@ -11,8 +11,59 @@ from dataclasses import dataclass
 from typing import Any, Callable, Optional
 
 from .settings.store import SettingsStore
-from .settings.values import PPI_CONFIG, SETTINGS_SCREEN_CONFIG, THEME, ZOOM_LIMITS
 from .theme import ThemeManager
+
+# Constants for runtime config defaults
+PPI_CONFIG = {
+    "range_ring_label": {
+        "offset_x_px": 4,
+        "offset_y_px": -8,
+        "char_width_em": 0.6,
+        "padding_px": 4,
+    },
+    "typography": {
+        "label_font_px": 12,
+        "line_gap_px": 2,
+        "block_pad_px": 2,
+    },
+    "rotation_step_deg": 5.0,
+}
+SETTINGS_SCREEN_CONFIG = {"font_multiplier": 1.2, "base_font_px": 12}
+THEME = {
+    "colors": {
+        "ppi": {
+            "background": [0, 0, 0, 255],
+            "rings": [80, 80, 80, 255],
+            "ownship": [255, 255, 255, 255],
+            "trails": [0, 180, 255, 180],
+            "aircraft": [255, 255, 0, 255],
+            "labels": [255, 255, 255, 255],
+            "datablock": [0, 255, 0, 255],
+        },
+        "settings_screen": {
+            "bg": [0, 0, 0, 255],
+            "hilite": [0, 120, 0, 255],
+            "text": [255, 255, 255, 255],
+            "title_bg": [24, 24, 24, 255],
+            "title_fg": [255, 255, 255, 255],
+        },
+        "softkeys": {
+            "bg": [32, 32, 32, 255],
+            "text": [255, 255, 255, 255],
+            "border": [255, 0, 0, 255],
+        },
+        "status_overlay": {
+            "bg": [32, 32, 32, 180],
+            "text": [255, 255, 255, 255],
+            "border": [255, 255, 255, 255],
+        },
+        "airports_layer": {
+            "marker": [160, 160, 160, 255],
+            "label": [255, 255, 255, 255],
+        },
+    }
+}
+ZOOM_LIMITS = {"min_range_nm": 2.0, "max_range_nm": 80.0}
 
 
 @dataclass(slots=True)
@@ -43,7 +94,7 @@ def make_ui_config(*, args: Optional[object] = None) -> RuntimeConfig:
     - Only a small set of commonly overridden fields are merged here: range,
       target_fps, overlay, and font_px (the latter returned indirectly).
     """
-    # Baseline defaults from values
+    # Baseline defaults
     ui_cfg = UIData()
     ui_cfg.min_range_nm = float(ZOOM_LIMITS.get("min_range_nm", ui_cfg.min_range_nm))
     ui_cfg.max_range_nm = float(ZOOM_LIMITS.get("max_range_nm", ui_cfg.max_range_nm))

@@ -20,7 +20,7 @@ help:
 deploy:
 	@echo "Deploying to $(PI_HOST)..."
 	rsync -avR --exclude-from='.rsync-exclude' . $(PI_HOST):~/pocket-scope
-	ssh $(PI_HOST) 'sudo systemctl restart pocketscope.service'
+	ssh $(PI_HOST) 'sudo systemctl restart pocketscope@pocketscope.service'
 
 ## Update pi-display branch on device and restart service
 pull-pi:
@@ -29,7 +29,7 @@ pull-pi:
 		git fetch origin && \
 		git checkout pi-display && \
 		git pull origin pi-display && \
-		sudo systemctl restart pocketscope.service
+		sudo systemctl restart pocketscope@pocketscope.service
 
 ## Build or replace local SQLite geo database
 db:
@@ -45,13 +45,13 @@ log-demo:
 
 ## Tail systemd service logs on device via SSH
 logs:
-	@echo "Tailing pocketscope.service logs from $(PI_HOST)... (Ctrl-C to exit)"
-	ssh $(PI_HOST) 'journalctl -u pocketscope.service -f -n $(LOG_LINES)'
+	@echo "Tailing pocketscope@pocketscope.service logs from $(PI_HOST)... (Ctrl-C to exit)"
+	ssh $(PI_HOST) 'journalctl -u pocketscope@pocketscope.service -f -n $(LOG_LINES)'
 
 ## Restart the service on the device
 pi-restart:
-	@echo "Restarting pocketscope.service on $(PI_HOST)..."
-	ssh $(PI_HOST) 'sudo systemctl restart pocketscope.service'
+	@echo "Restarting pocketscope@pocketscope.service on $(PI_HOST)..."
+	ssh $(PI_HOST) 'sudo systemctl restart pocketscope@pocketscope.service'
 
 ## Copy ./bootstrap_assets/settings.yml to device
 pi-settings:

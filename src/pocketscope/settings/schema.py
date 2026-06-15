@@ -7,13 +7,29 @@ from typing import Any, Callable, Dict, List, Literal, Optional, cast
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
-from .values import (
-    ALTITUDE_FILTER_CYCLE_ORDER,
-    PPI_CONFIG,
-    TRACK_LENGTH_PRESETS_S,
-    TRACK_SERVICE_DEFAULTS,
-    UNITS_ORDER,
-)
+# Constants for settings defaults
+UNITS_ORDER = ("nm_ft_kt", "mi_ft_mph", "km_m_kmh")
+TRACK_LENGTH_PRESETS_S = (15.0, 45.0, 120.0)
+ALTITUDE_FILTER_CYCLE_ORDER = ("All", "0–5k", "5–10k", "10–20k", ">20k")
+PPI_CONFIG = {
+    "range_ring_label": {
+        "offset_x_px": 4,
+        "offset_y_px": -8,
+        "char_width_em": 0.6,
+        "padding_px": 4,
+    },
+    "typography": {
+        "label_font_px": 12,
+        "line_gap_px": 2,
+        "block_pad_px": 2,
+    },
+    "rotation_step_deg": 5.0,
+}
+TRACK_SERVICE_DEFAULTS = {
+    "trail_len_default_s": 60.0,
+    "trail_len_pinned_s": 180.0,
+    "expiry_s": 300.0,
+}
 
 # --- Logging and Telemetry models (migrated from settings_schema.py) ---
 

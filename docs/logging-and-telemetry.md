@@ -102,9 +102,10 @@ otherwise the loader will copy the top-level `target_fps` into the telemetry con
 single authoritative value.
 
 Notes on other config files:
-- `src/pocketscope/settings/values.yml` provides numeric ladders, UI layout defaults and nested colour hints
-    used as fallbacks by `values.py` (units, ranges, zoom limits, status overlay elements, etc.). It is not a
-    replacement for theme palettes.
+- Default constants for numeric ladders, UI layout defaults and nested colour hints
+    (units, ranges, zoom limits, status overlay elements, etc.) are now defined inline
+    in the modules that use them (e.g., `settings/schema.py`, `config.py`, `ui/controllers.py`).
+    These are not a replacement for theme palettes.
 - `themes.yml` remains the canonical place for full named theme palettes (the ThemeManager expects a
     `themes.yml` that defines palettes using the flat keys in `Theme.REQUIRED_KEYS`). If you want the full
     UI palette to change, update or add a `themes.yml` in the package or user config directory (see

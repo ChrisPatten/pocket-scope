@@ -85,3 +85,8 @@ telemetry:
 # Set in your ~/.pocketscope/settings.yml to customise the browser view size.
 web_ui_width: 240
 web_ui_height: 320
+
+status_overlay:
+  enabled: true
+  elements:
+    line1: ["CLOCK", "GPS", "AGE", "AC"]

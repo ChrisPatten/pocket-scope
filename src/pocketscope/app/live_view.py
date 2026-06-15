@@ -167,6 +167,27 @@ async def main_async(args: argparse.Namespace) -> None:
         src = LocalJsonFileSource(args.file, bus=bus, poll_hz=1.0)
     else:
         src = Dump1090JsonSource(args.url, bus=bus, poll_hz=1.0)
+    
+    # GPS source (optional, if ps_sensors available and enabled)
+    gps_src: Optional[Any] = None
+    if getattr(args, "enable_gps", False):
+        try:
+            from pocketscope.ingest.gps import PsSensorsGpsSource
+            
+            gps_port = getattr(args, "gps_port", "/dev/serial0")
+            gps_baudrate = getattr(args, "gps_baudrate", 9600)
+            
+            gps_src = PsSensorsGpsSource(
+                bus=bus,
+                poll_hz=1.0,
+                port=gps_port,
+                baudrate=gps_baudrate,
+            )
+            print(f"[live_view] GPS source enabled on {gps_port}")
+        except ImportError as e:
+            print(f"[live_view] ps_sensors not available, GPS disabled: {e}")
+        except Exception as e:
+            print(f"[live_view] Failed to initialize GPS source: {e}")
 
     # Open a window (portrait)
     # Optionally expose the view over HTTP for a simple browser UI
@@ -441,6 +462,12 @@ async def main_async(args: argparse.Namespace) -> None:
     # Run UI and source concurrently; stop others when one exits.
     src_task = asyncio.create_task(src.run(), name="adsb_source")
     ui_task = asyncio.create_task(ui.run(), name="ui")
+    
+    # Start GPS task if enabled
+    gps_task: Optional[asyncio.Task[Any]] = None
+    if gps_src is not None:
+        gps_task = asyncio.create_task(gps_src.run(), name="gps_source")
+        print("[live_view] GPS task started")
 
     # Optional auto-halt for scripted diagnostics (e.g., collect ui.perf).
     run_seconds = getattr(args, "run_seconds", None)
@@ -478,6 +505,19 @@ async def main_async(args: argparse.Namespace) -> None:
         # Best-effort final cleanup.
         await tracks.stop()
         await src.stop()
+        # GPS cleanup
+        if gps_src is not None:
+            try:
+                await gps_src.stop()
+                print("[live_view] GPS source stopped")
+            except Exception as e:
+                print(f"[live_view] Error stopping GPS source: {e}")
+        if gps_task is not None and not gps_task.done():
+            gps_task.cancel()
+            try:
+                await gps_task
+            except asyncio.CancelledError:
+                pass
         # Touch cleanup
         try:
             if touch is not None:
@@ -630,6 +670,26 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         type=str,
         default=None,
         help="Custom pygame window size WxH (e.g. 240x320). Overrides default 480x800",
+    )
+    p.add_argument(
+        "--enable-gps",
+        dest="enable_gps",
+        action="store_true",
+        help="Enable ps_sensors GPS for ownship positioning (requires ps_sensors module)",
+    )
+    p.add_argument(
+        "--gps-port",
+        dest="gps_port",
+        type=str,
+        default="/dev/serial0",
+        help="GPS serial port device (default: /dev/serial0)",
+    )
+    p.add_argument(
+        "--gps-baudrate",
+        dest="gps_baudrate",
+        type=int,
+        default=9600,
+        help="GPS serial baud rate (default: 9600)",
     )
     args = p.parse_args(argv)
     # Post-parse resolution: check env vars for unset CLI args
