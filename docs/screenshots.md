@@ -43,8 +43,8 @@ Example (systemd signal)
 ------------------------
 
 ```bash
-sudo systemctl kill -s SIGUSR1 pocketscope.service
-journalctl -u pocketscope.service -n 20 | grep screenshot
+sudo systemctl kill -s SIGUSR1 pocketscope@pocketscope.service
+journalctl -u pocketscope@pocketscope.service -n 20 | grep screenshot
 ```
 
 Command File Trigger
