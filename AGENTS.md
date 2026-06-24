@@ -312,12 +312,13 @@ Sample data files (JSONL traces, GeoJSON, airports, sectors)
 - `theming.md`: Palette system and customization
 - `logging-and-telemetry.md`: Structured logging, performance metrics
 - `systemd-setup.md`: Pi deployment and service configuration
+- `feeder-setup.md`: Mac-side ADS-B feeder (readsb + JSON server) via pm2
 
 ---
 
 ### `/bootstrap_assets` - Deployment Files
 
-- `pocketscope.service`: systemd unit file for Pi
+- `pocketscope@.service`: templated systemd unit for Pi (instance per user, e.g. `pocketscope@pocketscope.service`)
 - `pocketscope.env`: Environment variables for production
 - `settings.yml`: Default user settings template
 

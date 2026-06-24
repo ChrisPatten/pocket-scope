@@ -89,6 +89,7 @@ Bug reports and feature discussions are welcome via GitHub issues. Please refere
 - [Screenshot automation](docs/screenshots.md)
 - [Logging & telemetry](docs/logging-and-telemetry.md)
 - [Systemd setup guide](docs/systemd-setup.md)
+- [ADS-B feeder setup (pm2)](docs/feeder-setup.md)
 - [Release notes](docs/releases/)
 - [Pull request guidelines](docs/pr/)
 

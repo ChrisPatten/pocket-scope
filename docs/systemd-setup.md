@@ -1,5 +1,13 @@
 # Running PocketScope as a systemd Service
 
+> **⚠️ Needs updating.** This guide still walks through creating a plain
+> `pocketscope.service` inline, but the deployment now uses the **templated**
+> unit `pocketscope@.service` (installed by `bootstrap.sh` and enabled as
+> `pocketscope@pocketscope.service`). The commands below should be rewritten to
+> use the templated instance throughout. See
+> [`bootstrap_assets/pocketscope@.service`](../bootstrap_assets/pocketscope@.service)
+> for the current unit.
+
 This guide shows how to run the live view app from the Pi’s `.venv` as a self-restarting service.
 
 ---
