@@ -9,7 +9,7 @@ library (math).
 from __future__ import annotations
 
 from math import asin, atan2, cos, degrees, isfinite, radians, sin, sqrt
-from typing import Tuple
+from typing import Any, Tuple
 
 __all__ = [
     "WGS84_A",
@@ -21,6 +21,7 @@ __all__ = [
     "geodetic_to_ecef",
     "ecef_to_enu",
     "enu_to_screen",
+    "geodetic_to_enu_batch",
     "range_bearing_from",
 ]
 
@@ -282,6 +283,54 @@ def enu_to_screen(e_east: float, n_north: float, scale_m_per_px: float) -> Tuple
     x = e_east / scale_m_per_px
     y = -n_north / scale_m_per_px
     return (x, y)
+
+
+def geodetic_to_enu_batch(lats: Any, lons: Any, lat0: float, lon0: float) -> Tuple[Any, Any]:
+    """Vectorised geodetic -> local ENU (alt=0) for arrays of points.
+
+    Mirrors :func:`geodetic_to_ecef` followed by :func:`ecef_to_enu` but
+    operates on NumPy arrays, which is ~50-100x faster than calling the scalar
+    helpers in a Python loop over a large boundary ring.
+
+    Args:
+        lats: Array-like of latitudes in degrees.
+        lons: Array-like of longitudes in degrees.
+        lat0: Origin latitude in degrees.
+        lon0: Origin longitude in degrees.
+    Returns:
+        (east, north) float64 NumPy arrays in meters relative to the tangent
+        plane at (lat0, lon0).
+    """
+    import numpy as np
+
+    lat_arr = np.asarray(lats, dtype=np.float64)
+    lon_arr = np.asarray(lons, dtype=np.float64)
+
+    e2 = WGS84_F * (2.0 - WGS84_F)
+    phi = np.radians(lat_arr)
+    lam = np.radians(lon_arr)
+    s = np.sin(phi)
+    c = np.cos(phi)
+    n_rad = WGS84_A / np.sqrt(1.0 - e2 * s * s)
+    x = n_rad * c * np.cos(lam)
+    y = n_rad * c * np.sin(lam)
+    z = n_rad * (1.0 - e2) * s
+
+    x0, y0, z0 = geodetic_to_ecef(lat0, lon0, 0.0)
+    dx = x - x0
+    dy = y - y0
+    dz = z - z0
+
+    phi0 = radians(lat0)
+    lam0 = radians(_normalize_lon(lon0))
+    sphi = sin(phi0)
+    cphi = cos(phi0)
+    slam = sin(lam0)
+    clam = cos(lam0)
+
+    east = -slam * dx + clam * dy
+    north = -sphi * clam * dx - sphi * slam * dy + cphi * dz
+    return east, north
 
 
 def range_bearing_from(lat0: float, lon0: float, lat: float, lon: float) -> Tuple[float, float]:

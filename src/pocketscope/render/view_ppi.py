@@ -30,9 +30,15 @@ from pocketscope.core.geo import (
     ecef_to_enu,
     enu_to_screen,
     geodetic_to_ecef,
+    geodetic_to_enu_batch,
     haversine_nm,
     initial_bearing_deg,
 )
+
+try:  # NumPy powers the vectorised boundary-geometry fast paths.
+    import numpy as _np
+except Exception:  # pragma: no cover - numpy is a core dependency
+    _np = None  # type: ignore[assignment]
 from pocketscope.render.airports_layer import AirportsLayer
 from pocketscope.render.canvas import Canvas, Color
 from pocketscope.render.labels import DataBlockFormatter as LabelFormatter
@@ -46,6 +52,132 @@ if TYPE_CHECKING:  # for type hints only
     from pocketscope.data.sectors import Sector
 
 _PPI_THEME: dict[str, object] = {}
+
+
+def _ring_visible_np(e: Any, n: Any, r2: float) -> bool:
+    """Vectorised test: is any part of a boundary ring within the view radius?
+
+    ``e``/``n`` are ENU vertex coordinates (meters, center origin). Mirrors the
+    original scalar three-phase test: (a) any vertex inside radius, (b) any edge
+    passes within radius of the origin, (c) origin lies inside the polygon
+    (ray cast along +east). ``r2`` is the squared radius in meters^2.
+    """
+    if _np.any((e * e + n * n) <= r2):
+        return True
+    x1, y1 = e, n
+    x2, y2 = _np.roll(e, -1), _np.roll(n, -1)
+    dx = x2 - x1
+    dy = y2 - y1
+    seg2 = dx * dx + dy * dy
+    with _np.errstate(divide="ignore", invalid="ignore"):
+        t = -(x1 * dx + y1 * dy) / seg2
+    t = _np.where(seg2 <= 1e-12, 0.0, _np.clip(t, 0.0, 1.0))
+    px = x1 + t * dx
+    py = y1 + t * dy
+    if _np.any((px * px + py * py) <= r2):
+        return True
+    cond = ((y1 <= 0) & (0 < y2)) | ((y2 <= 0) & (0 < y1))
+    with _np.errstate(divide="ignore", invalid="ignore"):
+        x_int = x1 + (0.0 - y1) * (x2 - x1) / (y2 - y1)
+    crossings = int(_np.count_nonzero(cond & (x_int >= 0)))
+    return (crossings % 2) == 1
+
+
+def _rdp_keep_mask_np(e: Any, n: Any, tol: float) -> Any:
+    """Vectorised iterative Ramer-Douglas-Peucker; returns a boolean keep mask.
+
+    Equivalent to the recursive variant: the kept-vertex set is identical for a
+    given tolerance. The per-segment perpendicular-distance computation is
+    vectorised over all candidate points so each split is O(span) in C, not
+    Python. ``tol`` is in meters.
+    """
+    m = int(e.shape[0])
+    keep = _np.zeros(m, dtype=bool)
+    if m == 0:
+        return keep
+    keep[0] = True
+    keep[-1] = True
+    import math as _math
+
+    stack: list[tuple[int, int]] = [(0, m - 1)]
+    while stack:
+        i0, i1 = stack.pop()
+        if i1 <= i0 + 1:
+            continue
+        ax, ay = float(e[i0]), float(n[i0])
+        bx, by = float(e[i1]), float(n[i1])
+        seg_len = _math.hypot(bx - ax, by - ay)
+        sx = e[i0 + 1 : i1]
+        sy = n[i0 + 1 : i1]
+        if seg_len == 0.0:
+            d = _np.hypot(sx - ax, sy - ay)
+        else:
+            cross = _np.abs((bx - ax) * (ay - sy) - (ax - sx) * (by - ay))
+            d = cross / seg_len
+        k = int(_np.argmax(d))
+        if float(d[k]) > tol:
+            idx = i0 + 1 + k
+            keep[idx] = True
+            stack.append((i0, idx))
+            stack.append((idx, i1))
+    return keep
+
+
+def _simplify_ring_np(
+    ring: list[tuple[float, float]],
+    lat_col: Any,
+    lon_col: Any,
+    dyn_factor: float,
+    m_per_px: float,
+    base_px: float,
+) -> list[tuple[float, float]]:
+    """Vectorised adaptive RDP simplification of a boundary ring.
+
+    Mirrors the original scalar implementation byte-for-byte: same adaptive
+    pixel tolerance (scaled by ``dyn_factor`` and shrunk for small on-screen
+    extents), same ENU projection origin (the ring's first vertex), same RDP
+    tolerance, and the same minimum-retention rule. ``ring`` is the list of
+    (lat, lon) vertices; ``lat_col``/``lon_col`` are the matching NumPy columns.
+    """
+    import math as _math
+
+    n_pts = len(ring)
+    if n_pts < 6:
+        return ring
+    px_tol = base_px * dyn_factor
+    min_lat = float(lat_col.min())
+    max_lat = float(lat_col.max())
+    min_lon = float(lon_col.min())
+    max_lon = float(lon_col.max())
+    try:
+        lat_mid = (min_lat + max_lat) * 0.5
+        m_per_deg_lat = 111_320.0
+        m_per_deg_lon = 111_320.0 * _math.cos(_math.radians(lat_mid))
+        est_w_m = max(1.0, (max_lon - min_lon) * m_per_deg_lon)
+        est_h_m = max(1.0, (max_lat - min_lat) * m_per_deg_lat)
+        est_max_dim_px = max(est_w_m, est_h_m) / m_per_px
+        if est_max_dim_px < 80:
+            scale = max(0.15, est_max_dim_px / 80.0)
+            px_tol *= scale
+        if est_max_dim_px < 30:
+            px_tol *= 0.5
+    except Exception:
+        pass
+    px_tol = max(0.2, min(px_tol, base_px * 8.0))
+    tol_m = px_tol * m_per_px
+
+    lat0, lon0 = ring[0]
+    e_l, n_l = geodetic_to_enu_batch(lat_col, lon_col, lat0, lon0)
+    keep_mask = _rdp_keep_mask_np(e_l, n_l, tol_m)
+    keep_idx = [int(i) for i in _np.nonzero(keep_mask)[0]]
+
+    min_keep = min(12, max(3, int(n_pts * 0.4)))
+    if len(keep_idx) < min_keep:
+        return ring
+    if len(keep_idx) >= 3 and len(keep_idx) < n_pts:
+        return [ring[i] for i in keep_idx]
+    return ring
+
 
 # ---------------------------------------------------------------------------
 # Vertical rate color scale (mirrors vertical_profile gradient).
@@ -250,6 +382,13 @@ class PpiView:
         self._state_screen_cache: list[list[tuple[int, int]]] | None = None
         self._state_cache_signature: tuple[int, int] | None = None
         self._geom_last_rotation: float | None = None
+        # View-change tracking: the state geometry only needs rebuilding when
+        # the view actually moves (range/center/rotation), not on a fixed frame
+        # cadence. A static ownship therefore rebuilds zero times after the
+        # first frame instead of every _geom_interval frames.
+        self._geom_last_range_bucket: int | None = None
+        self._geom_last_center_lat: float | None = None
+        self._geom_last_center_lon: float | None = None
         self.last_geom_decimation_stats: dict[str, int | float | bool] = {}
         # Simplification configuration -------------------------------------------------
         try:
@@ -494,13 +633,37 @@ class PpiView:
             state_sig = (len(_ms_list), id(_ms_list[0]) & 0xFFFF if _ms_list else 0)
         except Exception:
             state_sig = (0, 0)
+        # Detect whether the view (range / center) has actually moved since the
+        # last rebuild. Center drift uses the same ~2px threshold as the geo
+        # projection cache so the two stay consistent.
+        range_bucket = int(round(self.range_nm))
+        view_changed = False
+        if self._geom_last_range_bucket is None or self._geom_last_range_bucket != range_bucket:
+            view_changed = True
+        elif self._geom_last_center_lat is None or self._geom_last_center_lon is None:
+            view_changed = True
+        else:
+            drift_nm = haversine_nm(
+                self._geom_last_center_lat,
+                self._geom_last_center_lon,
+                center_lat,
+                center_lon,
+            )
+            drift_px = (drift_nm * 1852.0) / max(1e-9, m_per_px)
+            if drift_px > 2.0:
+                view_changed = True
+
         need_rebuild = False
         if self._state_screen_cache is None:
             need_rebuild = True
         elif self._state_cache_signature != state_sig:
             need_rebuild = True
-        elif (self._geom_frame_index - self._geom_last_update_frame) >= self._geom_interval:
-            need_rebuild = True
+        elif view_changed:
+            # The view moved -> the cached screen geometry is stale. Honour the
+            # adaptive interval as a floor so continuous panning does not rebuild
+            # more often than the decimation budget allows.
+            if (self._geom_frame_index - self._geom_last_update_frame) >= self._geom_interval:
+                need_rebuild = True
         if not self._geom_decimation_enabled:
             need_rebuild = True
         if self._geom_last_rotation is None or abs(self._geom_last_rotation - self.rotation_deg) >= 0.5:
@@ -609,64 +772,32 @@ class PpiView:
                             for ring in rings:
                                 states_rings_total += 1
                                 state_vertices_raw += len(ring)
-                                # Inclusion strategy (simplified & robust): Always build ENU point list
-                                # and test against (range_m * 1.02) margin.
-                                # Keep if:
-                                #  a) any vertex is inside radius
-                                #  b) any segment comes within radius of origin
-                                #  c) origin lies inside polygon (ray cast)
-                                # This avoids false negatives introduced by earlier bbox shortcut.
+                                if len(ring) < 3:
+                                    continue
+                                r_m = range_m * 1.02  # small margin
+                                r2 = r_m * r_m
+                                # Project the whole ring to ENU once (vectorised);
+                                # reused for both culling and simplification.
+                                lat_col = lon_col = None
+                                if _np is not None:
+                                    try:
+                                        ring_arr = _np.asarray(ring, dtype=_np.float64)
+                                        lat_col = ring_arr[:, 0]
+                                        lon_col = ring_arr[:, 1]
+                                    except Exception:
+                                        lat_col = lon_col = None
+                                # Cull rings outside the view. Keep if (a) any vertex
+                                # is within radius, (b) any edge passes within radius
+                                # of the origin, or (c) the origin is inside the ring.
                                 keep = False
                                 try:
-                                    if len(ring) < 3:
-                                        continue
-                                    r_m = range_m * 1.02  # small margin
-                                    r2 = r_m * r_m
-                                    en_pts: list[tuple[float, float]] = []
-                                    for lat_pt, lon_pt in ring:
-                                        tx, ty, tz = geodetic_to_ecef(lat_pt, lon_pt, 0.0)
-                                        e1, n1, _ = ecef_to_enu(tx, ty, tz, center_lat, center_lon, 0.0)
-                                        en_pts.append((e1, n1))
-                                        if (e1 * e1 + n1 * n1) <= r2:
-                                            keep = True
-                                    if not keep:
-                                        # Segment-circle distance
-                                        for i in range(len(en_pts)):
-                                            x1, y1 = en_pts[i]
-                                            x2, y2 = en_pts[(i + 1) % len(en_pts)]
-                                            dx = x2 - x1
-                                            dy = y2 - y1
-                                            seg_len2 = dx * dx + dy * dy
-                                            if seg_len2 <= 1e-12:
-                                                d2 = x1 * x1 + y1 * y1
-                                            else:
-                                                t = -(x1 * dx + y1 * dy) / seg_len2
-                                                if t < 0:
-                                                    px, py = x1, y1
-                                                elif t > 1:
-                                                    px, py = x2, y2
-                                                else:
-                                                    px = x1 + t * dx
-                                                    py = y1 + t * dy
-                                                d2 = px * px + py * py
-                                            if d2 <= r2:
-                                                keep = True
-                                                break
-                                    if not keep and len(en_pts) >= 3:
-                                        # Point-in-polygon (origin inside)
-                                        crossings = 0
-                                        for i in range(len(en_pts)):
-                                            x1, y1 = en_pts[i]
-                                            x2, y2 = en_pts[(i + 1) % len(en_pts)]
-                                            if (y1 <= 0 < y2) or (y2 <= 0 < y1):
-                                                try:
-                                                    x_int = x1 + (0 - y1) * (x2 - x1) / (y2 - y1)
-                                                except Exception:
-                                                    x_int = x1
-                                                if x_int >= 0:
-                                                    crossings += 1
-                                        if (crossings % 2) == 1:
-                                            keep = True
+                                    if _np is not None and lat_col is not None:
+                                        e_c, n_c = geodetic_to_enu_batch(lat_col, lon_col, center_lat, center_lon)
+                                        keep = _ring_visible_np(e_c, n_c, r2)
+                                    else:
+                                        # NumPy unavailable: keep every ring (the
+                                        # canvas clips off-screen geometry anyway).
+                                        keep = True
                                     if not keep:
                                         continue
                                 except Exception:
@@ -677,91 +808,21 @@ class PpiView:
                                 except Exception:
                                     pass
 
-                                def _simplify(r: list[tuple[float, float]]) -> list[tuple[float, float]]:
-                                    if len(r) < 6:
-                                        return r
-                                    # Adaptive tolerance:
-                                    # Start from configured base pixel tolerance then scale by
-                                    # dyn_factor (higher when FPS low) BUT also shrink for small
-                                    # geographic extents so thin / small states retain shape.
-                                    base_px = self._simplify_base_px
-                                    px_tol = base_px * dyn_factor
-                                    # Estimate on-screen bounding box (approx) by projecting a few points early.
-                                    # We'll approximate geographic size first to avoid extra projections.
-                                    min_lat = min(p[0] for p in r)
-                                    max_lat = max(p[0] for p in r)
-                                    min_lon = min(p[1] for p in r)
-                                    max_lon = max(p[1] for p in r)
-                                    # Rough width/height meters (lat ~111km/deg, lon scaled by cos(lat)).
-                                    try:
-                                        import math as _math
-
-                                        lat_mid = (min_lat + max_lat) * 0.5
-                                        m_per_deg_lat = 111_320.0
-                                        m_per_deg_lon = 111_320.0 * _math.cos(_math.radians(lat_mid))
-                                        est_w_m = max(1.0, (max_lon - min_lon) * m_per_deg_lon)
-                                        est_h_m = max(1.0, (max_lat - min_lat) * m_per_deg_lat)
-                                        est_max_dim_px = max(est_w_m, est_h_m) / m_per_px
-                                        # If the max dimension is small on screen, tighten tolerance.
-                                        if est_max_dim_px < 80:
-                                            scale = max(0.15, est_max_dim_px / 80.0)  # 0..1 -> 0.15..1
-                                            px_tol *= scale
-                                        if est_max_dim_px < 30:
-                                            px_tol *= 0.5  # further tighten for very tiny states
-                                    except Exception:
-                                        pass
-                                    # Safety clamp: never exceed 8 * base nor drop below 0.2 px
-                                    px_tol = max(0.2, min(px_tol, self._simplify_base_px * 8.0))
-                                    tol_m = px_tol * m_per_px
-                                    lat0, lon0 = r[0]
-                                    en_pts: list[tuple[float, float]] = []
-                                    ge0x, ge0y, ge0z = geodetic_to_ecef(lat0, lon0, 0.0)
-                                    for la, lo in r:
-                                        tx, ty, tz = geodetic_to_ecef(la, lo, 0.0)
-                                        e1, n1, _ = ecef_to_enu(tx, ty, tz, lat0, lon0, 0.0)
-                                        en_pts.append((e1, n1))
-                                    import math as _math
-
-                                    def _dist(a: tuple[float, float], b: tuple[float, float]) -> float:
-                                        return _math.hypot(a[0] - b[0], a[1] - b[1])
-
-                                    def _rdp(indices: list[int]) -> list[int]:
-                                        if len(indices) <= 2:
-                                            return indices
-                                        first, last = indices[0], indices[-1]
-                                        a = en_pts[first]
-                                        b = en_pts[last]
-                                        seg_len = _dist(a, b)
-                                        max_d = -1.0
-                                        max_i = None
-                                        for i in indices[1:-1]:
-                                            p = en_pts[i]
-                                            if seg_len == 0:
-                                                d = _dist(a, p)
-                                            else:
-                                                num = abs((b[0] - a[0]) * (a[1] - p[1]) - (a[0] - p[0]) * (b[1] - a[1]))
-                                                d = num / max(1e-12, seg_len)
-                                            if d > max_d:
-                                                max_d = d
-                                                max_i = i
-                                        if max_d > tol_m and max_i is not None:
-                                            left = _rdp(indices[: indices.index(max_i) + 1])
-                                            right = _rdp(indices[indices.index(max_i) :])
-                                            return left[:-1] + right
-                                        return [first, last]
-
-                                    keep_idx = sorted(set(_rdp(list(range(len(en_pts))))))
-                                    # Minimum retention rule: for tiny polygons keep at least 12 vertices
-                                    # (or 40% of original) to avoid visual collapse.
-                                    min_keep = min(12, max(3, int(len(r) * 0.4)))
-                                    if len(keep_idx) < min_keep:
-                                        return r
-                                    if len(keep_idx) >= 3 and len(keep_idx) < len(r):
-                                        return [r[i] for i in keep_idx]
-                                    return r
-
                                 _t_simp_start = time.perf_counter()
-                                ring_s = _simplify(ring)
+                                if _np is not None and lat_col is not None:
+                                    try:
+                                        ring_s = _simplify_ring_np(
+                                            ring,
+                                            lat_col,
+                                            lon_col,
+                                            dyn_factor,
+                                            m_per_px,
+                                            self._simplify_base_px,
+                                        )
+                                    except Exception:
+                                        ring_s = ring
+                                else:
+                                    ring_s = ring
                                 states_simplify_dur += time.perf_counter() - _t_simp_start
                                 state_vertices_out += len(ring_s)
 
@@ -800,6 +861,9 @@ class PpiView:
                     self._state_cache_signature = state_sig
                     self._geom_last_update_frame = self._geom_frame_index
                     self._geom_last_rotation = self.rotation_deg
+                    self._geom_last_range_bucket = range_bucket
+                    self._geom_last_center_lat = center_lat
+                    self._geom_last_center_lon = center_lon
                     # Store detailed rebuild stats for controller logging
                     self.last_state_rebuild_stats = {
                         "rings_total": states_rings_total,
