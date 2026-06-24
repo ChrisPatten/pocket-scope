@@ -7,9 +7,12 @@ StartLimitIntervalSec=60
 
 [Service]
 Type=simple
-# instance name (eg. pocketscope) is available as %i; user's home is %h
+# instance name (eg. pocketscope) is available as %i. NOTE: do not use %h here
+# — in a system service %h expands to the *service manager's* home (/root),
+# not User=%i's home. Since the instance name matches the username, build the
+# home path explicitly as /home/%i (e.g. /home/pocketscope).
 User=%i
-WorkingDirectory=%h/pocket-scope
+WorkingDirectory=/home/%i/pocket-scope
 # Load environment file from /etc/default/pocketscope if present, otherwise
 # fall back to the user's environment (systemd will not expand $HOME in
 # EnvironmentFile, so prefer /etc/default for system-wide installs). Keep the
@@ -18,17 +21,17 @@ EnvironmentFile=-/etc/default/pocketscope
 # Ensure Python output is unbuffered for logs
 Environment=PYTHONUNBUFFERED=1
 
-# Default runtime paths based on the user's home directory (%h). These can be
-# overridden in /etc/default/pocketscope if absolute paths are required.
-Environment=POCKETSCOPE_HOME=%h/.pocketscope
-Environment=POCKETSCOPE_RUNWAYS_SQLITE=%h/.pocketscope/runways.sqlite
-Environment=POCKETSCOPE_RUNWAYS_FILE=%h/pocket-scope/src/pocketscope/assets/runways.json
+# Default runtime paths based on the user's home directory (/home/%i). These
+# can be overridden in /etc/default/pocketscope if absolute paths are required.
+Environment=POCKETSCOPE_HOME=/home/%i/.pocketscope
+Environment=POCKETSCOPE_RUNWAYS_SQLITE=/home/%i/.pocketscope/runways.sqlite
+Environment=POCKETSCOPE_RUNWAYS_FILE=/home/%i/pocket-scope/src/pocketscope/assets/runways.json
 
 # ExecStart: use the per-user home path and a virtualenv if present under
 # the repository. Fall back to the system python using ExecStartPre to
-# detect the venv. For simplicity here, point to %h/pocket-scope/.venv if it
-# exists — administrators should create that venv in the user's repo.
-ExecStart=%h/pocket-scope/.venv/bin/python -m pocketscope \
+# detect the venv. For simplicity here, point to /home/%i/pocket-scope/.venv
+# if it exists — administrators should create that venv in the user's repo.
+ExecStart=/home/%i/pocket-scope/.venv/bin/python -m pocketscope \
   --url ${POCKETSCOPE_URL} \
   --center ${POCKETSCOPE_CENTER} \
   --tft

@@ -49,7 +49,10 @@ Environment=PYTHONUNBUFFERED=1
 # Environment=SDL_VIDEODRIVER=fbcon
 # Environment=SDL_FBDEV=/dev/fb0
 
-ExecStart=%h/pocket-scope/.venv/bin/python -m pocketscope \
+# NOTE: do not use %h here — in a system service it expands to the service
+# manager's home (/root), not your user's. Use an absolute path (adjust the
+# username to match yours).
+ExecStart=/home/pocketscope/pocket-scope/.venv/bin/python -m pocketscope \
   --url ${POCKETSCOPE_URL} \
   --center ${POCKETSCOPE_CENTER} \
   --tft \
