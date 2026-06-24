@@ -8,6 +8,7 @@ heuristics and metrics.
 
 from __future__ import annotations
 
+from collections import OrderedDict
 from dataclasses import dataclass
 from typing import Any, Sequence, Tuple
 
@@ -15,15 +16,28 @@ from PIL import Image, ImageDraw, ImageFont
 
 from pocketscope.render.canvas import Canvas, Color
 
+# Maximum number of rasterised label tiles to retain. Static labels (sector
+# names, cardinals, status text) have a tiny working set; dynamic data-block
+# strings churn but the LRU bound keeps memory flat while still serving repeats.
+_TILE_CACHE_MAX = 1024
+
 
 @dataclass(slots=True)
 class FontCache:
-    """Font cache for efficient TrueType font loading."""
+    """Font cache for efficient TrueType font loading and label rasterisation."""
 
     fonts: dict[int, Any]
+    tiles: "OrderedDict[tuple[str, int], tuple[Any, int, int]]"
 
     def __init__(self) -> None:
         self.fonts = {}
+        # Cache of pre-rendered coverage masks keyed by (text, size_px). Each
+        # value is (L-mode mask image, x_offset, y_offset); the mask is the
+        # antialiasing coverage, independent of color, so a single entry serves
+        # every fill color. Pasting a solid color through the mask at
+        # (pos.x + x_offset, pos.y + y_offset) reproduces ``ImageDraw.text`` —
+        # both blend the fill over the destination by the same 8-bit coverage.
+        self.tiles = OrderedDict()
 
     def get(self, size_px: int) -> Any:
         """Get or load a font at the specified size (pixels).
@@ -64,6 +78,33 @@ class FontCache:
                 f = ImageFont.load_default()
             self.fonts[size_px] = f
         return f
+
+    def text_mask(self, s: str, size_px: int) -> tuple[Any, int, int]:
+        """Return a cached coverage mask for ``s`` plus its paste offset.
+
+        The mask is an L-mode image of the antialiasing coverage. Pasting a
+        solid color through it at ``(pos.x + x_off, pos.y + y_off)`` reproduces
+        ``ImageDraw.text(pos, s)`` pixel-for-pixel: both this routine and
+        ``ImageDraw.text`` use the default "left/ascender" anchor and the same
+        ``textbbox`` metrics, and both blend by the identical 8-bit coverage.
+        """
+        key = (s, int(size_px))
+        cached = self.tiles.get(key)
+        if cached is not None:
+            self.tiles.move_to_end(key)
+            return cached
+        font = self.get(size_px)
+        measure = ImageDraw.Draw(Image.new("L", (1, 1)))
+        left, top, right, bottom = measure.textbbox((0, 0), s, font=font)
+        w = max(1, int(right - left))
+        h = max(1, int(bottom - top))
+        mask = Image.new("L", (w, h), 0)
+        ImageDraw.Draw(mask).text((-left, -top), s, fill=255, font=font)
+        result = (mask, int(left), int(top))
+        self.tiles[key] = result
+        if len(self.tiles) > _TILE_CACHE_MAX:
+            self.tiles.popitem(last=False)
+        return result
 
 
 class PillowCanvas(Canvas):
@@ -180,8 +221,17 @@ class PillowCanvas(Canvas):
             size_px: Font size in pixels.
             color: RGBA color tuple.
         """
-        font = self._fonts.get(size_px)
-        self._draw.text(pos, s, fill=color, font=font)
+        # Multi-line strings and semi-transparent fills take the direct path so
+        # the (alpha-mask) tile paste can guarantee pixel-identity for the common
+        # opaque, single-line case that dominates label rendering.
+        if not s or "\n" in s or (len(color) >= 4 and color[3] < 255):
+            font = self._fonts.get(size_px)
+            self._draw.text(pos, s, fill=color, font=font)
+            self._ops += 1
+            return
+        mask, x_off, y_off = self._fonts.text_mask(s, size_px)
+        fill: Any = color[:3] if self._img.mode == "RGB" else tuple(color)
+        self._img.paste(fill, (int(pos[0]) + x_off, int(pos[1]) + y_off), mask)
         self._ops += 1
 
     def get_op_count(self) -> int:

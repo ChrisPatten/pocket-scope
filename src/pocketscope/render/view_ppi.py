@@ -34,13 +34,18 @@ from pocketscope.core.geo import (
     haversine_nm,
     initial_bearing_deg,
 )
-
-try:  # NumPy powers the vectorised boundary-geometry fast paths.
-    import numpy as _np
-except Exception:  # pragma: no cover - numpy is a core dependency
-    _np = None  # type: ignore[assignment]
 from pocketscope.render.airports_layer import AirportsLayer
 from pocketscope.render.canvas import Canvas, Color
+
+# Vectorised boundary-geometry fast paths live in a shared module so the state
+# and sector overlays cull/simplify identically. Re-exported here for callers
+# (and tests) that historically imported them from ``view_ppi``.
+from pocketscope.render.geom_np import (  # noqa: F401
+    _np,
+    _rdp_keep_mask_np,
+    _ring_visible_np,
+    _simplify_ring_np,
+)
 from pocketscope.render.labels import DataBlockFormatter as LabelFormatter
 from pocketscope.render.labels import DataBlockLayout as LabelLayout
 from pocketscope.render.labels import OwnshipRef
@@ -52,131 +57,6 @@ if TYPE_CHECKING:  # for type hints only
     from pocketscope.data.sectors import Sector
 
 _PPI_THEME: dict[str, object] = {}
-
-
-def _ring_visible_np(e: Any, n: Any, r2: float) -> bool:
-    """Vectorised test: is any part of a boundary ring within the view radius?
-
-    ``e``/``n`` are ENU vertex coordinates (meters, center origin). Mirrors the
-    original scalar three-phase test: (a) any vertex inside radius, (b) any edge
-    passes within radius of the origin, (c) origin lies inside the polygon
-    (ray cast along +east). ``r2`` is the squared radius in meters^2.
-    """
-    if _np.any((e * e + n * n) <= r2):
-        return True
-    x1, y1 = e, n
-    x2, y2 = _np.roll(e, -1), _np.roll(n, -1)
-    dx = x2 - x1
-    dy = y2 - y1
-    seg2 = dx * dx + dy * dy
-    with _np.errstate(divide="ignore", invalid="ignore"):
-        t = -(x1 * dx + y1 * dy) / seg2
-    t = _np.where(seg2 <= 1e-12, 0.0, _np.clip(t, 0.0, 1.0))
-    px = x1 + t * dx
-    py = y1 + t * dy
-    if _np.any((px * px + py * py) <= r2):
-        return True
-    cond = ((y1 <= 0) & (0 < y2)) | ((y2 <= 0) & (0 < y1))
-    with _np.errstate(divide="ignore", invalid="ignore"):
-        x_int = x1 + (0.0 - y1) * (x2 - x1) / (y2 - y1)
-    crossings = int(_np.count_nonzero(cond & (x_int >= 0)))
-    return (crossings % 2) == 1
-
-
-def _rdp_keep_mask_np(e: Any, n: Any, tol: float) -> Any:
-    """Vectorised iterative Ramer-Douglas-Peucker; returns a boolean keep mask.
-
-    Equivalent to the recursive variant: the kept-vertex set is identical for a
-    given tolerance. The per-segment perpendicular-distance computation is
-    vectorised over all candidate points so each split is O(span) in C, not
-    Python. ``tol`` is in meters.
-    """
-    m = int(e.shape[0])
-    keep = _np.zeros(m, dtype=bool)
-    if m == 0:
-        return keep
-    keep[0] = True
-    keep[-1] = True
-    import math as _math
-
-    stack: list[tuple[int, int]] = [(0, m - 1)]
-    while stack:
-        i0, i1 = stack.pop()
-        if i1 <= i0 + 1:
-            continue
-        ax, ay = float(e[i0]), float(n[i0])
-        bx, by = float(e[i1]), float(n[i1])
-        seg_len = _math.hypot(bx - ax, by - ay)
-        sx = e[i0 + 1 : i1]
-        sy = n[i0 + 1 : i1]
-        if seg_len == 0.0:
-            d = _np.hypot(sx - ax, sy - ay)
-        else:
-            cross = _np.abs((bx - ax) * (ay - sy) - (ax - sx) * (by - ay))
-            d = cross / seg_len
-        k = int(_np.argmax(d))
-        if float(d[k]) > tol:
-            idx = i0 + 1 + k
-            keep[idx] = True
-            stack.append((i0, idx))
-            stack.append((idx, i1))
-    return keep
-
-
-def _simplify_ring_np(
-    ring: list[tuple[float, float]],
-    lat_col: Any,
-    lon_col: Any,
-    dyn_factor: float,
-    m_per_px: float,
-    base_px: float,
-) -> list[tuple[float, float]]:
-    """Vectorised adaptive RDP simplification of a boundary ring.
-
-    Mirrors the original scalar implementation byte-for-byte: same adaptive
-    pixel tolerance (scaled by ``dyn_factor`` and shrunk for small on-screen
-    extents), same ENU projection origin (the ring's first vertex), same RDP
-    tolerance, and the same minimum-retention rule. ``ring`` is the list of
-    (lat, lon) vertices; ``lat_col``/``lon_col`` are the matching NumPy columns.
-    """
-    import math as _math
-
-    n_pts = len(ring)
-    if n_pts < 6:
-        return ring
-    px_tol = base_px * dyn_factor
-    min_lat = float(lat_col.min())
-    max_lat = float(lat_col.max())
-    min_lon = float(lon_col.min())
-    max_lon = float(lon_col.max())
-    try:
-        lat_mid = (min_lat + max_lat) * 0.5
-        m_per_deg_lat = 111_320.0
-        m_per_deg_lon = 111_320.0 * _math.cos(_math.radians(lat_mid))
-        est_w_m = max(1.0, (max_lon - min_lon) * m_per_deg_lon)
-        est_h_m = max(1.0, (max_lat - min_lat) * m_per_deg_lat)
-        est_max_dim_px = max(est_w_m, est_h_m) / m_per_px
-        if est_max_dim_px < 80:
-            scale = max(0.15, est_max_dim_px / 80.0)
-            px_tol *= scale
-        if est_max_dim_px < 30:
-            px_tol *= 0.5
-    except Exception:
-        pass
-    px_tol = max(0.2, min(px_tol, base_px * 8.0))
-    tol_m = px_tol * m_per_px
-
-    lat0, lon0 = ring[0]
-    e_l, n_l = geodetic_to_enu_batch(lat_col, lon_col, lat0, lon0)
-    keep_mask = _rdp_keep_mask_np(e_l, n_l, tol_m)
-    keep_idx = [int(i) for i in _np.nonzero(keep_mask)[0]]
-
-    min_keep = min(12, max(3, int(n_pts * 0.4)))
-    if len(keep_idx) < min_keep:
-        return ring
-    if len(keep_idx) >= 3 and len(keep_idx) < n_pts:
-        return [ring[i] for i in keep_idx]
-    return ring
 
 
 # ---------------------------------------------------------------------------
