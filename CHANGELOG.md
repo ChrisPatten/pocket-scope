@@ -19,7 +19,7 @@ ILI9341 SPI TFT handheld build; desktop behaviour is unchanged.
   from SPI activity and fired false-positive resets seconds after startup,
   whiting out the screen. It now measures idleness from frame delivery with a
   5 s timeout, and recovery is serialized through the SPI bus lock. Verified
-  zero spurious recoveries on-device. See `WHITE_SCREEN_DIAGNOSIS.md`.
+  zero spurious recoveries on-device. See [docs/rendering.md](docs/rendering.md).
 - **Autoscale parking at max range with no traffic.** When no aircraft were
   eligible, autoscale ignored `autoscale_max_range_nm`; it now clamps to the
   configured min/max. Default `range_nm` lowered to 50 nm.
