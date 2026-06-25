@@ -12,9 +12,23 @@ from pocketscope.core.geo import (
 from pocketscope.data.sectors import Sector
 from pocketscope.render.canvas import Canvas
 from pocketscope.render.geo_cache import global_cache
+from pocketscope.render.geom_np import _any_within_nm, _np, _simplify_ring_np
 from pocketscope.theme import ThemeManager
 
 logger = logging.getLogger(__name__)
+
+# Pixel tolerance scale for sector-boundary RDP simplification. Sector polygons
+# are sub-pixel-dense airspace outlines; a tolerance of ~base_px * 1.0 strips
+# detail no smaller than a pixel without any visible change, while cutting the
+# per-frame polyline draw cost dramatically. Mirrors the state-boundary path.
+_SECTOR_SIMPLIFY_DYN_FACTOR = 1.0
+_SECTOR_SIMPLIFY_BASE_PX = 0.7
+
+# Module-level cache of (vertex_count, lat_col, lon_col) keyed by the identity
+# of a sector's point list. ``SectorsLayer`` is re-instantiated every frame by
+# the PPI view, so a per-instance cache would never survive; sector geometry is
+# static for the process lifetime, making id()-keyed reuse safe and effective.
+_NP_COLS: dict[int, tuple[int, object, object]] = {}
 
 
 class SectorsLayer:
@@ -28,6 +42,25 @@ class SectorsLayer:
         self._color_override = color
         self.width_px = int(width_px)
         self.show_labels = bool(show_labels)
+
+    def _sector_cols(self, s: Sector) -> tuple[object, object]:
+        """Return cached (lat_col, lon_col) NumPy columns for a sector.
+
+        ``s.points`` is a list of (lat, lon) tuples. The columns are built once
+        and reused across frames; ``(None, None)`` when NumPy is unavailable.
+        """
+        if _np is None:
+            return (None, None)
+        n = len(s.points)
+        cache_key = id(s.points)
+        cached = _NP_COLS.get(cache_key)
+        if cached is not None and cached[0] == n:
+            return (cached[1], cached[2])
+        arr = _np.asarray(s.points, dtype=_np.float64)
+        lat_col = arr[:, 0]
+        lon_col = arr[:, 1]
+        _NP_COLS[cache_key] = (n, lat_col, lon_col)
+        return (lat_col, lon_col)
 
     def draw(
         self,
@@ -92,22 +125,44 @@ class SectorsLayer:
         cache = global_cache()
         total_sectors = len(sectors)
         drawn_sectors = 0
+        cull_nm = 2.0 * range_nm
         for s in sorted(sectors, key=lambda s: s.name):
             if not s.points:
                 continue
-            # Cull: keep if any vertex within 2x range
-            keep = False
-            for lat, lon in s.points:
-                d = haversine_nm(center_lat, center_lon, lat, lon)
-                if d <= (2.0 * range_nm):
-                    keep = True
-                    break
+            # Obtain (cached) NumPy lat/lon columns for this sector.
+            lat_col, lon_col = self._sector_cols(s)
+            # Cull: keep if any vertex within 2x range. Vectorised when NumPy is
+            # available; falls back to the original per-vertex scalar loop.
+            if _np is not None and lat_col is not None:
+                keep = _any_within_nm(lat_col, lon_col, center_lat, center_lon, cull_nm)
+            else:
+                keep = False
+                for lat, lon in s.points:
+                    if haversine_nm(center_lat, center_lon, lat, lon) <= cull_nm:
+                        keep = True
+                        break
             if not keep:
                 continue
             drawn_sectors += 1
 
             def _build() -> list[list[tuple[int, int]]]:
-                pts_local = [to_screen(lat, lon) for (lat, lon) in s.points]
+                # Simplify the high-resolution outline (sub-pixel RDP) before
+                # projecting, so the cached polyline has far fewer vertices to
+                # draw each frame. Simplification only runs on a cache miss.
+                ring = list(s.points)
+                if _np is not None and lat_col is not None:
+                    try:
+                        ring = _simplify_ring_np(
+                            ring,
+                            lat_col,
+                            lon_col,
+                            _SECTOR_SIMPLIFY_DYN_FACTOR,
+                            m_per_px,
+                            _SECTOR_SIMPLIFY_BASE_PX,
+                        )
+                    except Exception:
+                        ring = list(s.points)
+                pts_local = [to_screen(lat, lon) for (lat, lon) in ring]
                 if pts_local and pts_local[0] != pts_local[-1]:
                     pts_local.append(pts_local[0])
                 return [pts_local]

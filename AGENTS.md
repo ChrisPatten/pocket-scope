@@ -2,7 +2,7 @@
 
 > A handheld, Pi-powered ATC-style radar scope for visualizing nearby aircraft via ADS-B decoding, with north-up polar display, GPS positioning, and IMU heading—entirely offline.
 
-**Version:** 0.2.0 | **Python:** 3.11+ | **Architecture:** Clean Architecture + Event-Driven
+**Version:** 0.3.0 | **Python:** 3.11+ | **Architecture:** Clean Architecture + Event-Driven
 
 ---
 
@@ -738,4 +738,4 @@ pre-commit run --all-files          # All checks
 
 ---
 
-**Last Updated**: 2025-11-17 | **Maintainer**: PocketScope Team | **License**: MIT`
+**Last Updated**: 2026-06-25 | **Maintainer**: PocketScope Team | **License**: MIT`

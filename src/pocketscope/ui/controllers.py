@@ -749,25 +749,27 @@ class UiController:
                             **(
                                 (
                                     lambda d: (
-                                        lambda f, g, h: {
-                                            "r_enc_ms": round(f(), 3),
-                                            "r_tx_ms": round(g(), 3),
-                                            "r_fast": int(1 if h() else 0),
-                                        }
-                                    )(
-                                        getattr(d, "last_encode_ms"),
-                                        getattr(d, "last_tx_ms"),
-                                        getattr(d, "last_fast_used"),
-                                    )
-                                    if all(
-                                        callable(getattr(d, n, None))
-                                        for n in (
-                                            "last_encode_ms",
-                                            "last_tx_ms",
-                                            "last_fast_used",
+                                        (
+                                            lambda f, g, h: {
+                                                "r_enc_ms": round(f(), 3),
+                                                "r_tx_ms": round(g(), 3),
+                                                "r_fast": int(1 if h() else 0),
+                                            }
+                                        )(
+                                            getattr(d, "last_encode_ms"),
+                                            getattr(d, "last_tx_ms"),
+                                            getattr(d, "last_fast_used"),
                                         )
+                                        if all(
+                                            callable(getattr(d, n, None))
+                                            for n in (
+                                                "last_encode_ms",
+                                                "last_tx_ms",
+                                                "last_fast_used",
+                                            )
+                                        )
+                                        else {}
                                     )
-                                    else {}
                                 )(self._display)
                             ),
                         },
@@ -2020,8 +2022,16 @@ class UiController:
         extended_metrics = [m for m in metrics if _eligible_for_autoscale(m, ignore_hi=True)]
 
         if not eligible_metrics:
-            # No eligible aircraft -> reset overrides, clamp range, reset debounce
-            clamped = max(cfg_min, min(user_range, cfg_max))
+            # No eligible aircraft -> reset overrides, clamp range, reset
+            # debounce. Respect the autoscale range bounds (not just the
+            # controller ceiling) so a no-traffic view does not zoom out to the
+            # most expensive possible render and starve the frame loop.
+            desired = user_range
+            if autoscale_max_range is not None:
+                desired = min(desired, autoscale_max_range)
+            if autoscale_min_range is not None:
+                desired = max(desired, autoscale_min_range)
+            clamped = max(cfg_min, min(desired, cfg_max))
             self._autoscale_alt_override = None
             self._cfg.range_nm = clamped
             self._autoscale_range_nm = clamped

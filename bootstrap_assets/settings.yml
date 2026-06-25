@@ -1,7 +1,7 @@
 # PocketScope default settings.yml for use on device.
 
 units: nm_ft_kt
-range_nm: 100.0
+range_nm: 50.0
 autoscale_enabled: true
 autoscale_target_visible: 12
 autoscale_min_range_nm: 15.0
